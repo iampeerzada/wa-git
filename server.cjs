@@ -371,8 +371,8 @@ const authenticate = async (req, res, next) => {
             return res.status(403).json({ error: 'User context not found in database.' });
         }
     } catch (e) {
-        console.error(`[Auth] User lookup failed:`, e.message);
-        return res.status(500).json({ error: 'Internal Auth Failure' });
+        console.error(`[Auth] User lookup failed:`, e);
+        return res.status(500).json({ error: 'Internal Auth Failure: ' + e.message });
     }
     
     next();
@@ -1501,6 +1501,7 @@ app.patch('/api/instance/:id/ai', authenticate, async (req, res) => {
         await pool.query('UPDATE instances SET ai_enabled = $1 WHERE id = $2', [req.body.aiEnabled, req.params.id]);
         res.json({ success: true });
     } catch (e) {
+        console.error("SYNC ERROR:", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -1855,7 +1856,12 @@ app.delete('/api/contacts/groups/:id', authenticate, async (req, res) => {
 
 app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) => {
     try {
-        const instanceRes = await pool.query('SELECT meta_waba_id, meta_access_token FROM instances WHERE id = $1 AND user_id = $2', [req.params.instanceId, req.user.id]);
+        const query = req.user.role === 'superadmin' ? 
+            'SELECT meta_waba_id, meta_access_token FROM instances WHERE id = $1' :
+            'SELECT meta_waba_id, meta_access_token FROM instances WHERE id = $1 AND user_id = $2';
+        const params = req.user.role === 'superadmin' ? [req.params.instanceId] : [req.params.instanceId, req.user.id];
+        
+        const instanceRes = await pool.query(query, params);
         if (instanceRes.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
         
         const inst = instanceRes.rows[0];
@@ -1877,6 +1883,7 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         
         res.json({ success: true, count: templates.length });
     } catch (e) {
+        console.error("META TEMPLATE SYNC ERROR:", e);
         res.status(500).json({ error: e.message });
     }
 });
