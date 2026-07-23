@@ -27,6 +27,8 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   const [showTemplates, setShowTemplates] = useState(false);
   const [showMediaLib, setShowMediaLib] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, success: 0, failed: 0, queued: 0 });
+  const [metaTemplates, setMetaTemplates] = useState<any[]>([]);
+  const [selectedMetaTemplate, setSelectedMetaTemplate] = useState<{name: string, language: string} | null>(null);
   const [logs, setLogs] = useState<{ msg: string; type: 'success' | 'error' | 'info' | 'warning' }[]>([]);
   const [viewMode, setViewMode] = useState<'sender' | 'history'>('sender');
   const [historyLogs, setHistoryLogs] = useState<any[]>([]);
@@ -148,6 +150,11 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 complianceMode: true // Signal for backend anti-ban
             }
         };
+
+        if (selectedMetaTemplate) {
+            payload.options.templateName = selectedMetaTemplate.name;
+            payload.options.templateLanguage = selectedMetaTemplate.language;
+        }
 
         if (selectedMedia) {
             payload.mediaUrl = selectedMedia;
@@ -349,7 +356,26 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                           Saved Templates
                         </div>
                         <div className="max-h-60 overflow-y-auto">
-                          {templates.length === 0 ? (
+                          {instances.find(i => i.id === selectedInstance)?.provider === 'meta' ? (
+    <>
+      {metaTemplates.length === 0 ? (
+         <div className="p-4 text-xs text-gray-500 italic text-center">No approved templates found. Sync in Meta Templates tab.</div>
+      ) : (
+         metaTemplates.filter(t => t.status === 'APPROVED').map(tpl => (
+            <button key={tpl.id} onClick={() => {
+                setMessage('[META TEMPLATE] ' + tpl.name);
+                setSelectedMetaTemplate({ name: tpl.name, language: tpl.language });
+                setShowTemplates(false);
+            }} className="w-full text-left p-3 hover:bg-[#2a3942] border-b border-gray-700/50 last:border-0 transition-all">
+                <div className="text-xs font-bold text-white mb-1 truncate">{tpl.name} ({tpl.language})</div>
+                <div className="text-[10px] text-gray-400 line-clamp-2">{tpl.category}</div>
+            </button>
+         ))
+      )}
+    </>
+  ) : (
+    <>
+      {templates.length === 0 ? (
                             <div className="p-4 text-xs text-gray-500 italic text-center">No templates.</div>
                           ) : (
                             templates.map(tpl => (
@@ -362,6 +388,8 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                               </button>
                             ))
                           )}
+    </>
+                        )}
                         </div>
                       </div>
                     )}

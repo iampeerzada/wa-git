@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Bot, Plus, Trash2 } from 'lucide-react';
 
-export default function MetaAutomations({ instances }) {
+export default function MetaAutomations({ instances, currentUser }) {
   const [automations, setAutomations] = useState([]);
   const [selectedInstance, setSelectedInstance] = useState(instances[0]?.id || '');
   const [templates, setTemplates] = useState([]);
@@ -25,7 +25,7 @@ export default function MetaAutomations({ instances }) {
   const fetchAutomations = async () => {
     try {
       const res = await fetch(`/api/automations/${selectedInstance}`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
       if (res.ok) setAutomations(data);
@@ -35,7 +35,7 @@ export default function MetaAutomations({ instances }) {
   const fetchTemplates = async () => {
     try {
       const res = await fetch(`/api/meta/templates/${selectedInstance}`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
       if (res.ok) setTemplates(data);
@@ -47,10 +47,7 @@ export default function MetaAutomations({ instances }) {
     try {
       const res = await fetch(`/api/automations/${selectedInstance}`, {
         method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${localStorage.getItem('token')}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
       if (res.ok) {
@@ -64,7 +61,7 @@ export default function MetaAutomations({ instances }) {
     try {
       const res = await fetch(`/api/automations/${id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       if (res.ok) fetchAutomations();
     } catch (e) {}

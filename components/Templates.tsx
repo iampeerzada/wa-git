@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { RefreshCw, LayoutTemplate } from 'lucide-react';
 
-export default function Templates({ instances }) {
+export default function Templates({ instances, currentUser }) {
   const [templates, setTemplates] = useState([]);
   const [selectedInstance, setSelectedInstance] = useState(instances[0]?.id || '');
   const [loading, setLoading] = useState(false);
@@ -13,7 +13,7 @@ export default function Templates({ instances }) {
   const fetchTemplates = async () => {
     try {
       const res = await fetch(`/api/meta/templates/${selectedInstance}`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
       if (res.ok) setTemplates(data);
@@ -24,7 +24,7 @@ export default function Templates({ instances }) {
     setLoading(true);
     try {
       const res = await fetch(`/api/meta/templates/sync/${selectedInstance}`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       if (res.ok) fetchTemplates();
     } catch (e) {}

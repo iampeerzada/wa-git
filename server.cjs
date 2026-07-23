@@ -1850,6 +1850,77 @@ app.delete('/api/contacts/groups/:id', authenticate, async (req, res) => {
     }
 });
 
+
+// --- META TEMPLATES & AUTOMATIONS ---
+
+app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) => {
+    try {
+        const instanceRes = await pool.query('SELECT meta_waba_id, meta_access_token FROM instances WHERE id = $1 AND user_id = $2', [req.params.instanceId, req.user.id]);
+        if (instanceRes.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
+        
+        const inst = instanceRes.rows[0];
+        if (!inst.meta_waba_id || !inst.meta_access_token) return res.status(400).json({ error: 'Not a properly configured Meta instance' });
+
+        const url = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates`;
+        const fetchRes = await fetch(url, { headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } });
+        const json = await fetchRes.json();
+        
+        if (!fetchRes.ok || json.error) throw new Error(json.error?.message || 'Meta API Error');
+        
+        const templates = json.data || [];
+        for (const t of templates) {
+            await pool.query(
+                'INSERT INTO meta_templates (id, instance_id, name, language, status, category, components) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (instance_id, name, language) DO UPDATE SET status = EXCLUDED.status, components = EXCLUDED.components',
+                [t.id, req.params.instanceId, t.name, t.language, t.status, t.category, JSON.stringify(t.components)]
+            );
+        }
+        
+        res.json({ success: true, count: templates.length });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/meta/templates/:instanceId', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM meta_templates WHERE instance_id = $1 ORDER BY created_at DESC', [req.params.instanceId]);
+        res.json(result.rows);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/automations/:instanceId', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM automations WHERE instance_id = $1 ORDER BY created_at DESC', [req.params.instanceId]);
+        res.json(result.rows);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/automations/:instanceId', authenticate, async (req, res) => {
+    try {
+        const { keyword, match_type, reply_type, text_content, media_url, template_name, template_language } = req.body;
+        await pool.query(
+            'INSERT INTO automations (instance_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [req.params.instanceId, keyword, match_type, reply_type, text_content, media_url, template_name, template_language]
+        );
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/automations/:id', authenticate, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM automations WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- AUTO RESPONDER ---
 
 app.get('/api/auto-responder', authenticate, async (req, res) => {
