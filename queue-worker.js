@@ -196,7 +196,15 @@ const setupWorker = (instancesMap) => {
                     text: { body: finalMessage || ' ' }
                 };
                 
-                if (mediaUrl) {
+                // If a template is provided in the job data, use it!
+                if (options?.templateName) {
+                    msgData.type = "template";
+                    msgData.template = {
+                        name: options.templateName,
+                        language: { code: options.templateLanguage || 'en' }
+                    };
+                    delete msgData.text;
+                } else if (mediaUrl) {
                     msgData.type = mediaType || "image";
                     msgData[msgData.type] = { link: mediaUrl };
                     if (finalMessage) msgData[msgData.type].caption = finalMessage;

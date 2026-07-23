@@ -958,6 +958,52 @@ app.post('/api/meta/webhook', async (req, res) => {
                         }).catch(e => console.error('[Meta Webhook Out] Error:', e.message));
                     }
                     
+                    // Process Automations
+                    if (text && fromMe === false) {
+                        try {
+                            const autoRes = await pool.query('SELECT * FROM automations WHERE instance_id = $1', [instanceId]);
+                            for (const rule of autoRes.rows) {
+                                let match = false;
+                                const keyword = rule.keyword.toLowerCase();
+                                const msgText = text.toLowerCase();
+                                if (rule.match_type === 'exact' && msgText === keyword) match = true;
+                                else if (rule.match_type === 'contains' && msgText.includes(keyword)) match = true;
+                                
+                                if (match) {
+                                    console.log(`[Meta Automation] Match found for ${from}`);
+                                    let msgData = {
+                                        messaging_product: "whatsapp",
+                                        recipient_type: "individual",
+                                        to: from.replace(/[^0-9]/g, '')
+                                    };
+                                    
+                                    if (rule.reply_type === 'text') {
+                                        msgData.type = 'text';
+                                        msgData.text = { body: rule.text_content };
+                                    } else if (rule.reply_type === 'template') {
+                                        msgData.type = 'template';
+                                        msgData.template = {
+                                            name: rule.template_name,
+                                            language: { code: rule.template_language }
+                                        };
+                                    }
+                                    
+                                    await fetch(`https://graph.facebook.com/v20.0/${instance.meta_phone_number_id}/messages`, {
+                                        method: 'POST',
+                                        headers: {
+                                            'Authorization': `Bearer ${instance.meta_access_token}`,
+                                            'Content-Type': 'application/json'
+                                        },
+                                        body: JSON.stringify(msgData)
+                                    });
+                                    break; // Only trigger first matching rule
+                                }
+                            }
+                        } catch (e) {
+                            console.error('[Automation Error]', e.message);
+                        }
+                    }
+
                     if (instance.ai_enabled && process.env.GEMINI_API_KEY && text) {
                         console.log('[Meta AI] Generating reply for', from);
                         const { GoogleGenAI } = require("@google/genai");
@@ -2237,6 +2283,30 @@ async function startup() {
             ALTER TABLE instances ADD COLUMN IF NOT EXISTS qr_code TEXT;
             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_max_instances INT;
             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_daily_limit INT;
+            CREATE TABLE IF NOT EXISTS meta_templates (
+                id VARCHAR(100) PRIMARY KEY,
+                instance_id VARCHAR(50),
+                name VARCHAR(255),
+                language VARCHAR(20),
+                status VARCHAR(50),
+                category VARCHAR(50),
+                components JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(instance_id, name, language)
+            );
+            CREATE TABLE IF NOT EXISTS automations (
+                id SERIAL PRIMARY KEY,
+                instance_id VARCHAR(50),
+                keyword VARCHAR(255),
+                match_type VARCHAR(20) DEFAULT 'exact',
+                reply_type VARCHAR(20) DEFAULT 'text',
+                text_content TEXT,
+                media_url TEXT,
+                template_name VARCHAR(255),
+                template_language VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
         `);
     } catch (e) {
         console.warn("[iFastX] Startup Schema Update Notice:", e.message);
