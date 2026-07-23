@@ -122,6 +122,12 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ limit: '150mb', extended: true }));
 
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+app.use('/uploads', express.static(uploadsDir));
+
 // Database Pool
 const pool = new Pool({ 
     connectionString: DATABASE_URL,
@@ -1699,11 +1705,27 @@ app.post('/api/upload', authenticate, async (req, res) => {
     const { fileName, fileType, base64 } = req.body;
     if (!base64) return res.status(400).json({ error: 'No file data provided' });
     
-    // In a real environment, you would save this to S3 or a local storage folder.
-    // For this demonstration, we return a Data URI which is compatible with the frontend logic.
-    const url = `data:${fileType};base64,${base64}`;
-    res.json({ url });
+    try {
+        const uniqueName = Date.now() + '-' + fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const uploadsDir = path.join(process.cwd(), 'uploads');
+        if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+        
+        const filePath = path.join(uploadsDir, uniqueName);
+        fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+        
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.headers.host;
+        const baseUrl = process.env.APP_URL || (protocol + '://' + host);
+        const url = baseUrl + '/uploads/' + uniqueName;
+        
+        res.json({ url });
+    } catch (e) {
+        console.error("Upload error:", e);
+        res.status(500).json({ error: 'Failed to upload file' });
+    }
 });
+    
+    
 
 app.post('/api/media', authenticate, async (req, res) => {
     const { id, name, url, type } = req.body;
@@ -1868,10 +1890,13 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         if (!inst.meta_waba_id || !inst.meta_access_token) return res.status(400).json({ error: 'Not a properly configured Meta instance' });
 
         const url = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates`;
-        const fetchRes = await fetch(url, { headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } });
+                const fetchRes = await fetch(url, { headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } });
         const json = await fetchRes.json();
         
-        if (!fetchRes.ok || json.error) throw new Error(json.error?.message || 'Meta API Error');
+        if (!fetchRes.ok || json.error) {
+            console.error("Meta API returned error:", JSON.stringify(json));
+            throw new Error(json.error?.message || 'Meta API Error');
+        }
         
         const templates = json.data || [];
         for (const t of templates) {
