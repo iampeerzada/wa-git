@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, RefreshCw } from 'lucide-react';
+import { Plus, RefreshCw, Menu } from 'lucide-react';
 import { InstanceStatus, WhatsAppInstance, MessageTemplate, ContactGroup, User, UserRole, Plan, PlanInterval, Subscription, MediaAsset, Permission } from './types';
 import Dashboard from './components/Dashboard';
 import CodeSnippets from './components/CodeSnippets';
@@ -79,6 +79,7 @@ const App: React.FC = () => {
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem('wa_active_tab', activeTab);
@@ -583,21 +584,38 @@ const App: React.FC = () => {
           planName={plans.find(p => p.id === currentUser.subscription?.planId)?.name || ''}
         />
       )}
-    <div className="flex h-screen bg-[#0b141a] text-gray-200 overflow-hidden">
-      <Sidebar 
-        activeTab={activeTab} 
-        onTabChange={setActiveTab} 
-        currentUser={currentUser} 
-        allUsers={users}
-        onUserSwitch={setCurrentUser}
-        hiddenModules={hiddenModules}
-      />
+    <div className="flex h-[100dvh] bg-[#0b141a] text-gray-200 overflow-hidden">
+      {/* Mobile Overlay */}
+      {isSidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
       
-      <main className="flex-1 flex flex-col overflow-hidden">
-        <header className="h-16 border-b border-gray-800 flex items-center justify-between px-8 bg-[#111b21]">
-          <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold text-white capitalize">{activeTab.replace('-', ' ')}</h1>
-            <span className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold border ${
+      {/* Sidebar - responsive */}
+      <div className={`fixed inset-y-0 left-0 z-50 h-full transform transition-transform duration-300 lg:relative lg:translate-x-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <Sidebar 
+          activeTab={activeTab} 
+          onTabChange={(tab) => { setActiveTab(tab); setIsSidebarOpen(false); }} 
+          currentUser={currentUser} 
+          allUsers={users}
+          onUserSwitch={setCurrentUser}
+          hiddenModules={hiddenModules}
+        />
+      </div>
+      
+      <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        <header className="h-16 shrink-0 border-b border-gray-800 flex items-center justify-between px-4 lg:px-8 bg-[#111b21]">
+          <div className="flex items-center gap-3 lg:gap-4">
+            <button 
+              className="lg:hidden p-1 text-gray-400 hover:text-white"
+              onClick={() => setIsSidebarOpen(true)}
+            >
+              <Menu size={24} />
+            </button>
+            <h1 className="text-lg md:text-xl font-bold text-white capitalize">{activeTab.replace('-', ' ')}</h1>
+            <span className={`hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold border ${
                 currentUser.role === UserRole.SUPERADMIN ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20' :
                 currentUser.role === UserRole.RESELLER ? 'bg-purple-500/10 text-purple-500 border-purple-500/20' :
                 'bg-blue-500/10 text-blue-500 border-blue-500/20'
@@ -605,7 +623,7 @@ const App: React.FC = () => {
               {(currentUser.role || 'user').toUpperCase()}: {currentUser.username}
             </span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-4">
             <div className="hidden lg:flex flex-col items-end">
                 <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest">API Endpoint Status</span>
                 <code className={`text-[10px] font-mono ${isBackendConnected ? 'text-[#25D366]' : 'text-red-500'}`}>
@@ -624,13 +642,13 @@ const App: React.FC = () => {
                 className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-green-500/20"
             >
                 <Plus size={20} />
-                Provision Instance
+                <span className="hidden sm:inline">Provision Instance</span>
             </button>
-            <button onClick={handleLogout} className="text-gray-500 hover:text-white text-xs font-bold px-3 uppercase tracking-widest">Logout</button>
+            <button onClick={handleLogout} className="hidden sm:block text-gray-500 hover:text-white text-xs font-bold px-3 uppercase tracking-widest">Logout</button>
           </div>
         </header>
 
-        <div className={`flex-1 ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-8 overflow-y-auto'}`}>
+        <div className={`flex-1 min-h-0 ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain'}`}>
           {activeTab === 'dashboard' && (
             <Dashboard 
               instances={visibleInstances} 

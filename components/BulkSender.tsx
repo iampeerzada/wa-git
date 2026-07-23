@@ -46,7 +46,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     } else {
         setMetaTemplates([]);
     }
-  }, [selectedInstance]);
+  }, [selectedInstance, instances]);
 
   const fetchMetaTemplates = async () => {
     try {
@@ -234,7 +234,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       <div className="flex bg-[#111b21] p-1 rounded-xl border border-gray-800 w-fit mb-6">
         <button
           onClick={() => setViewMode('sender')}
-          className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-2 px-4 py-2 md:px-6 md:py-2.5 rounded-lg text-sm font-bold transition-all ${
             viewMode === 'sender'
               ? 'bg-[#25D366] text-black shadow-lg shadow-[#25D366]/20'
               : 'text-gray-400 hover:text-white hover:bg-white/5'
@@ -245,7 +245,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         </button>
         <button
           onClick={() => setViewMode('history')}
-          className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-2 px-4 py-2 md:px-6 md:py-2.5 rounded-lg text-sm font-bold transition-all ${
             viewMode === 'history'
               ? 'bg-[#25D366] text-black shadow-lg shadow-[#25D366]/20'
               : 'text-gray-400 hover:text-white hover:bg-white/5'
@@ -269,7 +269,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       )}
 
       {isSending && (
-          <div className="bg-blue-500/10 border border-blue-500/30 p-5 rounded-2xl flex items-center justify-between mb-6 animate-pulse">
+          <div className="bg-blue-500/10 border border-blue-500/30 p-5 rounded-2xl flex items-center justify-between flex-wrap gap-4 mb-6 animate-pulse">
               <div className="flex items-center gap-4">
                   <Activity className="text-blue-400" size={24} />
                   <div>
@@ -302,19 +302,19 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <div className="xl:col-span-2 space-y-6">
           <div className="bg-[#111b21] rounded-2xl border border-gray-800 p-8 shadow-2xl">
-            <h2 className="text-xl font-bold text-white mb-6 flex items-center justify-between">
+            <h2 className="text-lg md:text-xl font-bold text-white mb-6 flex items-center justify-between flex-wrap gap-4">
               <div className="flex items-center gap-3">
                 <Send className="text-[#25D366]" />
                 Campaign Configuration
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 {showQuickButtons && (
                   <button 
                     onClick={addQuickButton}
                     className="text-[10px] font-black uppercase text-purple-400 bg-purple-400/10 px-3 py-1.5 rounded-lg flex items-center gap-2 hover:bg-purple-400/20 transition-all border border-purple-500/20"
                   >
                     <Zap size={14} />
-                    Temporary Button
+                    Button
                   </button>
                 )}
 
@@ -447,7 +447,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               </div>
 
               {selectedMedia && (
-                <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl flex items-center justify-between animate-in fade-in slide-in-from-left-2">
+                <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl flex items-center justify-between flex-wrap gap-4 animate-in fade-in slide-in-from-left-2">
                    <div className="flex items-center gap-3">
                      <ImageIcon className="text-blue-400" size={20} />
                      <div>
@@ -464,7 +464,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               {activeButtons.length > 0 && (
                 <div className="p-4 bg-purple-500/5 border border-purple-500/20 rounded-xl flex flex-col gap-3 animate-in fade-in slide-in-from-left-2">
                   <div className="w-full flex justify-between items-center mb-1">
-                    <p className="text-[10px] text-gray-500 uppercase font-black">Interactive Buttons Attached (Temporary)</p>
+                    <p className="text-[10px] text-gray-500 uppercase font-black">Interactive Buttons Attached</p>
                     <button onClick={() => setActiveButtons([])} className="text-xs text-red-500 font-bold hover:underline">Clear All</button>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
@@ -491,7 +491,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                         />
                         {(btn.type === 'url' || btn.type === 'call') && (
                             <input 
-                                value={btn.url || btn.phoneNumber || ''}
+                                value={btn.type === 'url' ? (btn.url || '') : (btn.phoneNumber || '')}
                                 onChange={(e) => {
                                     const val = e.target.value;
                                     setActiveButtons(prev => prev.map(b => b.id === btn.id ? (btn.type === 'url' ? { ...b, url: val } : { ...b, phoneNumber: val }) : b));
@@ -533,7 +533,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 <button 
                   onClick={handleStartBulk}
                   disabled={isSending || liveInstances.length === 0 || isSuspended}
-                  className="flex-1 bg-[#25D366] hover:bg-[#128c7e] disabled:opacity-30 text-[#0b141a] py-4 rounded-xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all shadow-lg shadow-green-500/10"
+                  className="flex-1 bg-[#25D366] hover:bg-[#128c7e] disabled:opacity-30 text-[#0b141a] py-3 md:py-4 rounded-xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all shadow-lg shadow-green-500/10"
                 >
                   {isSending ? <Pause size={20} /> : <Play size={20} />}
                   {isSending ? 'Drip-feeding...' : 'Launch Campaign'}
@@ -560,7 +560,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               <div className="absolute inset-0 opacity-[0.03] pointer-events-none bg-[url('https://i.pinimg.com/originals/ab/ab/60/abab600fbc0650f166e70e97b4a1e483.png')] bg-repeat" />
               
               <div className="relative z-10 flex flex-col h-full">
-                <div className="flex items-center justify-between mb-4 pb-2 border-b border-gray-800/50">
+                <div className="flex items-center justify-between flex-wrap gap-4 mb-4 pb-2 border-b border-gray-800/50">
                   <div className="flex items-center gap-2">
                     <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center">
                        <Smartphone size={16} className="text-gray-400" />
@@ -661,7 +661,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
           </div>
 
           <div className="bg-[#111b21] rounded-2xl border border-gray-800 p-6 shadow-xl">
-            <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4 flex items-center justify-between">
+            <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4 flex items-center justify-between flex-wrap gap-4">
               <span>Campaign Staggering</span>
               {progress.total > 0 && <span className="text-[10px] font-mono text-gray-500">{progress.current}/{progress.total} Pushed</span>}
             </h3>
@@ -672,15 +672,15 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               <div className="grid grid-cols-3 gap-2">
                 <div className="bg-[#202c33] p-3 rounded-xl text-center border border-transparent hover:border-blue-500/20 transition-all">
                   <p className="text-[10px] text-gray-500 font-black uppercase">Staggered</p>
-                  <p className="text-xl font-bold text-blue-400">{progress.success}</p>
+                  <p className="text-lg md:text-xl font-bold text-blue-400">{progress.success}</p>
                 </div>
                 <div className="bg-[#202c33] p-3 rounded-xl text-center border border-transparent hover:border-yellow-500/20 transition-all">
                   <p className="text-[10px] text-gray-500 font-black uppercase">Drip-Feed</p>
-                  <p className="text-xl font-bold text-yellow-500">{progress.queued}</p>
+                  <p className="text-lg md:text-xl font-bold text-yellow-500">{progress.queued}</p>
                 </div>
                 <div className="bg-[#202c33] p-3 rounded-xl text-center border border-transparent hover:border-red-500/20 transition-all">
                   <p className="text-[10px] text-gray-500 font-black uppercase">Rejected</p>
-                  <p className="text-xl font-bold text-red-500">{progress.failed}</p>
+                  <p className="text-lg md:text-xl font-bold text-red-500">{progress.failed}</p>
                 </div>
               </div>
 
@@ -727,7 +727,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       </div>
 
       <div className="bg-[#111b21] rounded-2xl border border-gray-800 overflow-hidden shadow-2xl">
-        <div className="px-6 py-4 border-b border-gray-800 flex justify-between items-center bg-[#202c33]/30">
+        <div className="px-6 py-3 md:py-4 border-b border-gray-800 flex justify-between items-center bg-[#202c33]/30">
           <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest">Compliance Logs</h3>
           <span className="text-[10px] font-mono text-gray-500 uppercase">{progress.current} / {progress.total}</span>
         </div>
@@ -749,7 +749,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         </>
       ) : (
         <div className="bg-[#111b21] rounded-2xl border border-gray-800 overflow-hidden shadow-2xl">
-          <div className="px-6 py-4 border-b border-gray-800 flex justify-between items-center bg-[#202c33]/30">
+          <div className="px-6 py-3 md:py-4 border-b border-gray-800 flex justify-between items-center bg-[#202c33]/30">
             <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest">Campaign History Logs</h3>
             <span className="text-[10px] font-mono text-gray-500 uppercase">
               {historyLogs.length} Records
@@ -765,19 +765,19 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 <div className="grid grid-cols-4 gap-4 mb-6">
                     <div className="bg-[#202c33] p-4 rounded-xl border-l-4 border-gray-600">
                         <p className="text-[10px] text-gray-500 font-black uppercase">Total Stack Logs</p>
-                        <p className="text-2xl font-bold text-gray-300">{historyLogs.length}</p>
+                        <p className="text-lg md:text-xl md:text-2xl font-bold text-gray-300">{historyLogs.length}</p>
                     </div>
                     <div className="bg-[#202c33] p-4 rounded-xl border-l-4 border-[#25D366]">
                         <p className="text-[10px] text-gray-500 font-black uppercase">Total Delivered</p>
-                        <p className="text-2xl font-bold text-[#25D366]">{historyLogs.filter((l: any) => l.status === 'delivered' || l.status === 'success').length}</p>
+                        <p className="text-lg md:text-xl md:text-2xl font-bold text-[#25D366]">{historyLogs.filter((l: any) => l.status === 'delivered' || l.status === 'success').length}</p>
                     </div>
                     <div className="bg-[#202c33] p-4 rounded-xl border-l-4 border-red-500">
                         <p className="text-[10px] text-gray-500 font-black uppercase">Total Failed</p>
-                        <p className="text-2xl font-bold text-red-500">{historyLogs.filter((l: any) => l.status === 'failed').length}</p>
+                        <p className="text-lg md:text-xl md:text-2xl font-bold text-red-500">{historyLogs.filter((l: any) => l.status === 'failed').length}</p>
                     </div>
                     <div className="bg-[#202c33] p-4 rounded-xl border-l-4 border-yellow-500">
                         <p className="text-[10px] text-gray-500 font-black uppercase">Total Queued/Pending</p>
-                        <p className="text-2xl font-bold text-yellow-500">{historyLogs.filter((l: any) => l.status !== 'delivered' && l.status !== 'success' && l.status !== 'failed').length}</p>
+                        <p className="text-lg md:text-xl md:text-2xl font-bold text-yellow-500">{historyLogs.filter((l: any) => l.status !== 'delivered' && l.status !== 'success' && l.status !== 'failed').length}</p>
                     </div>
                 </div>
                 <div className="overflow-x-auto">

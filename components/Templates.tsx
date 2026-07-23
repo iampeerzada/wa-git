@@ -51,7 +51,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
   return (
     <div className="p-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-        <h2 className="text-2xl font-bold">Meta Templates</h2>
+        <h2 className="text-lg md:text-xl md:text-2xl font-bold">Meta Templates</h2>
         <div className="flex flex-wrap gap-4">
           <select 
             value={selectedInstance} 
@@ -114,7 +114,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
               <div className="w-16 h-16 bg-[#2a3942] rounded-full flex items-center justify-center mb-4 text-gray-500">
                 <LayoutTemplate size={32} />
               </div>
-              <h3 className="text-xl font-semibold text-gray-200 mb-2">No templates found</h3>
+              <h3 className="text-lg md:text-xl font-semibold text-gray-200 mb-2">No templates found</h3>
               <p className="text-gray-400 text-center max-w-md mb-6">
                 Your approved WhatsApp templates will appear here. Click the sync button above to fetch them from your Meta Business account.
               </p>

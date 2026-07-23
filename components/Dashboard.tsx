@@ -60,7 +60,7 @@ const Dashboard: React.FC<DashboardProps> = ({
         <div className="w-20 h-20 bg-[#202c33] rounded-full flex items-center justify-center mb-4 text-gray-500">
           <MessageSquare size={40} />
         </div>
-        <h2 className="text-xl font-bold text-white mb-2">No API Instances Provisioned</h2>
+        <h2 className="text-lg md:text-xl font-bold text-white mb-2">No API Instances Provisioned</h2>
         <p className="text-gray-400 max-w-xs">Start your reseller business by creating your first WhatsApp Instance.</p>
       </div>
     );

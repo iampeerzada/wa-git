@@ -214,8 +214,9 @@ const setupWorker = (instancesMap) => {
                 if (!options?.templateName && waButtons && waButtons.length > 0) {
                     const replyButtons = waButtons.filter(b => b.type === 'reply').slice(0, 3);
                     const urlButton = waButtons.find(b => b.type === 'url' || b.type === 'link');
+                    const callButton = waButtons.find(b => b.type === 'call');
                     
-                    if (replyButtons.length > 0 && !urlButton) {
+                    if (replyButtons.length > 0) {
                         msgData.type = 'interactive';
                         msgData.interactive = {
                             type: 'button',
@@ -235,17 +236,23 @@ const setupWorker = (instancesMap) => {
                         }
                         delete msgData.text;
                         delete msgData[mediaType || "image"];
-                    } else if (urlButton) {
+                    } else if (urlButton || callButton) {
                         msgData.type = 'interactive';
+                        const actionParameters = urlButton ? {
+                            display_text: urlButton.displayText,
+                            url: urlButton.url || urlButton.phoneNumber
+                        } : {
+                            display_text: callButton.displayText,
+                            phone_number: callButton.phoneNumber || callButton.url
+                        };
+                        const actionName = urlButton ? 'cta_url' : 'cta_call';
+                        
                         msgData.interactive = {
-                            type: 'cta_url',
+                            type: actionName,
                             body: { text: finalMessage || ' ' },
                             action: {
-                                name: 'cta_url',
-                                parameters: {
-                                    display_text: urlButton.displayText,
-                                    url: urlButton.url
-                                }
+                                name: actionName,
+                                parameters: actionParameters
                             }
                         };
                         if (mediaUrl) {
@@ -257,100 +264,7 @@ const setupWorker = (instancesMap) => {
                         delete msgData.text;
                         delete msgData[mediaType || "image"];
                     }
-                }
-                
-                const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${instance.metaAccessToken}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(msgData)
-                });
-                
-                const metaJson = await metaRes.json();
-                
-                if (!metaRes.ok || metaJson.error) {
-                    throw new Error(metaJson.error?.message || 'Meta API Error');
-                }
-                
-                await pool.query(
-                  'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                  [userId, instanceId, number, 'delivered', metaJson.messages?.[0]?.id || 'meta_msg', finalMessage]
-                );
-                
-                sent = true;
-                break;
-            }
-
-            const footerText = options?.footer || '';
-            const headerTitle = options?.header || '';
-
-            // --- DND / Working Hours Logic ---
-            if (options?.complianceMode) {
-                const currentHour = new Date().getHours();
-                if (currentHour >= 0 && currentHour < 7) {
-                    console.log(`[Worker] Night Mode Active (Hour: ${currentHour}). Sleeping for 20-30 mins.`);
-                    await humanJitter(1200000, 1800000); // 20-30 mins
-                }
-
-                // 0. REAL HUMAN SIMULATION: Random Batch Control (3-5 messages)
-                const batchCountKey = `safety_batch_count:${instanceId}`;
-                const batchLimitKey = `safety_batch_limit:${instanceId}`;
-                
-                // Fetch or Set Dynamic Limit
-                let limit = await connection.get(batchLimitKey);
-                if (!limit) {
-                    limit = Math.floor(Math.random() * 3) + 3; // Random 3, 4, or 5
-                    await connection.set(batchLimitKey, limit, 'EX', 600);
-                }
-                
-                const currentCount = await connection.incr(batchCountKey);
-                await connection.expire(batchCountKey, 600); // Keep alive
-
-                if (currentCount >= parseInt(limit)) {
-                   // STOP FUNCTION: Variable Long Break (2 min -> 3 min -> 2 min pattern)
-                   // Logic: We use a separate counter to track how many *breaks* this instance has taken
-                   const breakCounterKey = `safety_break_count:${instanceId}`;
-                   const breakCount = await connection.incr(breakCounterKey);
-                   await connection.expire(breakCounterKey, 3600);
-
-                   const isEvenBreak = breakCount % 2 === 0;
-                   const minDelay = isEvenBreak ? 180000 : 120000; // 3 mins or 2 mins
-                   const maxDelay = isEvenBreak ? 185000 : 125000; 
-                   
-                   console.log(`[Worker] Instance ${instanceId} reached batch limit ${limit}. Pausing for ~${minDelay/1000}s.`);
-                   await humanJitter(minDelay, maxDelay);
-
-                   // Reset Batch
-                   await connection.set(batchCountKey, 0, 'EX', 600);
-                   // Set NEW random limit for next batch
-                   const newLimit = Math.floor(Math.random() * 3) + 3;
-                   await connection.set(batchLimitKey, newLimit, 'EX', 600);
-                }
-
-                // 1. COMPLIANCE LAYER: Randomized Jitter (Delay Function) before any action
-                // User Request: "delay of 5-15sec of every messages"
-                await humanJitter(5000, 15000);
-
-                // 2. HUMAN SIMULATION: Realistic Presence Flow
-                if (options?.simulateTyping !== false) {
-                    try {
-                        // A. Read Receipts (Simulate opening chat)
-                        const lastMsg = await pool.query(
-                            'SELECT id FROM chat_messages WHERE remote_jid = $1 AND from_me = false ORDER BY timestamp DESC LIMIT 1',
-                            [jid]
-                        );
-                        
-                        if (lastMsg.rows.length > 0) {
-                            const key = {
-                                remoteJid: jid,
-                                id: lastMsg.rows[0].id,
-                                fromMe: false
-                            };
-                            await sock.readMessages([key]);
-                        }
-                    } catch (readErr) {
+                } catch (readErr) {
                         // Ignore errors if read receipt fails
                     }
 
@@ -386,7 +300,8 @@ const setupWorker = (instancesMap) => {
                       name: 'cta_call',
                       buttonParamsJson: JSON.stringify({
                         display_text: btn.displayText,
-                        phone_number: btn.phoneNumber || btn.url
+                        id: btn.phoneNumber || btn.url || "1234567890",
+                        phone_number: btn.phoneNumber || btn.url || "1234567890"
                       })
                     };
                   } else {

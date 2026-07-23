@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
     
     <!-- Favicon / Brand Identity -->
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMjVEMzY2IiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTIyIDE2LjkydjNBMiAyIDAgMCAxIDIxLjE4IDIyYTE5Ljc5IDE5Ljc5IDAgMCAxLTguNjMtMy4wNyAxOS41IDE5LjUgMCAwIDEtNi02IDE5Ljc5IDE5Ljc5IDAgMCAxLTMuMDctOC42N0EyIDIgMCAwIDEgNC4xMSAyaDNBMiAyIDAgMCAxIDkgNGMuLjEuNS4yIDEgLjM0IDEuNTJhMiAyIDAgMCAxLS40NSAyLjI0TDIgMjhBMTYgMTYgMCAwIDAgMTMgMTZsMi4zMyAxLjIzYTIgMiAwIDAgMSAyLjI0LS40NWMuNS4xNCAxIC4yNCAxLjUyLjM0QTIgMiAwIDAgMSAyMiAxNi45MnoiLz48cGF0aCBkPSJNMTEgNGE4LjM4IDguMzggMCAwIDEgNSA1IiBzdHJva2U9IiNGNUExMEYiLz48cGF0aCBkPSJNMTEgMWExMS4zNiAxMS4zNiAwIDAgMSA4IDgiIHN0cm9rZT0iI0Y1QTEwRiIvPjwvc3ZnPg==">
@@ -68,9 +68,25 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; scroll-behavior: smooth; }
+        html, body { font-family: 'Inter', sans-serif; scroll-behavior: smooth; overscroll-behavior-y: none; overflow: hidden; width: 100%; height: 100%; }
         /* Professional SEO Content - Hidden from visual UI but available for crawlers */
         .seo-reader-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+    
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+          background: #0b141a; 
+        }
+        ::-webkit-scrollbar-thumb {
+          background: #2a3942; 
+          border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+          background: #32444f; 
+        }
     </style>
     <script type="importmap">
 {

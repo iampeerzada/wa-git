@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layout, MessageSquare, Terminal, Code, Send, FileText, Users, Book, ShieldCheck, CreditCard, Image as ImageIcon, MessageCircleCode, Infinity, UserCog } from 'lucide-react';
+import { Layout, MessageSquare, Terminal, Code, Send, FileText, Users, Book, ShieldCheck, CreditCard, Image as ImageIcon, MessageCircleCode, Infinity, UserCog, LogOut } from 'lucide-react';
 import { User, UserRole, Permission } from '../types';
 import BrandLogo from './BrandLogo';
 
@@ -47,12 +47,12 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
   });
 
   return (
-    <aside className="w-64 bg-[#111b21] border-r border-gray-800 flex flex-col">
+    <aside className="w-64 h-full bg-[#111b21] border-r border-gray-800 flex flex-col">
       <div className="p-6 flex items-center pr-2">
         <BrandLogo size="sm" className="scale-90 origin-left" />
       </div>
 
-      <nav className="flex-1 px-4 py-4 space-y-1 overflow-y-auto">
+      <nav className="flex-1 px-4 py-3 md:py-4 space-y-1 overflow-y-auto">
         {filteredMenuItems.map((item) => (
           <button
             key={item.id}
@@ -70,8 +70,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
       </nav>
 
       {/* Role Switcher for Demo Purposes */}
-      <div className="p-4 border-t border-gray-800 bg-[#0b141a]/50">
-        <div className="space-y-3">
+      <div className="p-3 lg:p-4 border-t border-gray-800 bg-[#0b141a]/50">
+        <div className="space-y-2 lg:space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Simulate Role</span>
             <ShieldCheck size={12} className="text-gray-600" />
@@ -82,7 +82,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
               const user = allUsers.find(u => u.id === e.target.value);
               if (user) onUserSwitch(user);
             }}
-            className="w-full bg-[#202c33] border border-gray-700 rounded-lg px-3 py-2 text-xs text-white focus:ring-1 ring-[#25D366] outline-none"
+            className="w-full bg-[#202c33] border border-gray-700 rounded-lg px-2 py-1.5 lg:px-3 lg:py-2 text-[10px] lg:text-xs text-white focus:ring-1 ring-[#25D366] outline-none"
           >
             {allUsers.map(u => (
               <option key={u.id} value={u.id}>{u.role.toUpperCase()}: {u.username}</option>
@@ -91,8 +91,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
         </div>
       </div>
 
-      <div className="p-4 border-t border-gray-800">
-        <div className="p-3 bg-[#202c33] rounded-lg">
+      <div className="p-3 lg:p-4 border-t border-gray-800">
+        <div className="p-2 lg:p-3 bg-[#202c33] rounded-lg">
           <p className="text-[10px] text-gray-500 mb-1 uppercase font-black">Account Type</p>
           <div className={`inline-block px-2 py-0.5 rounded text-[10px] font-black uppercase ${
               currentUser.role === UserRole.SUPERADMIN ? 'bg-yellow-500/10 text-yellow-500' :
@@ -106,6 +106,19 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
             {currentUser.subscription?.planId ? currentUser.subscription.planId.replace('p_', '') : 'Trial'}
           </p>
         </div>
+      </div>
+    
+      <div className="p-3 lg:p-4 border-t border-gray-800">
+        <button 
+            onClick={() => {
+                localStorage.removeItem('wa_token');
+                window.location.reload();
+            }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-gray-500 hover:text-red-500 hover:bg-red-500/10 font-bold transition-all sm:hidden"
+        >
+            <LogOut size={20} />
+            Logout
+        </button>
       </div>
     </aside>
   );

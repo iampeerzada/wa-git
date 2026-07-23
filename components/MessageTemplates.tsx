@@ -285,7 +285,7 @@ const MessageTemplates: React.FC<MessageTemplatesProps> = ({ templates, setTempl
             <div className="flex justify-end gap-3 pt-4">
               <button 
                 onClick={() => { setIsAdding(false); setEditingId(null); }}
-                className="px-6 py-2.5 text-gray-400 hover:text-white font-bold transition-all"
+                className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all"
               >
                 Cancel
               </button>

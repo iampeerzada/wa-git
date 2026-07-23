@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, X, Tag, Plus, Trash2, Filter, LayoutTemplate } from 'lucide-react';
+import { Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft } from 'lucide-react';
 import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel } from '../types';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
@@ -406,13 +406,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   return (
     <div className="flex h-full bg-[#0b141a] overflow-hidden border-t border-gray-800">
       {/* Sidebar */}
-      <div className="w-[380px] border-r border-gray-800 flex flex-col bg-[#111b21]">
+      <div className={`w-full md:w-[380px] border-r border-gray-800 flex-col bg-[#111b21] ${selectedSession ? "hidden md:flex" : "flex"}`}>
         {/* Instance Selector */}
-        <div className="p-4 border-bottom border-gray-800 space-y-3">
+        <div className="p-4 border-b border-gray-800 space-y-3">
           <select
             value={selectedInstanceId}
             onChange={(e) => setSelectedInstanceId(e.target.value)}
-            className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 ring-[#25D366]"
+            className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-3 py-2 min-h-[40px] text-sm outline-none focus:ring-1 ring-[#25D366] "
           >
             <option value="">Select Instance</option>
             {instances.filter(i => i.status === 'open').map(i => (
@@ -427,7 +427,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               <select
                 value={selectedLabelFilter}
                 onChange={(e) => setSelectedLabelFilter(e.target.value)}
-                className="w-full bg-[#202c33] text-gray-300 pl-9 pr-2 py-2 rounded-lg text-xs outline-none border border-gray-700 appearance-none"
+                className="w-full bg-[#202c33] text-gray-300 pl-9 pr-2 py-2 min-h-[36px] rounded-lg text-xs outline-none border border-gray-700 "
               >
                 <option value="">All Chats</option>
                 {labels.map(l => (
@@ -513,7 +513,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         </div>
 
         {/* Sessions List */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto overscroll-y-contain">
           {filteredSessions.length === 0 ? (
             <div className="p-8 text-center text-gray-500 text-sm">
               No conversations found
@@ -535,12 +535,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                   )}
                 </div>
                 <div className="flex-1 min-w-0 text-left">
-                  <div className="flex justify-between items-baseline">
+                  <div className="flex justify-between items-baseline gap-2 min-w-0">
                     <h3 className="text-sm font-medium text-gray-100 truncate">
                       {profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid)}
                     </h3>
                     {session.lastMessage && (
-                      <span className="text-[10px] text-gray-500">
+                      <span className="text-[10px] text-gray-500 shrink-0">
                         {formatTime(session.lastMessage.timestamp)}
                       </span>
                     )}
@@ -572,12 +572,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       </div>
 
       {/* Chat Area */}
-      <div className="flex-1 flex flex-col bg-[#0b141a] relative">
+      <div className={`flex-1 min-w-0 flex-col bg-[#0b141a] relative ${!selectedSession ? "hidden md:flex" : "flex"}`}>
+
         {selectedSession ? (
           <>
             {/* Header */}
             <div className="h-16 bg-[#202c33] flex items-center justify-between px-4 border-b border-gray-800">
               <div className="flex items-center gap-3">
+                <button onClick={() => setSelectedSession(null)} className="md:hidden p-1 -ml-2 text-gray-400 hover:text-white"><ArrowLeft size={20} /></button>
                 <div className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-gray-300 overflow-hidden">
                   {profileCache[selectedSession.remoteJid]?.imgUrl ? (
                       <img src={profileCache[selectedSession.remoteJid].imgUrl} alt="" className="w-full h-full object-cover" />
@@ -726,7 +728,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                   )}
                               </div>
                           )}
-                          <p className="pr-16 whitespace-pre-wrap leading-relaxed px-1">{msg.text}</p>
+                          <p className="pr-16 whitespace-pre-wrap leading-relaxed px-1 break-words">{msg.text}</p>
                           <div className="absolute bottom-1 right-1.5 flex items-center gap-1">
                             <span className="text-[9px] text-gray-400 font-medium">
                               {formatTime(msg.timestamp)}

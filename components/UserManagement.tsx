@@ -310,7 +310,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-3">
+          <h2 className="text-lg md:text-xl font-bold text-white flex items-center gap-3">
             <Users className="text-[#25D366]" />
             {currentUser.role === UserRole.RESELLER ? 'My Sub-Admins' : 'Global User Directory'}
           </h2>
@@ -425,7 +425,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
             </div>
           </div>
           <div className="flex justify-end gap-3 mt-8">
-            <button onClick={() => setIsAdding(false)} className="px-6 py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
+            <button onClick={() => setIsAdding(false)} className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
             <button 
               onClick={handleAddUser} 
               disabled={isProcessing === 'creating'}
@@ -570,7 +570,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-[#111b21] rounded-2xl border border-gray-800 p-6 w-full max-w-3xl shadow-2xl overflow-y-auto max-h-[90vh]">
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-bold text-white flex items-center gap-2">
+              <h3 className="text-lg md:text-xl font-bold text-white flex items-center gap-2">
                 <Edit2 className="text-blue-500" />
                 Edit User: {editingUser.username}
               </h3>
@@ -672,7 +672,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
             </div>
 
             <div className="flex justify-end gap-3 mt-8 pt-6 border-t border-gray-800">
-              <button onClick={() => setEditingUser(null)} className="px-6 py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
+              <button onClick={() => setEditingUser(null)} className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
               <button 
                 onClick={handleSaveEdit} 
                 disabled={isProcessing === 'editing'}

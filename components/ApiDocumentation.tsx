@@ -341,6 +341,35 @@ Verify if a number exists on WhatsApp before sending.
           </div>
         </div>
       )
+
+    },
+    {
+      id: 'meta-api',
+      title: 'Meta API Integration',
+      icon: <Layers size={20} className="text-pink-400" />,
+      content: (
+        <div className="space-y-6">
+          <p className="text-gray-400 text-sm">
+            For Meta instances, you can configure your own Meta App webhook to connect your applications directly to our gateway.
+          </p>
+          <div className="space-y-4">
+            <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl">
+              <h4 className="text-xs font-black text-white uppercase mb-4 flex items-center gap-2">
+                <Globe size={14} className="text-pink-400" />
+                Meta Webhook URL
+              </h4>
+              <p className="text-xs text-gray-400 mb-3">Set this URL in your Meta App Dashboard under Webhooks (WhatsApp Business Account):</p>
+              <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-gray-800">
+                <code className="text-pink-400 text-[11px] font-mono truncate">{apiBase}/api/meta/webhook</code>
+                <button onClick={() => handleCopy(`${apiBase}/api/meta/webhook`, 'meta-webhook')} className="text-gray-500 hover:text-white transition-colors shrink-0">
+                  {copied === 'meta-webhook' ? <Check size={14} className="text-pink-400" /> : <Copy size={14} />}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-500 mt-3">Verify Token: <strong>ifastx_meta_verify_2024</strong> (or any value)</p>
+            </div>
+          </div>
+        </div>
+      )
     }
   ];
 
@@ -351,7 +380,7 @@ Verify if a number exists on WhatsApp before sending.
   return (
     <div className="max-w-7xl mx-auto pb-20 animate-in fade-in duration-500">
       {/* Dynamic Context Header */}
-      <div className="sticky top-0 z-50 bg-[#0b141a]/95 backdrop-blur-xl border-b border-gray-800 pb-6 mb-10 pt-4 -mx-4 px-4 rounded-b-3xl shadow-2xl">
+      <div className="relative lg:sticky lg:top-0 z-40 lg:z-50 bg-[#0b141a]/95 backdrop-blur-xl border-b border-gray-800 pb-6 mb-10 pt-4 -mx-4 px-4 rounded-b-3xl lg:rounded-none shadow-2xl lg:shadow-none">
         <div className="flex flex-col lg:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 bg-[#25D366]/10 rounded-2xl flex items-center justify-center text-[#25D366] border border-[#25D366]/20">
@@ -410,7 +439,7 @@ Verify if a number exists on WhatsApp before sending.
 
       <div className="flex flex-col lg:flex-row gap-12">
         {/* Navigation Sidebar */}
-        <nav className="lg:w-72 shrink-0 space-y-1 sticky top-32 h-fit">
+        <nav className="lg:w-72 shrink-0 space-y-1 lg:sticky lg:top-32 h-fit">
           <p className="px-4 mb-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Documentation Root</p>
           {sections.map(s => (
             <a 

@@ -234,7 +234,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
             </div>
             <div className="flex justify-between items-start mb-8">
               <div>
-                <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+                <h2 className="text-lg md:text-xl md:text-2xl font-bold text-white flex items-center gap-3">
                   <CreditCard className="text-[#25D366]" />
                   Active Subscription
                 </h2>
@@ -283,7 +283,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
                Dynamic Scaling
              </div>
           </div>
-          <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-3">
+          <h2 className="text-lg md:text-xl font-bold text-white mb-6 flex items-center gap-3">
             <MessageCircle className="text-blue-400" />
             Customize Message Topup / Solo Instance Plan
           </h2>
@@ -309,7 +309,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
               <div>
                 <div className="flex justify-between items-center mb-4">
                   <label className="text-xs font-black text-gray-500 uppercase tracking-widest">Daily Message Count</label>
-                  <span className="text-2xl font-black text-white">{customMsgCount} <span className="text-xs text-gray-500">Msgs/Day</span></span>
+                  <span className="text-lg md:text-xl md:text-2xl font-black text-white">{customMsgCount} <span className="text-xs text-gray-500">Msgs/Day</span></span>
                 </div>
                 <input 
                   type="range" 
@@ -348,7 +348,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
                
                <button 
                 onClick={() => initiatePayment(customPrice, `Topup ${customMsgCount} Msgs`, true)}
-                className="mt-8 w-full bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-xl font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-3"
+                className="mt-8 w-full bg-blue-600 hover:bg-blue-500 text-white py-3 md:py-4 rounded-xl font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-3"
                >
                  <IndianRupee size={18} />
                  Checkout with Razorpay
@@ -366,7 +366,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
       <div className="space-y-6">
         <div className="flex justify-between items-center">
           <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-3">
+            <h2 className="text-lg md:text-xl font-bold text-white flex items-center gap-3">
               <Layers className="text-[#25D366]" />
               {isSuper ? 'Enterprise Plan Management' : 'Standard Renewal Tiers'}
             </h2>
@@ -490,7 +490,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
                     <IconComp size={24} />
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-white">{plan.name}</h3>
+                    <h3 className="text-lg md:text-xl font-bold text-white">{plan.name}</h3>
                     {plan.description && <p className="text-[10px] text-gray-500 line-clamp-1">{plan.description}</p>}
                   </div>
                 </div>
@@ -523,14 +523,14 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
                 ) : currentUser.subscription.planId !== plan.id ? (
                   <button 
                     onClick={() => initiatePayment(plan.price, plan.name)}
-                    className="w-full bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] py-4 rounded-2xl font-black uppercase tracking-widest transition-all shadow-lg shadow-green-500/20"
+                    className="w-full bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] py-3 md:py-4 rounded-2xl font-black uppercase tracking-widest transition-all shadow-lg shadow-green-500/20"
                   >
                     Switch Tier
                   </button>
                 ) : (
                   <button 
                     disabled
-                    className="w-full bg-gray-800 text-gray-500 py-4 rounded-2xl font-black uppercase tracking-widest cursor-not-allowed"
+                    className="w-full bg-gray-800 text-gray-500 py-3 md:py-4 rounded-2xl font-black uppercase tracking-widest cursor-not-allowed"
                   >
                     Currently Subscribed
                   </button>

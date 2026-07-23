@@ -76,7 +76,7 @@ export default function MetaAutomations({ instances, currentUser, apiBase }) {
   return (
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold flex items-center gap-2"><Bot /> Meta Automations</h2>
+        <h2 className="text-lg md:text-xl md:text-2xl font-bold flex items-center gap-2"><Bot /> Meta Automations</h2>
         <select 
           value={selectedInstance} 
           onChange={(e) => setSelectedInstance(e.target.value)}

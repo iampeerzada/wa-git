@@ -994,19 +994,21 @@ app.post('/api/meta/webhook', async (req, res) => {
                                         };
                                     }
                                     
-                                    await fetch(`https://graph.facebook.com/v20.0/${instance.meta_phone_number_id}/messages`, {
-                                        method: 'POST',
-                                        headers: {
-                                            'Authorization': `Bearer ${instance.meta_access_token}`,
-                                            'Content-Type': 'application/json'
-                                        },
-                                        body: JSON.stringify(msgData)
-                                    });
+                                    let resp = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${instance.meta_access_token}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(msgData)
+    });
+    let data = await resp.json();
+    console.log("[Meta Automation Send Result]", data); fs.appendFileSync('/workspace/error.log', JSON.stringify(data) + '\n');
                                     break; // Only trigger first matching rule
                                 }
                             }
                         } catch (e) {
-                            console.error('[Automation Error]', e.message);
+                            console.error('[Automation Error]', e.message); fs.appendFileSync('/workspace/error.log', e.message + '\n');
                         }
                     }
 
@@ -2220,7 +2222,40 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             if (media) {
                 const metaType = (type === 'video' || type === 'document') ? type : 'image';
                 msgData.type = metaType;
-                msgData[metaType] = { link: media };
+                
+                let metaMediaId = null;
+                if (media.startsWith('data:')) {
+                    const mimeMatch = media.match(/^data:(.*?);base64,/);
+                    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+                    const base64Data = media.split(',')[1];
+                    const buffer = Buffer.from(base64Data, 'base64');
+                    
+                    const form = new FormData();
+                    form.append('messaging_product', 'whatsapp');
+                    const blob = new Blob([buffer], { type: mimeType });
+                    
+                    // Extract extension
+                    let ext = mimeType.split('/')[1] || 'bin';
+                    if (ext.includes(';')) ext = ext.split(';')[0];
+                    form.append('file', blob, 'upload.' + ext);
+                    
+                    const uploadRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/media`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${instance.metaAccessToken}`
+                        },
+                        body: form
+                    });
+                    
+                    const uploadJson = await uploadRes.json();
+                    if (uploadRes.ok && uploadJson.id) {
+                        metaMediaId = uploadJson.id;
+                    } else {
+                        throw new Error(uploadJson.error?.message || 'Failed to upload media to Meta');
+                    }
+                }
+                
+                msgData[metaType] = metaMediaId ? { id: metaMediaId } : { link: media };
                 if (message) msgData[metaType].caption = message;
                 delete msgData.text;
             }

@@ -143,3 +143,16 @@ ON CONFLICT DO NOTHING;
 INSERT INTO subscriptions (user_id, plan_id, status, expiry_date)
 VALUES ('u_super_9595', 'p_enterprise', 'active', '2030-01-01 00:00:00')
 ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS automations (
+    id SERIAL PRIMARY KEY,
+    instance_id VARCHAR(50),
+    keyword VARCHAR(255),
+    match_type VARCHAR(20) DEFAULT 'exact',
+    reply_type VARCHAR(20) DEFAULT 'text',
+    text_content TEXT,
+    media_url TEXT,
+    template_name VARCHAR(255),
+    template_language VARCHAR(10) DEFAULT 'en',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE
+);

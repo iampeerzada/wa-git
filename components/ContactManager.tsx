@@ -182,7 +182,7 @@ const ContactManager: React.FC<ContactManagerProps> = ({ contactGroups, setConta
               <button 
                 onClick={() => setIsAdding(false)} 
                 disabled={isSaving}
-                className="px-6 py-2.5 text-gray-400 hover:text-white font-bold transition-all disabled:opacity-50"
+                className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all disabled:opacity-50"
               >
                 Cancel
               </button>
