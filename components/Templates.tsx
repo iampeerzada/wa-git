@@ -12,8 +12,8 @@ export default function Templates({ instances }) {
 
   const fetchTemplates = async () => {
     try {
-      const res = await fetch(\`/api/meta/templates/\${selectedInstance}\`, {
-        headers: { 'Authorization': \`Bearer \${localStorage.getItem('token')}\` }
+      const res = await fetch(`/api/meta/templates/${selectedInstance}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
       const data = await res.json();
       if (res.ok) setTemplates(data);
@@ -23,8 +23,8 @@ export default function Templates({ instances }) {
   const syncTemplates = async () => {
     setLoading(true);
     try {
-      const res = await fetch(\`/api/meta/templates/sync/\${selectedInstance}\`, {
-        headers: { 'Authorization': \`Bearer \${localStorage.getItem('token')}\` }
+      const res = await fetch(`/api/meta/templates/sync/${selectedInstance}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
       if (res.ok) fetchTemplates();
     } catch (e) {}
@@ -69,7 +69,7 @@ export default function Templates({ instances }) {
                   <p className="text-sm text-gray-500">{t.language}</p>
                 </div>
               </div>
-              <span className={\`px-3 py-1 rounded-full text-xs font-medium \${t.status === 'APPROVED' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}\`}>
+              <span className={`px-3 py-1 rounded-full text-xs font-medium ${t.status === 'APPROVED' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
                 {t.status}
               </span>
             </div>

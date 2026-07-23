@@ -6,6 +6,8 @@ import Dashboard from './components/Dashboard';
 import CodeSnippets from './components/CodeSnippets';
 import Sidebar from './components/Sidebar';
 import BulkSender from './components/BulkSender';
+import MetaAutomations from './components/MetaAutomations';
+import Templates from './components/Templates';
 import MessageTemplates from './components/MessageTemplates';
 import ContactManager from './components/ContactManager';
 import ApiDocumentation from './components/ApiDocumentation';
@@ -643,6 +645,8 @@ const App: React.FC = () => {
           {activeTab === 'api-docs' && <ApiDocumentation instances={instances} currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'bulk' && <BulkSender instances={visibleInstances} apiBase={API_BASE} templates={templates} contactGroups={contactGroups} currentUser={currentUser} plans={plans} mediaAssets={mediaAssets} hiddenModules={hiddenModules} />}
           {activeTab === 'templates' && <MessageTemplates templates={templates} setTemplates={setTemplates} mediaAssets={mediaAssets} />}
+          {activeTab === 'meta-templates' && <Templates instances={instances} />}
+          {activeTab === 'meta-automations' && <MetaAutomations instances={instances} />}
           {activeTab === 'contacts' && <ContactManager contactGroups={contactGroups} setContactGroups={setContactGroups} currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'media-library' && <MediaLibrary currentUser={currentUser} mediaAssets={mediaAssets} setMediaAssets={setMediaAssets} apiBase={API_BASE} />}
           {activeTab === 'auto-responder' && <AutoResponderManager instances={visibleInstances} currentUser={currentUser} mediaAssets={mediaAssets} apiBase={API_BASE} />}
