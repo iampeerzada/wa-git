@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Bot, Plus, Trash2 } from 'lucide-react';
 
-export default function MetaAutomations({ instances, currentUser }) {
+export default function MetaAutomations({ instances, currentUser, apiBase }) {
   const [automations, setAutomations] = useState([]);
   const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider === "meta")?.id || "");
   useEffect(() => {
@@ -30,7 +30,7 @@ export default function MetaAutomations({ instances, currentUser }) {
 
   const fetchAutomations = async () => {
     try {
-      const res = await fetch(`/api/automations/${selectedInstance}`, {
+      const res = await fetch(`${apiBase}/api/automations/${selectedInstance}`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
@@ -40,7 +40,7 @@ export default function MetaAutomations({ instances, currentUser }) {
 
   const fetchTemplates = async () => {
     try {
-      const res = await fetch(`/api/meta/templates/${selectedInstance}`, {
+      const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstance}`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
@@ -51,7 +51,7 @@ export default function MetaAutomations({ instances, currentUser }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch(`/api/automations/${selectedInstance}`, {
+      const res = await fetch(`${apiBase}/api/automations/${selectedInstance}`, {
         method: 'POST',
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
@@ -65,7 +65,7 @@ export default function MetaAutomations({ instances, currentUser }) {
 
   const handleDelete = async (id) => {
     try {
-      const res = await fetch(`/api/automations/${id}`, {
+      const res = await fetch(`${apiBase}/api/automations/${id}`, {
         method: 'DELETE',
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });

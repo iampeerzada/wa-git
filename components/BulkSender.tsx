@@ -40,6 +40,24 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       }
   }, [viewMode, selectedInstance]);
 
+  useEffect(() => {
+    if (selectedInstance && instances.find(i => i.id === selectedInstance)?.provider === 'meta') {
+        fetchMetaTemplates();
+    } else {
+        setMetaTemplates([]);
+    }
+  }, [selectedInstance]);
+
+  const fetchMetaTemplates = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstance}`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      const data = await res.json();
+      if (res.ok) setMetaTemplates(data);
+    } catch (e) {}
+  };
+
   const fetchHistory = async () => {
     setIsLoadingHistory(true);
     try {

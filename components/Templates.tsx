@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { RefreshCw, LayoutTemplate, AlertCircle } from 'lucide-react';
 
-export default function Templates({ instances, currentUser }) {
+export default function Templates({ instances, currentUser, apiBase }) {
   const [templates, setTemplates] = useState([]);
   const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider === "meta")?.id || "");
   const [error, setError] = useState("");
@@ -21,7 +21,7 @@ export default function Templates({ instances, currentUser }) {
 
   const fetchTemplates = async () => {
     try {
-      const res = await fetch(`/api/meta/templates/${selectedInstance}`, {
+      const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstance}`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
@@ -33,7 +33,7 @@ export default function Templates({ instances, currentUser }) {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/meta/templates/sync/${selectedInstance}`, {
+      const res = await fetch(`${apiBase}/api/meta/templates/sync/${selectedInstance}`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       if (res.ok) {

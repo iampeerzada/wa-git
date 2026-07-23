@@ -1890,13 +1890,16 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         if (!inst.meta_waba_id || !inst.meta_access_token) return res.status(400).json({ error: 'Not a properly configured Meta instance' });
 
         const url = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates`;
-                const fetchRes = await fetch(url, { headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } });
+                        console.log(`[META SYNC] Fetching templates for WABA ID ${inst.meta_waba_id}...`);
+        const fetchRes = await fetch(url, { headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } });
         const json = await fetchRes.json();
         
         if (!fetchRes.ok || json.error) {
-            console.error("Meta API returned error:", JSON.stringify(json));
+            console.error("[META SYNC ERROR] API returned error:", JSON.stringify(json));
             throw new Error(json.error?.message || 'Meta API Error');
         }
+        
+        console.log(`[META SYNC] Successfully fetched ${json.data ? json.data.length : 0} templates`);
         
         const templates = json.data || [];
         for (const t of templates) {

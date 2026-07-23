@@ -211,9 +211,53 @@ const setupWorker = (instancesMap) => {
                     delete msgData.text;
                 }
                 
-                // Note: Meta API Buttons are not easily mapped to this ad-hoc button structure unless it's a template. 
-                // For simplicity, we just send text/media if it's Meta API in this generic worker path. 
-                // Or you could implement the full Interactive Message spec for Meta if required.
+                if (!options?.templateName && waButtons && waButtons.length > 0) {
+                    const replyButtons = waButtons.filter(b => b.type === 'reply').slice(0, 3);
+                    const urlButton = waButtons.find(b => b.type === 'url' || b.type === 'link');
+                    
+                    if (replyButtons.length > 0 && !urlButton) {
+                        msgData.type = 'interactive';
+                        msgData.interactive = {
+                            type: 'button',
+                            body: { text: finalMessage || ' ' },
+                            action: {
+                                buttons: replyButtons.map((btn, i) => ({
+                                    type: 'reply',
+                                    reply: { id: btn.id || ('btn_' + i), title: btn.displayText.substring(0, 20) }
+                                }))
+                            }
+                        };
+                        if (mediaUrl) {
+                            msgData.interactive.header = {
+                                type: mediaType || "image",
+                                [mediaType || "image"]: { link: mediaUrl }
+                            };
+                        }
+                        delete msgData.text;
+                        delete msgData[mediaType || "image"];
+                    } else if (urlButton) {
+                        msgData.type = 'interactive';
+                        msgData.interactive = {
+                            type: 'cta_url',
+                            body: { text: finalMessage || ' ' },
+                            action: {
+                                name: 'cta_url',
+                                parameters: {
+                                    display_text: urlButton.displayText,
+                                    url: urlButton.url
+                                }
+                            }
+                        };
+                        if (mediaUrl) {
+                            msgData.interactive.header = {
+                                type: mediaType || "image",
+                                [mediaType || "image"]: { link: mediaUrl }
+                            };
+                        }
+                        delete msgData.text;
+                        delete msgData[mediaType || "image"];
+                    }
+                }
                 
                 const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
                     method: 'POST',
