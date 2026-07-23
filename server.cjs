@@ -402,7 +402,7 @@ async function connectToWhatsApp(instanceId) {
             connectTimeoutMs: 60000,
             keepAliveIntervalMs: 25000,
             retryRequestDelayMs: 5000,
-            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            browser: require('@whiskeysockets/baileys').Browsers.macOS('Desktop'),
             syncFullHistory: true,
             getMessage
         });
@@ -891,8 +891,27 @@ app.post('/api/meta/webhook', async (req, res) => {
             const pushName = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || '';
             
             let text = msg.text ? msg.text.body : '';
+            let mediaUrl = null;
+            let mediaType = null;
+            
             if (msg.interactive) {
                 text = msg.interactive.button_reply?.title || msg.interactive.list_reply?.title || text;
+            } else if (msg.type === 'image') {
+                text = msg.image?.caption || '[Image]';
+                mediaType = 'image';
+                mediaUrl = msg.image?.id; // Storing ID for now, proper fetch requires API call
+            } else if (msg.type === 'video') {
+                text = msg.video?.caption || '[Video]';
+                mediaType = 'video';
+                mediaUrl = msg.video?.id;
+            } else if (msg.type === 'document') {
+                text = msg.document?.caption || msg.document?.filename || '[Document]';
+                mediaType = 'document';
+                mediaUrl = msg.document?.id;
+            } else if (msg.type === 'audio') {
+                text = '[Audio]';
+                mediaType = 'audio';
+                mediaUrl = msg.audio?.id;
             }
             
             const msgId = msg.id;
@@ -906,8 +925,8 @@ app.post('/api/meta/webhook', async (req, res) => {
                     const instanceId = instance.id;
                     
                     await pool.query(
-                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
-                        [msgId, instanceId, from, fromMe, text, new Date(timestamp * 1000), 'delivered']
+                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
+                        [msgId, instanceId, from, fromMe, text, mediaUrl, mediaType, new Date(timestamp * 1000), 'delivered']
                     );
                     
                     io.emit('new_message', {
@@ -916,6 +935,8 @@ app.post('/api/meta/webhook', async (req, res) => {
                         remoteJid: from,
                         fromMe,
                         text,
+                        mediaUrl,
+                        mediaType,
                         timestamp: new Date(timestamp * 1000).toISOString(),
                         status: 'delivered'
                     });
@@ -2032,25 +2053,59 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
         }
 
         let sentMsg;
-        if (media) {
-            let mediaBuffer;
-            if (media.startsWith('data:')) {
-                mediaBuffer = Buffer.from(media.split(',')[1], 'base64');
-            } else {
-                mediaBuffer = { url: media };
-            }
-
-            sentMsg = await instance.sock.sendMessage(remoteJid, { 
-                [type || 'image']: mediaBuffer,
-                caption: message,
-                ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {}
-            });
-        } else {
-            sentMsg = await instance.sock.sendMessage(remoteJid, { text: message, ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {} });
-        }
+        let msgId;
         
-        // Store in DB
-        const msgId = sentMsg.key.id;
+        if (instance.provider === 'meta') {
+            const jid = remoteJid.replace(/[^0-9]/g, '');
+            let msgData = {
+                messaging_product: "whatsapp",
+                recipient_type: "individual",
+                to: jid,
+                type: "text",
+                text: { body: message || ' ' }
+            };
+            
+            if (media) {
+                const metaType = (type === 'video' || type === 'document') ? type : 'image';
+                msgData.type = metaType;
+                msgData[metaType] = { link: media };
+                if (message) msgData[metaType].caption = message;
+                delete msgData.text;
+            }
+            
+            const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${instance.metaAccessToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(msgData)
+            });
+            
+            const metaJson = await metaRes.json();
+            if (!metaRes.ok || metaJson.error) {
+                throw new Error(metaJson.error?.message || 'Meta API Error');
+            }
+            msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
+        } else {
+            if (media) {
+                let mediaBuffer;
+                if (media.startsWith('data:')) {
+                    mediaBuffer = Buffer.from(media.split(',')[1], 'base64');
+                } else {
+                    mediaBuffer = { url: media };
+                }
+
+                sentMsg = await instance.sock.sendMessage(remoteJid, { 
+                    [type || 'image']: mediaBuffer,
+                    caption: message,
+                    ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {}
+                });
+            } else {
+                sentMsg = await instance.sock.sendMessage(remoteJid, { text: message, ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {} });
+            }
+            msgId = sentMsg.key.id;
+        }
         await pool.query(
             'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING',
             [msgId, instanceId, remoteJid, true, message, media, type, new Date(), 'sent', quotedMsgId]
