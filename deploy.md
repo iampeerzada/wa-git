@@ -50,7 +50,8 @@ Execute the SQL found in `components/CodeSnippets.tsx` (database.sql) on your Po
 ### Step 4: Start Backend with PM2
 ```bash
 # Start your backend server (make sure package.json has "start": "node server.cjs")
-pm2 start server.cjs --name "wa-api"
+npm run build
+pm2 start server.cjs --name "wa-api" --ignore-watch="sessions"
 pm2 save
 pm2 startup
 ```

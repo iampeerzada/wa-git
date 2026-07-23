@@ -380,16 +380,20 @@ const authenticate = async (req, res, next) => {
 const offlineAlerts = new Map();
 
 async function connectToWhatsApp(instanceId) {
+    console.log(`[DEBUG] connectToWhatsApp called for ${instanceId}`);
     try {
         const sessionDir = path.join(__dirname, 'sessions', instanceId);
         if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
+        console.log(`[DEBUG] Fetching auth state for ${instanceId}...`);
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+        console.log(`[DEBUG] Fetching latest Baileys version for ${instanceId}...`);
         const { version } = await fetchLatestBaileysVersion();
+        console.log(`[DEBUG] Baileys version for ${instanceId}:`, version);
 
         const sock = makeWASocket({
             version,
-            logger: pino({ level: 'silent' }),
+            logger: pino({ level: 'info' }),
             auth: state,
             printQRInTerminal: false,
             markOnlineOnConnect: true,
@@ -401,10 +405,12 @@ async function connectToWhatsApp(instanceId) {
             getMessage
         });
 
+        console.log(`[DEBUG] Socket created for ${instanceId}`);
         instancesMap.set(instanceId, { sock, status: 'connecting', qr: null, phone: null });
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
+            console.log(`[Instance ${instanceId}] Connection update:`, { connection, qr: qr ? 'yes' : 'no', error: lastDisconnect?.error?.message });
 
             if (qr) {
                 instancesMap.set(instanceId, { ...instancesMap.get(instanceId), qr, status: 'qr_required' });
@@ -453,7 +459,7 @@ async function connectToWhatsApp(instanceId) {
                 }
             } else if (connection === 'open') {
                 // We intentionally do NOT delete offlineAlerts here to prevent spam if the connection is flapping
-                const phone = sock.user.id.split(':')[0];
+                const phone = sock.user && sock.user.id ? sock.user.id.split(':')[0] : instanceId;
                 instancesMap.set(instanceId, { sock, status: 'open', qr: null, phone });
                 await pool.query('UPDATE instances SET status = $1, phone_number = $2, qr_code = NULL WHERE id = $3', ['open', phone, instanceId]).catch(e => console.error('Open State Update Error:', e.message));
                 console.log(`[Instance ${instanceId}] Connected as ${phone}`);
@@ -2171,6 +2177,7 @@ async function startup() {
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent';
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS quoted_msg_id VARCHAR(100);
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS quoted_msg_json TEXT;
+            ALTER TABLE instances ADD COLUMN IF NOT EXISTS qr_code TEXT;
             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_max_instances INT;
             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_daily_limit INT;
         `);
