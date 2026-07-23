@@ -1,3 +1,5 @@
+const dns = require('dns');
+try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
 const { Worker } = require('bullmq');
 const IORedis = require('ioredis');
 
