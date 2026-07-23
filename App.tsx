@@ -494,6 +494,32 @@ const App: React.FC = () => {
     } catch (err) { console.error(err); }
   };
 
+  const handleEditMetaConfig = async (id: string) => {
+    const metaPhoneNumberId = prompt("Enter new Meta Phone Number ID (leave blank to keep current):");
+    const metaWabaId = prompt("Enter new Meta WABA ID (leave blank to keep current):");
+    const metaAccessToken = prompt("Enter new Meta Access Token (leave blank to keep current):");
+    
+    if (!metaPhoneNumberId && !metaWabaId && !metaAccessToken) return;
+
+    try {
+        const res = await fetch(`/api/instances/${id}/meta-config`, {
+            method: 'PUT',
+            headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ metaPhoneNumberId, metaWabaId, metaAccessToken })
+        });
+        if (res.ok) {
+            alert('Meta config updated successfully!');
+            fetchInstances();
+        } else {
+            const e = await res.json();
+            alert(e.error || 'Failed to update config');
+        }
+    } catch (e) {
+        alert('Error updating config');
+    }
+  };
+  (window as any).onEditMetaConfig = handleEditMetaConfig;
+  
   const handleToggleVisibility = async (id: string, current: boolean) => {
     try {
         await fetch(`${API_BASE}/api/instance/${id}/visibility`, {

@@ -171,8 +171,17 @@ const Dashboard: React.FC<DashboardProps> = ({
                     {canManage && (
                         <>
                             
-                            <button 
-                                onClick={() => onToggleAi && onToggleAi(instance.id, instance.aiEnabled)}
+                            {instance.provider === 'meta' && (
+      <button 
+          onClick={() => window.onEditMetaConfig && window.onEditMetaConfig(instance.id)}
+          className="p-2 text-gray-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+          title="Edit Meta Configuration"
+      >
+          <Edit3 size={18} />
+      </button>
+  )}
+  <button 
+      onClick={() => onToggleAi && onToggleAi(instance.id, instance.aiEnabled)}
                                 disabled={instance.status === InstanceStatus.SUSPENDED}
                                 title={instance.aiEnabled ? "Disable AI Auto-Reply" : "Enable AI Auto-Reply"}
                                 className={`p-2 rounded-lg transition-all disabled:opacity-0 ${instance.aiEnabled ? 'text-purple-500 bg-purple-500/10 hover:bg-purple-500/20' : 'text-gray-500 hover:text-purple-400 hover:bg-purple-400/10'}`}

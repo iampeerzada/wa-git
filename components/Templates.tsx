@@ -3,7 +3,13 @@ import { RefreshCw, LayoutTemplate } from 'lucide-react';
 
 export default function Templates({ instances, currentUser }) {
   const [templates, setTemplates] = useState([]);
-  const [selectedInstance, setSelectedInstance] = useState(instances[0]?.id || '');
+  const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider === "meta")?.id || "");
+  useEffect(() => {
+    if (instances.length > 0 && !selectedInstance) {
+      const metaInst = instances.find(i => i.provider === "meta");
+      if (metaInst) setSelectedInstance(metaInst.id);
+    }
+  }, [instances]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -26,7 +32,7 @@ export default function Templates({ instances, currentUser }) {
       const res = await fetch(`/api/meta/templates/sync/${selectedInstance}`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
-      if (res.ok) fetchTemplates();
+      if (res.ok) fetchTemplates(); else { const e = await res.json(); alert(e.error || "Failed to sync"); }
     } catch (e) {}
     setLoading(false);
   };
@@ -39,7 +45,7 @@ export default function Templates({ instances, currentUser }) {
           <select 
             value={selectedInstance} 
             onChange={(e) => setSelectedInstance(e.target.value)}
-            className="border p-2 rounded-lg"
+            className="bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white"
           >
             {instances.filter(i => i.provider === 'meta').map(i => (
               <option key={i.id} value={i.id}>{i.name}</option>
@@ -58,7 +64,7 @@ export default function Templates({ instances, currentUser }) {
       
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {templates.map(t => (
-          <div key={t.id} className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <div key={t.id} className="bg-[#202c33] p-6 rounded-xl shadow-sm border border-gray-700">
             <div className="flex justify-between items-start mb-4">
               <div className="flex items-center gap-3">
                 <div className="bg-green-100 p-3 rounded-lg text-green-600">
@@ -66,7 +72,7 @@ export default function Templates({ instances, currentUser }) {
                 </div>
                 <div>
                   <h3 className="font-semibold text-lg">{t.name}</h3>
-                  <p className="text-sm text-gray-500">{t.language}</p>
+                  <p className="text-sm text-gray-400">{t.language}</p>
                 </div>
               </div>
               <span className={`px-3 py-1 rounded-full text-xs font-medium ${t.status === 'APPROVED' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
@@ -76,7 +82,7 @@ export default function Templates({ instances, currentUser }) {
           </div>
         ))}
         {templates.length === 0 && (
-          <div className="col-span-3 text-center py-12 text-gray-500">
+          <div className="col-span-3 text-center py-12 text-gray-400">
             No templates found. Click sync to fetch approved templates from Meta.
           </div>
         )}

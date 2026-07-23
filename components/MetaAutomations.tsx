@@ -3,7 +3,13 @@ import { Bot, Plus, Trash2 } from 'lucide-react';
 
 export default function MetaAutomations({ instances, currentUser }) {
   const [automations, setAutomations] = useState([]);
-  const [selectedInstance, setSelectedInstance] = useState(instances[0]?.id || '');
+  const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider === "meta")?.id || "");
+  useEffect(() => {
+    if (instances.length > 0 && !selectedInstance) {
+      const metaInst = instances.find(i => i.provider === "meta");
+      if (metaInst) setSelectedInstance(metaInst.id);
+    }
+  }, [instances]);
   const [templates, setTemplates] = useState([]);
   
   const [formData, setFormData] = useState({
@@ -74,7 +80,7 @@ export default function MetaAutomations({ instances, currentUser }) {
         <select 
           value={selectedInstance} 
           onChange={(e) => setSelectedInstance(e.target.value)}
-          className="border p-2 rounded-lg"
+          className="bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white"
         >
           {instances.filter(i => i.provider === 'meta').map(i => (
             <option key={i.id} value={i.id}>{i.name}</option>
@@ -82,23 +88,23 @@ export default function MetaAutomations({ instances, currentUser }) {
         </select>
       </div>
 
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-8">
+      <div className="bg-[#202c33] p-6 rounded-xl shadow-sm border border-gray-700 mb-8">
         <h3 className="font-semibold mb-4">Create New Automation</h3>
         <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium mb-1">Trigger Keyword</label>
-            <input required type="text" className="w-full border p-2 rounded-lg" value={formData.keyword} onChange={e => setFormData({...formData, keyword: e.target.value})} />
+            <input required type="text" className="w-full bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white" value={formData.keyword} onChange={e => setFormData({...formData, keyword: e.target.value})} />
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">Match Type</label>
-            <select className="w-full border p-2 rounded-lg" value={formData.match_type} onChange={e => setFormData({...formData, match_type: e.target.value})}>
+            <select className="w-full bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white" value={formData.match_type} onChange={e => setFormData({...formData, match_type: e.target.value})}>
               <option value="exact">Exact Match</option>
               <option value="contains">Contains</option>
             </select>
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">Reply Type</label>
-            <select className="w-full border p-2 rounded-lg" value={formData.reply_type} onChange={e => setFormData({...formData, reply_type: e.target.value})}>
+            <select className="w-full bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white" value={formData.reply_type} onChange={e => setFormData({...formData, reply_type: e.target.value})}>
               <option value="text">Standard Text</option>
               <option value="template">Meta Template</option>
             </select>
@@ -107,13 +113,13 @@ export default function MetaAutomations({ instances, currentUser }) {
           {formData.reply_type === 'text' ? (
             <div className="md:col-span-2">
               <label className="block text-sm font-medium mb-1">Reply Text</label>
-              <textarea required className="w-full border p-2 rounded-lg" rows="3" value={formData.text_content} onChange={e => setFormData({...formData, text_content: e.target.value})}></textarea>
+              <textarea required className="w-full bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white" rows="3" value={formData.text_content} onChange={e => setFormData({...formData, text_content: e.target.value})}></textarea>
             </div>
           ) : (
             <>
               <div>
                 <label className="block text-sm font-medium mb-1">Select Template</label>
-                <select required className="w-full border p-2 rounded-lg" value={formData.template_name} onChange={e => {
+                <select required className="w-full bg-[#2a3942] border border-gray-700 p-2 rounded-lg text-white" value={formData.template_name} onChange={e => {
                   const t = templates.find(temp => temp.name === e.target.value);
                   setFormData({...formData, template_name: e.target.value, template_language: t?.language || 'en'});
                 }}>
@@ -136,13 +142,13 @@ export default function MetaAutomations({ instances, currentUser }) {
 
       <div className="grid gap-4">
         {automations.map(a => (
-          <div key={a.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex justify-between items-center">
+          <div key={a.id} className="bg-[#202c33] p-4 rounded-xl shadow-sm border border-gray-700 flex justify-between items-center">
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <span className="font-semibold text-lg">"{a.keyword}"</span>
                 <span className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">{a.match_type}</span>
               </div>
-              <p className="text-gray-500 text-sm">
+              <p className="text-gray-400 text-sm">
                 Replies with {a.reply_type === 'template' ? `Template: ${a.template_name}` : 'Text'}
               </p>
             </div>
