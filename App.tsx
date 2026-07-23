@@ -18,6 +18,7 @@ import AutoResponderManager from './components/AutoResponderManager';
 import ChatInterface from './components/ChatInterface';
 import TeamManager from './components/TeamManager';
 import LoginPage from './components/LoginPage';
+import ProvisionInstanceModal from './components/ProvisionInstanceModal';
 import LandingPage from './components/LandingPage';
 
 const getApiBase = () => {
@@ -77,6 +78,7 @@ const App: React.FC = () => {
   });
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem('wa_active_tab', activeTab);
@@ -392,56 +394,26 @@ const App: React.FC = () => {
     return [];
   }, [users, currentUser]);
 
-  const handleCreateInstance = async () => {
-    const currentPlan = plans.find(p => p.id === currentUser.subscription?.planId);
-    const myInstancesCount = instances.filter(i => i.userId === currentUser.id).length;
-    
-    if (currentUser.role !== UserRole.SUPERADMIN) {
-        if (!currentPlan) {
-            alert("No active plan found. Please subscribe to a plan to create instances.");
-            return;
-        }
-        if (currentPlan.maxInstances !== 0 && myInstancesCount >= currentPlan.maxInstances) {
-            alert(`Plan Limit Reached: Your "${currentPlan.name}" plan only allows ${currentPlan.maxInstances} instances. Please upgrade.`);
-            return;
-        }
+  const handleCreateInstance = () => {
+    setIsProvisionModalOpen(true);
+  };
+  
+  const submitProvisionInstance = async (payload: any) => {
+    const res = await fetch(`${API_BASE}/api/create`, {
+        method: 'POST',
+        headers: { 
+            'Content-Type': 'application/json',
+            'X-User-ID': currentUser.id,
+            'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const data = await res.json();
+        alert(data.error || 'Failed to create instance');
+        throw new Error(data.error);
     }
-    
-    const name = prompt("Enter instance name:");
-    if (!name) return;
-    
-    const isMeta = window.confirm("Use Official Meta Cloud API? \n\nClick OK for Meta API. Click Cancel for Baileys (QR Code).");
-    
-    let payload: any = { name, provider: isMeta ? 'meta' : 'baileys' };
-    
-    if (isMeta) {
-        const metaPhoneNumberId = prompt("Enter Meta Phone Number ID:");
-        if (!metaPhoneNumberId) return;
-        const metaWabaId = prompt("Enter Meta WABA ID:");
-        if (!metaWabaId) return;
-        const metaAccessToken = prompt("Enter Meta Access Token:");
-        if (!metaAccessToken) return;
-        
-        payload.metaPhoneNumberId = metaPhoneNumberId;
-        payload.metaWabaId = metaWabaId;
-        payload.metaAccessToken = metaAccessToken;
-    }
-    
-    try {
-      const res = await fetch(`${API_BASE}/api/create`, {
-          method: 'POST',
-          headers: { 
-              'Content-Type': 'application/json', 
-              'X-User-ID': currentUser.id,
-              'X-API-Key': currentUser.apiKey
-          },
-          body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-          const data = await res.json();
-          alert(data.error || 'Failed to create instance');
-      }
-    } catch (err) { console.error(err); }
+    // Note: polling will pick it up automatically
   };
 
   const handleRenameInstance = async (id: string) => {
@@ -509,7 +481,7 @@ const App: React.FC = () => {
         });
         if (res.ok) {
             alert('Meta config updated successfully!');
-            fetchInstances();
+            setRefreshTrigger(prev => prev + 1);
         } else {
             const e = await res.json();
             alert(e.error || 'Failed to update config');
@@ -600,6 +572,17 @@ const App: React.FC = () => {
   }
 
   return (
+    <>
+      {currentUser && (
+        <ProvisionInstanceModal 
+          isOpen={isProvisionModalOpen} 
+          onClose={() => setIsProvisionModalOpen(false)} 
+          onSubmit={submitProvisionInstance}
+          planLimitReached={currentUser.role !== UserRole.SUPERADMIN && !!plans.find(p => p.id === currentUser.subscription?.planId) && plans.find(p => p.id === currentUser.subscription?.planId)!.maxInstances !== 0 && instances.filter(i => i.userId === currentUser.id).length >= plans.find(p => p.id === currentUser.subscription?.planId)!.maxInstances}
+          planMax={plans.find(p => p.id === currentUser.subscription?.planId)?.maxInstances || 0}
+          planName={plans.find(p => p.id === currentUser.subscription?.planId)?.name || ''}
+        />
+      )}
     <div className="flex h-screen bg-[#0b141a] text-gray-200 overflow-hidden">
       <Sidebar 
         activeTab={activeTab} 
@@ -694,6 +677,7 @@ const App: React.FC = () => {
         </div>
       </main>
     </div>
+    </>
   );
 };
 
