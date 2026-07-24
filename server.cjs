@@ -975,63 +975,140 @@ app.post('/api/meta/webhook', async (req, res) => {
                     if (text && fromMe === false) {
                         try {
                             const autoRes = await pool.query('SELECT * FROM automations WHERE instance_id = $1', [instanceId]);
-                            for (const rule of autoRes.rows) {
-                                let match = false;
-                                const keyword = rule.keyword.toLowerCase();
-                                const msgText = text.toLowerCase();
-                                if (rule.match_type === 'exact' && msgText === keyword) match = true;
-                                else if (rule.match_type === 'contains' && msgText.includes(keyword)) match = true;
+                            let isFirstMessage = null;
+
+                            // Tree-based Automation Logic
+                            let matchedNode = null;
+                            const msgText = text.toLowerCase().trim();
+                            
+                            // 1. Check current state
+                            const stateRes = await pool.query('SELECT current_node_id FROM customer_flow_states WHERE remote_jid = $1 AND instance_id = $2', [from, instanceId]);
+                            if (stateRes.rows.length > 0 && stateRes.rows[0].current_node_id) {
+                                const currentNodeId = stateRes.rows[0].current_node_id;
                                 
-                                if (match) {
-                                    console.log(`[Meta Automation] Match found for ${from}`);
+                                // Look for children of current node that match the keyword
+                                const childNode = autoRes.rows.find(r => r.parent_id === currentNodeId && (r.keyword || '').toLowerCase().trim() === msgText);
+                                if (childNode) {
+                                    matchedNode = childNode;
+                                } else {
+                                    // Optionally handle "invalid option" here, or let it fallback to global
+                                }
+                            }
+                            
+                            // 2. If no option matched, check global roots (parent_id IS NULL)
+                            if (!matchedNode) {
+                                let isFirstMessage = null;
+                                for (const rule of autoRes.rows) {
+                                    if (rule.parent_id) continue; // Skip non-root nodes for global triggers
+                                    let match = false;
+                                    const keyword = rule.keyword ? rule.keyword.toLowerCase().trim() : '';
+                                    if (rule.match_type === 'welcome') {
+                                        if (isFirstMessage === null) {
+                                            const msgCountRes = await pool.query('SELECT COUNT(*) as count FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 AND from_me = false', [instanceId, from]);
+                                            isFirstMessage = parseInt(msgCountRes.rows[0].count) <= 1;
+                                        }
+                                        if (isFirstMessage) match = true;
+                                    } else if (rule.match_type === 'exact' && msgText === keyword) match = true;
+                                    else if (rule.match_type === 'contains' && msgText.includes(keyword)) match = true;
+                                    
+                                    if (match) {
+                                        matchedNode = rule;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (matchedNode) {
+                                console.log(`[Meta Automation] Matched Node ${matchedNode.id} for ${from}`);
+                                
+                                let executionNode = matchedNode;
+                                
+                                if (matchedNode.action_type === 'go_back') {
+                                    // Find parent
+                                    const parentNode = autoRes.rows.find(r => r.id === matchedNode.parent_id);
+                                    if (parentNode) {
+                                        // Go to grandparent
+                                        const grandParent = autoRes.rows.find(r => r.id === parentNode.parent_id);
+                                        if (grandParent) {
+                                            executionNode = grandParent;
+                                        } else {
+                                            // No grandparent, means root
+                                            await pool.query('DELETE FROM customer_flow_states WHERE remote_jid = $1 AND instance_id = $2', [from, instanceId]);
+                                            executionNode = null; 
+                                        }
+                                    }
+                                } else if (matchedNode.action_type === 'go_main') {
+                                    await pool.query('DELETE FROM customer_flow_states WHERE remote_jid = $1 AND instance_id = $2', [from, instanceId]);
+                                    executionNode = null;
+                                }
+                                
+                                // If they went back to main menu, try to find a welcome or exact root to resend
+                                if (!executionNode && (matchedNode.action_type === 'go_back' || matchedNode.action_type === 'go_main')) {
+                                     const rootMenu = autoRes.rows.find(r => !r.parent_id && r.match_type === 'welcome') || autoRes.rows.find(r => !r.parent_id);
+                                     if (rootMenu) executionNode = rootMenu;
+                                }
+                                
+                                if (!executionNode && matchedNode.action_type !== 'go_back' && matchedNode.action_type !== 'go_main') {
+                                    executionNode = matchedNode;
+                                }
+
+                                if (executionNode) {
+                                    // Update State
+                                    if (executionNode.action_type === 'end') {
+                                        await pool.query('DELETE FROM customer_flow_states WHERE remote_jid = $1 AND instance_id = $2', [from, instanceId]);
+                                    } else {
+                                        await pool.query(
+                                            'INSERT INTO customer_flow_states (remote_jid, instance_id, current_node_id) VALUES ($1, $2, $3) ON CONFLICT (remote_jid, instance_id) DO UPDATE SET current_node_id = EXCLUDED.current_node_id, updated_at = CURRENT_TIMESTAMP',
+                                            [from, instanceId, executionNode.id]
+                                        );
+                                    }
+                                    
+                                    // Send Message
                                     let msgData = {
                                         messaging_product: "whatsapp",
                                         recipient_type: "individual",
                                         to: from.replace(/[^0-9]/g, '')
                                     };
                                     
-                                    if (rule.reply_type === 'text') {
+                                    if (executionNode.reply_type === 'text') {
                                         msgData.type = 'text';
-                                        msgData.text = { body: rule.text_content };
-                                    } else if (rule.reply_type === 'template') {
+                                        msgData.text = { body: executionNode.text_content };
+                                    } else if (executionNode.reply_type === 'template') {
                                         msgData.type = 'template';
                                         msgData.template = {
-                                            name: rule.template_name,
-                                            language: { code: rule.template_language }
+                                            name: executionNode.template_name,
+                                            language: { code: executionNode.template_language }
                                         };
                                     }
                                     
                                     let resp = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${instance.meta_access_token}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(msgData)
-    });
-    let data = await resp.json();
-    console.log("[Meta Automation Send Result]", data);
-    
-    // Save to chat_messages so it appears in Chat Interface
-    if (data.messages && data.messages[0]) {
-        const msgId = data.messages[0].id;
-        const savedText = rule.reply_type === 'template' ? '[Template: ' + rule.template_name + ']' : rule.text_content;
-        await pool.query(
-            'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
-            [msgId, instanceId, from, true, savedText, new Date(), 'sent']
-        );
-        io.emit('new_message', {
-            id: msgId,
-            instanceId,
-            remoteJid: from,
-            fromMe: true,
-            text: savedText,
-            timestamp: new Date().toISOString(),
-            status: 'sent'
-        });
-    }
-    
-    break; // Only trigger first matching rule
+                                        method: 'POST',
+                                        headers: {
+                                            'Authorization': `Bearer ${instance.meta_access_token}`,
+                                            'Content-Type': 'application/json'
+                                        },
+                                        body: JSON.stringify(msgData)
+                                    });
+                                let data = await resp.json();
+                                console.log("[Meta Automation Send Result]", data);
+                                
+                                if (data.messages && data.messages[0]) {
+                                    const msgId = data.messages[0].id;
+                                    const savedText = matchedNode.reply_type === 'template' ? '[Template: ' + matchedNode.template_name + ']' : matchedNode.text_content;
+                                    await pool.query(
+                                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
+                                        [msgId, instanceId, from, true, savedText, new Date(), 'sent']
+                                    );
+                                    io.emit('new_message', {
+                                        id: msgId,
+                                        instanceId,
+                                        remoteJid: from,
+                                        fromMe: true,
+                                        text: savedText,
+                                        timestamp: new Date().toISOString(),
+                                        status: 'sent'
+                                    });
+                                }
                                 }
                             }
                         } catch (e) {
@@ -2035,6 +2112,20 @@ app.get('/api/automations/:instanceId', authenticate, async (req, res) => {
     }
 });
 
+app.put('/api/automations/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, parent_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type, options } = req.body;
+        await pool.query(
+            'UPDATE automations SET name=$1, parent_id=$2, keyword=$3, match_type=$4, reply_type=$5, text_content=$6, media_url=$7, template_name=$8, template_language=$9, action_type=$10, options=$11 WHERE id=$12',
+            [name || '', parent_id || null, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type || 'message', options ? JSON.stringify(options) : '[]', id]
+        );
+        res.sendStatus(200);
+    } catch (e) {
+        console.error(e);
+        res.sendStatus(500);
+    }
+});
 app.post('/api/automations/:instanceId', authenticate, async (req, res) => {
     try {
         const { keyword, match_type, reply_type, text_content, media_url, template_name, template_language } = req.body;
@@ -2564,6 +2655,20 @@ async function startup() {
                 template_name VARCHAR(255),
                 template_language VARCHAR(20),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            ALTER TABLE automations ADD COLUMN IF NOT EXISTS parent_id INT;
+            ALTER TABLE automations ADD COLUMN IF NOT EXISTS options JSONB DEFAULT '[]'::jsonb;
+            ALTER TABLE automations ADD COLUMN IF NOT EXISTS action_type VARCHAR(50) DEFAULT 'message';
+            ALTER TABLE automations ADD COLUMN IF NOT EXISTS name VARCHAR(255);
+            
+            CREATE TABLE IF NOT EXISTS customer_flow_states (
+                remote_jid VARCHAR(255),
+                instance_id VARCHAR(50),
+                current_node_id INT,
+                state_data JSONB,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (remote_jid, instance_id)
             );
 
         `);
