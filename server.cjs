@@ -685,11 +685,16 @@ async function connectToWhatsApp(instanceId) {
                             ).join('\n');
                             
                             const prompt = `You are a helpful WhatsApp assistant. Reply to the user's latest message based on this recent conversation history:\n\n${chatHistory}\n\nReply nicely, concisely and accurately. Do not include prefix like "Assistant:".`;
-
-                            const response = await ai.models.generateContent({
+                            let response;
+                        try {
+                            response = await ai.models.generateContent({
                                 model: 'gemini-1.5-flash',
                                 contents: prompt
                             });
+                        } catch (aiError) {
+                            console.error('[Meta AI Generation Error]', aiError.message);
+                            response = { text: "System: AI is currently unavailable or API key is invalid" };
+                        }
                             
                             if (response.text) {
                                 await sock.sendMessage(from, { text: response.text });
@@ -1050,10 +1055,16 @@ app.post('/api/meta/webhook', async (req, res) => {
                         
                         const prompt = `You are a helpful WhatsApp assistant. Reply to the user's latest message based on this recent conversation history:\n\n${chatHistory}\n\nReply nicely, concisely and accurately. Do not include prefix like "Assistant:".`;
 
-                        const response = await ai.models.generateContent({
-                            model: 'gemini-1.5-flash',
-                            contents: prompt
-                        });
+                        let response;
+                            try {
+                                response = await ai.models.generateContent({
+                                    model: 'gemini-1.5-flash',
+                                    contents: prompt
+                                });
+                            } catch (aiError) {
+                                console.error('[Baileys AI Generation Error]', aiError.message);
+                                response = { text: "System: AI is currently unavailable or API key is invalid" };
+                            }
                         
                         if (response.text) {
                             const aiText = response.text;
@@ -1975,7 +1986,7 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
             name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
             language: language || 'en',
             category: category || 'MARKETING',
-            allow_category_change: true,
+            
             components: components
         };
 
@@ -1989,6 +2000,8 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
         });
         
         const data = await response.json();
+        console.log("[Meta Template Create Payload]", JSON.stringify(payload, null, 2));
+        console.log("[Meta Template Create Response]", JSON.stringify(data, null, 2));
         if (!response.ok || data.error) {
             let errMsg = data.error?.error_user_msg || data.error?.message || 'Meta API error';
             if (data.error?.error_data) {
