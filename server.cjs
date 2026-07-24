@@ -401,15 +401,10 @@ async function connectToWhatsApp(instanceId) {
 
         const sock = makeWASocket({
             version,
-            logger: pino({ level: 'info' }),
+            logger: pino({ level: 'silent' }),
             auth: state,
             printQRInTerminal: false,
-            markOnlineOnConnect: true,
-            connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 25000,
-            retryRequestDelayMs: 5000,
-            browser: ['Ubuntu', 'Chrome', '20.0.04'],
-            syncFullHistory: true,
+            browser: Browsers.macOS('Desktop'),
             getMessage
         });
 
