@@ -1079,6 +1079,25 @@ app.post('/api/meta/webhook', async (req, res) => {
                                             name: executionNode.template_name,
                                             language: { code: executionNode.template_language }
                                         };
+                                        if (executionNode.media_url) {
+                                            let pType = 'image';
+                                            if (executionNode.media_url.endsWith('.pdf')) pType = 'document';
+                                            else if (executionNode.media_url.endsWith('.mp4')) pType = 'video';
+                                            
+                                            msgData.template.components = [
+                                                {
+                                                    type: "header",
+                                                    parameters: [
+                                                        {
+                                                            type: pType,
+                                                            [pType]: {
+                                                                link: executionNode.media_url
+                                                            }
+                                                        }
+                                                    ]
+                                                }
+                                            ];
+                                        }
                                     }
                                     
                                     let resp = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {

@@ -203,6 +203,24 @@ const setupWorker = (instancesMap) => {
                         name: options.templateName,
                         language: { code: options.templateLanguage || 'en' }
                     };
+                    if (mediaUrl) {
+                        let pType = 'image';
+                        if (mediaUrl.endsWith('.pdf')) pType = 'document';
+                        else if (mediaUrl.endsWith('.mp4')) pType = 'video';
+                        else if (mediaType) pType = mediaType;
+                        
+                        msgData.template.components = [
+                            {
+                                type: "header",
+                                parameters: [
+                                    {
+                                        type: pType,
+                                        [pType]: { link: mediaUrl }
+                                    }
+                                ]
+                            }
+                        ];
+                    }
                     delete msgData.text;
                 } else if (mediaUrl) {
                     msgData.type = mediaType || "image";
