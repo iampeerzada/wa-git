@@ -229,7 +229,7 @@ const setupWorker = (instancesMap) => {
                     delete msgData.text;
                 }
                 
-                if (!options?.templateName && waButtons && waButtons.length > 0) {
+                                if (!options?.templateName && waButtons && waButtons.length > 0) {
                     const replyButtons = waButtons.filter(b => b.type === 'reply').slice(0, 3);
                     const urlButton = waButtons.find(b => b.type === 'url' || b.type === 'link');
                     const callButton = waButtons.find(b => b.type === 'call');
@@ -282,47 +282,42 @@ const setupWorker = (instancesMap) => {
                         delete msgData.text;
                         delete msgData[mediaType || "image"];
                     }
-                    
-                    const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${instance.metaAccessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(msgData)
-                    });
-                    
-                    const metaJson = await metaRes.json();
-                    if (!metaRes.ok || metaJson.error) {
-                        throw new Error(metaJson.error?.message || 'Meta API Error');
-                    }
-                    
-                    const msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
-                    await pool.query(
-                        'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                        [userId, instanceId, number, 'delivered', msgId, finalMessage]
-                    );
-                    
-                    // Also save to chat_messages so it appears in Chat Interface
-                    await pool.query(
-                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
-                        [msgId, instanceId, jid, true, finalMessage, mediaUrl, mediaType, new Date(), 'sent']
-                    );
-
-                    // B. Online Status
-                    await sock.sendPresenceUpdate('available', jid);
-                    await humanJitter(1000, 2000);
-
-                    // C. Typing Status
-                    await sock.sendPresenceUpdate('composing', jid);
-                    // Wait while "typing" to look realistic (2-5s)
-                    await humanJitter(2000, 5000);
-
-                    // D. Paused Status (Stop typing before send)
-                    await sock.sendPresenceUpdate('paused', jid);
                 }
-            }
 
+                const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${instance.metaAccessToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(msgData)
+                });
+                
+                const metaJson = await metaRes.json();
+                if (!metaRes.ok || metaJson.error) {
+                    throw new Error(metaJson.error?.message || 'Meta API Error');
+                }
+                
+                const msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
+                await pool.query(
+                    'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
+                    [userId, instanceId, number, 'delivered', msgId, finalMessage || options?.templateName]
+                );
+                
+                // Also save to chat_messages so it appears in Chat Interface
+                await pool.query(
+                    'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
+                    [msgId, instanceId, jid, true, finalMessage || options?.templateName, mediaUrl, mediaType, new Date(), 'sent']
+                );
+
+                // Update Quota
+                await pool.query(
+                    'UPDATE subscriptions SET messages_sent_today = messages_sent_today + 1 WHERE user_id = $1',
+                    [userId]
+                );
+                
+                return { success: true, messageId: msgId };
+            }
             if (waButtons && waButtons.length > 0) {
                 // ... (Existing Button Logic) ...
                 const buttons = waButtons.map(btn => {
