@@ -1034,6 +1034,9 @@ app.post('/api/meta/webhook', async (req, res) => {
                         });
                         
                         if (response.text) {
+                            const aiText = response.text;
+                            // Clean the 'to' number (remove non-digits, optional +)
+                            const toNum = from.replace(/[^0-9]/g, '');
                             fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
                                 method: 'POST',
                                 headers: {
@@ -1043,10 +1046,27 @@ app.post('/api/meta/webhook', async (req, res) => {
                                 body: JSON.stringify({
                                     messaging_product: "whatsapp",
                                     recipient_type: "individual",
-                                    to: from,
+                                    to: toNum,
                                     type: "text",
-                                    text: { body: response.text }
+                                    text: { body: aiText }
                                 })
+                            }).then(res => res.json()).then(async metaJson => {
+                                if (metaJson.messages && metaJson.messages[0]) {
+                                    const msgId = metaJson.messages[0].id;
+                                    await pool.query(
+                                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
+                                        [msgId, instanceId, from, true, aiText, new Date(), 'sent']
+                                    );
+                                    io.emit('new_message', {
+                                        id: msgId,
+                                        instanceId,
+                                        remoteJid: from,
+                                        fromMe: true,
+                                        text: aiText,
+                                        timestamp: new Date().toISOString(),
+                                        status: 'sent'
+                                    });
+                                }
                             }).catch(e => console.error('[Meta AI Reply Send Error]', e.message));
                         }
                     }
@@ -1887,6 +1907,51 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         
         const instanceRes = await pool.query(query, params);
         if (instanceRes.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
+
+app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res) => {
+    try {
+        const { name, category, language, body } = req.body;
+        const instRes = await pool.query('SELECT * FROM instances WHERE id = $1 AND user_id = $2', [req.params.instanceId, req.user.id]);
+        if (instRes.rows.length === 0) return res.status(404).json({ error: 'Instance not found' });
+        const inst = instRes.rows[0];
+        
+        if (inst.provider !== 'meta' || !inst.meta_waba_id) {
+            return res.status(400).json({ error: 'Not a valid Meta instance with WABA ID' });
+        }
+        
+        const payload = {
+            name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+            language: language || 'en',
+            category: category || 'MARKETING',
+            allow_category_change: true,
+            components: [
+                {
+                    type: 'BODY',
+                    text: body
+                }
+            ]
+        };
+
+        const response = await fetch(`https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${inst.meta_access_token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await response.json();
+        if (!response.ok || data.error) {
+            return res.status(400).json({ error: data.error?.message || 'Meta API error' });
+        }
+        
+        res.json({ success: true, data });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
         
         const inst = instanceRes.rows[0];
         if (!inst.meta_waba_id || !inst.meta_access_token) return res.status(400).json({ error: 'Not a properly configured Meta instance' });
@@ -2293,10 +2358,29 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             }
             msgId = sentMsg.key.id;
         }
+        
+        let displayMediaUrl = media;
+        if (media && media.startsWith('data:')) {
+            // Save base64 to local file so we don't blow up DB and can load it in UI
+            const mimeMatch = media.match(/^data:(.*?);base64,/);
+            const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+            let ext = mimeType.split('/')[1] || 'bin';
+            if (ext.includes(';')) ext = ext.split(';')[0];
+            const base64Data = media.split(',')[1];
+            const buffer = Buffer.from(base64Data, 'base64');
+            const fileName = `chat_media_${Date.now()}.${ext}`;
+            const fs = require('fs');
+            const path = require('path');
+            fs.writeFileSync(path.join(__dirname, 'uploads', fileName), buffer);
+            displayMediaUrl = `/uploads/${fileName}`;
+        }
+
         await pool.query(
             'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING',
-            [msgId, instanceId, remoteJid, true, message, media, type, new Date(), 'sent', quotedMsgId]
+            [msgId, instanceId, remoteJid, true, message, displayMediaUrl, type, new Date(), 'sent', quotedMsgId]
         );
+        media = displayMediaUrl; // Update media for socket emit
+    
 
         // Emit to Socket.io
         io.emit('new_message', {

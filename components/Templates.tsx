@@ -14,6 +14,8 @@ export default function Templates({ instances, currentUser, apiBase }) {
   }, [instances]);
   
   const [loading, setLoading] = useState(false);
+         const [isCreating, setIsCreating] = useState(false);
+         const [createForm, setCreateForm] = useState({ name: '', category: 'MARKETING', language: 'en', body: '' });
   
   useEffect(() => {
     if (selectedInstance) fetchTemplates();
@@ -29,7 +31,34 @@ export default function Templates({ instances, currentUser, apiBase }) {
     } catch (e) {}
   };
 
-  const syncTemplates = async () => {
+  const createTemplate = async () => {
+            if (!createForm.name || !createForm.body) {
+                setError("Name and Body are required.");
+                return;
+            }
+            setLoading(true);
+            setError("");
+            try {
+                const res = await fetch(`${apiBase}/api/meta/templates/create/${selectedInstance}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey },
+                    body: JSON.stringify(createForm)
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setIsCreating(false);
+                    setCreateForm({ name: '', category: 'MARKETING', language: 'en', body: '' });
+                    syncTemplates(); // sync from Meta after create
+                } else {
+                    setError(data.error || "Failed to create template");
+                }
+            } catch (e) {
+                setError("Network error");
+            }
+            setLoading(false);
+        };
+        
+        const syncTemplates = async () => {
     setLoading(true);
     setError("");
     try {
