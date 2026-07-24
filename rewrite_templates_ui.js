@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+const fs = require('fs');
+
+const tsx = `import React, { useState, useEffect } from 'react';
 import { RefreshCw, LayoutTemplate, AlertCircle, Plus, Trash2 } from 'lucide-react';
 
 export default function Templates({ instances, currentUser, apiBase }) {
@@ -37,7 +39,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
 
   const fetchTemplates = async () => {
     try {
-      const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstance}`, {
+      const res = await fetch(\`\${apiBase}/api/meta/templates/\${selectedInstance}\`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       const data = await res.json();
@@ -49,7 +51,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${apiBase}/api/meta/templates/sync/${selectedInstance}`, {
+      const res = await fetch(\`\${apiBase}/api/meta/templates/sync/\${selectedInstance}\`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       if (res.ok) {
@@ -65,8 +67,8 @@ export default function Templates({ instances, currentUser, apiBase }) {
   };
   
   const extractVariables = (text) => {
-    const matches = text.match(/\{\{(\d+)\}\}/g) || [];
-    return [...new Set(matches.map(m => m.replace(/\D/g, '')))].sort((a, b) => a - b);
+    const matches = text.match(/\\{\\{(\\d+)\\}\\}/g) || [];
+    return [...new Set(matches.map(m => m.replace(/\\D/g, '')))].sort((a, b) => a - b);
   };
   
   const bodyVars = extractVariables(bodyText);
@@ -145,7 +147,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
         
         const payload = { name, category, language, components };
 
-        const res = await fetch(`${apiBase}/api/meta/templates/create/${selectedInstance}`, {
+        const res = await fetch(\`\${apiBase}/api/meta/templates/create/\${selectedInstance}\`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey },
             body: JSON.stringify(payload)
@@ -249,7 +251,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
                                 <div className="mt-2 p-3 bg-[#0b141a] rounded">
                                     <p className="text-xs text-gray-400 mb-2">Provide example values for header variables (Required for Meta Verification)</p>
                                     {headerVars.map(v => (
-                                        <input key={'hv'+v} type="text" placeholder={`Example for {{${v}}}`} value={examples.header[v] || ''} onChange={e => setExamples({...examples, header: {...examples.header, [v]: e.target.value}})} className="w-full bg-[#202c33] text-white border border-gray-700 rounded px-3 py-1 text-sm mb-2" />
+                                        <input key={'hv'+v} type="text" placeholder={\`Example for {{\${v}}}\`} value={examples.header[v] || ''} onChange={e => setExamples({...examples, header: {...examples.header, [v]: e.target.value}})} className="w-full bg-[#202c33] text-white border border-gray-700 rounded px-3 py-1 text-sm mb-2" />
                                     ))}
                                 </div>
                             )}
@@ -277,7 +279,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
                           <div className="mt-2 p-3 bg-[#0b141a] rounded">
                               <p className="text-xs text-gray-400 mb-2">Provide example values for body variables (Required for Meta Verification)</p>
                               {bodyVars.map(v => (
-                                  <input key={'bv'+v} type="text" placeholder={`Example for {{${v}}}`} value={examples.body[v] || ''} onChange={e => setExamples({...examples, body: {...examples.body, [v]: e.target.value}})} className="w-full bg-[#202c33] text-white border border-gray-700 rounded px-3 py-1 text-sm mb-2" />
+                                  <input key={'bv'+v} type="text" placeholder={\`Example for {{\${v}}}\`} value={examples.body[v] || ''} onChange={e => setExamples({...examples, body: {...examples.body, [v]: e.target.value}})} className="w-full bg-[#202c33] text-white border border-gray-700 rounded px-3 py-1 text-sm mb-2" />
                               ))}
                           </div>
                       )}
@@ -360,11 +362,11 @@ export default function Templates({ instances, currentUser, apiBase }) {
             <div key={tpl.id} className="bg-[#111b21] rounded-xl border border-gray-800 p-5 flex flex-col hover:border-gray-700 transition-colors">
                 <div className="flex justify-between items-start mb-3">
                     <h3 className="font-bold text-lg text-white truncate pr-2" title={tpl.name}>{tpl.name}</h3>
-                    <span className={`px-2 py-1 rounded text-xs font-bold whitespace-nowrap ${
+                    <span className={\`px-2 py-1 rounded text-xs font-bold whitespace-nowrap \${
                         tpl.status === 'APPROVED' ? 'bg-green-500/20 text-green-500' : 
                         tpl.status === 'REJECTED' ? 'bg-red-500/20 text-red-500' : 
                         'bg-yellow-500/20 text-yellow-500'
-                    }`}>
+                    }\`}>
                         {tpl.status}
                     </span>
                 </div>
@@ -381,14 +383,14 @@ export default function Templates({ instances, currentUser, apiBase }) {
                         } catch (e) {}
                         
                         return components?.map((c, i) => {
-                            if (c.type === 'HEADER') return <div key={i} className="font-bold mb-2 pb-2 border-b border-gray-800">{c.text || `[${c.format} HEADER]`}</div>;
+                            if (c.type === 'HEADER') return <div key={i} className="font-bold mb-2 pb-2 border-b border-gray-800">{c.text || \`[\${c.format} HEADER]\`}</div>;
                             if (c.type === 'BODY') return <div key={i} className="whitespace-pre-wrap mb-2">{c.text}</div>;
                             if (c.type === 'FOOTER') return <div key={i} className="text-xs text-gray-500 mt-2">{c.text}</div>;
                             if (c.type === 'BUTTONS') return (
                                 <div key={i} className="mt-3 space-y-1">
                                     {c.buttons?.map((b, j) => (
                                         <div key={j} className="text-xs bg-[#202c33] text-center p-2 rounded text-[#00a884]">
-                                            {b.type === 'URL' ? `🔗 ${b.text}` : b.type === 'PHONE_NUMBER' ? `📞 ${b.text}` : `💬 ${b.text}`}
+                                            {b.type === 'URL' ? \`🔗 \${b.text}\` : b.type === 'PHONE_NUMBER' ? \`📞 \${b.text}\` : \`💬 \${b.text}\`}
                                         </div>
                                     ))}
                                 </div>
@@ -404,3 +406,6 @@ export default function Templates({ instances, currentUser, apiBase }) {
     </div>
   );
 }
+`;
+fs.writeFileSync('/app/applet/components/Templates.tsx', tsx);
+console.log("Rewrote Templates.tsx successfully.");

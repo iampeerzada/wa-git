@@ -290,10 +290,6 @@ const setupWorker = (instancesMap) => {
                         'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
                         [msgId, instanceId, jid, true, finalMessage, mediaUrl, mediaType, new Date(), 'sent']
                     );
-                    
-                } catch (err) {
-                    throw err;
-                }
 
                     // B. Online Status
                     await sock.sendPresenceUpdate('available', jid);
