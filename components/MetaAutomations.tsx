@@ -119,7 +119,8 @@ export default function MetaAutomations({ instances, currentUser, apiBase }) {
     }
   };
 
-  const AutomationNode = ({ node, level = 0 }) => {
+  const AutomationNode = ({ node, level = 0, path = [] }) => {
+    const currentPath = [...path, node.name || 'Unnamed Option'];
     const children = automations.filter(a => a.parent_id === node.id);
     const [expanded, setExpanded] = useState(true);
 
@@ -135,6 +136,13 @@ export default function MetaAutomations({ instances, currentUser, apiBase }) {
           )}
           
           <div className="flex-1">
+            <div className="text-[11px] text-gray-500 font-mono mb-1 flex items-center gap-1">
+              {path.length > 0 ? (
+                  <>Path: {path.map((p, i) => <React.Fragment key={i}><span className="text-gray-400">{p}</span> ➔ </React.Fragment>)}<span className="text-blue-400">{node.name || 'Unnamed Option'}</span></>
+              ) : (
+                  <span className="text-blue-400">Root Node: {node.name || 'Unnamed Option'}</span>
+              )}
+            </div>
             <div className="flex flex-wrap items-center gap-2 mb-1">
               <span className="font-semibold text-white text-base">{node.name || 'Unnamed Option'}</span>
               
@@ -184,7 +192,7 @@ export default function MetaAutomations({ instances, currentUser, apiBase }) {
         {expanded && children.length > 0 && (
           <div className={`mt-2 border-l-2 border-gray-700/50 ml-6 pl-4 relative`}>
             {children.map(child => (
-              <AutomationNode key={child.id} node={child} level={level + 1} />
+              <AutomationNode key={child.id} node={child} level={level + 1} path={currentPath} />
             ))}
           </div>
         )}

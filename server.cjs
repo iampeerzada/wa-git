@@ -987,7 +987,7 @@ app.post('/api/meta/webhook', async (req, res) => {
                                 const currentNodeId = stateRes.rows[0].current_node_id;
                                 
                                 // Look for children of current node that match the keyword
-                                const childNode = autoRes.rows.find(r => r.parent_id === currentNodeId && (r.keyword || '').toLowerCase().trim() === msgText);
+                                const childNode = autoRes.rows.find(r => r.parent_id == currentNodeId && (r.keyword || '').toLowerCase().trim() === msgText);
                                 if (childNode) {
                                     matchedNode = childNode;
                                 } else {
@@ -1025,10 +1025,10 @@ app.post('/api/meta/webhook', async (req, res) => {
                                 
                                 if (matchedNode.action_type === 'go_back') {
                                     // Find parent
-                                    const parentNode = autoRes.rows.find(r => r.id === matchedNode.parent_id);
+                                    const parentNode = autoRes.rows.find(r => r.id == matchedNode.parent_id);
                                     if (parentNode) {
                                         // Go to grandparent
-                                        const grandParent = autoRes.rows.find(r => r.id === parentNode.parent_id);
+                                        const grandParent = autoRes.rows.find(r => r.id == parentNode.parent_id);
                                         if (grandParent) {
                                             executionNode = grandParent;
                                         } else {
@@ -2196,10 +2196,10 @@ app.put('/api/automations/:id', authenticate, async (req, res) => {
 });
 app.post('/api/automations/:instanceId', authenticate, async (req, res) => {
     try {
-        const { keyword, match_type, reply_type, text_content, media_url, template_name, template_language } = req.body;
+        const { name, parent_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type, options } = req.body;
         await pool.query(
-            'INSERT INTO automations (instance_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-            [req.params.instanceId, keyword, match_type, reply_type, text_content, media_url, template_name, template_language]
+            'INSERT INTO automations (instance_id, name, parent_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type, options) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
+            [req.params.instanceId, name || '', parent_id || null, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type || 'message', options ? JSON.stringify(options) : '[]']
         );
         res.json({ success: true });
     } catch (e) {
@@ -2209,7 +2209,15 @@ app.post('/api/automations/:instanceId', authenticate, async (req, res) => {
 
 app.delete('/api/automations/:id', authenticate, async (req, res) => {
     try {
-        await pool.query('DELETE FROM automations WHERE id = $1', [req.params.id]);
+        await pool.query(`
+            WITH RECURSIVE nodes_to_delete AS (
+                SELECT id FROM automations WHERE id = $1
+                UNION
+                SELECT a.id FROM automations a
+                INNER JOIN nodes_to_delete n ON a.parent_id = n.id
+            )
+            DELETE FROM automations WHERE id IN (SELECT id FROM nodes_to_delete);
+        `, [req.params.id]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
