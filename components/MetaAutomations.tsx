@@ -75,7 +75,7 @@ export default function MetaAutomations({ instances, currentUser, apiBase, media
       if (res.ok) {
         fetchAutomations();
         setIsEditing(false);
-        setFormData({ id: null, name: '', keyword: '', match_type: 'exact', reply_type: 'text', text_content: '', template_name: '', template_language: 'en', action_type: 'message', media_url: '' });
+        setFormData({ id: null, name: '', keyword: '', match_type: 'exact', reply_type: 'text', text_content: '', template_name: '', template_language: 'en', action_type: 'message', media_url: '', options: [] });
       }
     } catch (e) {}
   };
@@ -93,7 +93,7 @@ export default function MetaAutomations({ instances, currentUser, apiBase, media
 
   const openAddNode = (parentId) => {
     setEditingParentId(parentId);
-    setFormData({ id: null, name: '', keyword: '', match_type: parentId ? 'exact' : 'welcome', reply_type: 'text', text_content: '', template_name: '', template_language: 'en', action_type: 'message', media_url: '' });
+    setFormData({ id: null, name: '', keyword: '', match_type: parentId ? 'exact' : 'welcome', reply_type: 'text', text_content: '', template_name: '', template_language: 'en', action_type: 'message', media_url: '', options: [] });
     setIsEditing(true);
   };
 
