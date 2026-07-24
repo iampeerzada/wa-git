@@ -405,18 +405,17 @@ async function connectToWhatsApp(instanceId) {
             auth: state,
             printQRInTerminal: false,
             browser: Browsers.macOS('Desktop'),
+            agent: new (require('https')).Agent({ family: 4 }),
             markOnlineOnConnect: false,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 10000,
             retryRequestDelayMs: 5000,
             getMessage,
-                        options: {
-                agent: new (require('https')).Agent({ family: 4 }),
+            options: {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Origin': 'https://web.whatsapp.com',
-                    
+                    'Origin': 'https://web.whatsapp.com'
                 }
             }
         });
