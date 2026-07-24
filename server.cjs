@@ -408,7 +408,7 @@ async function connectToWhatsApp(instanceId) {
             connectTimeoutMs: 60000,
             keepAliveIntervalMs: 25000,
             retryRequestDelayMs: 5000,
-            browser: require('@whiskeysockets/baileys').Browsers.macOS('Desktop'),
+            browser: ['Ubuntu', 'Chrome', '20.0.04'],
             syncFullHistory: true,
             getMessage
         });
