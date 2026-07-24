@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RefreshCw, LayoutTemplate, AlertCircle, Plus, Trash2 } from 'lucide-react';
+import { RefreshCw, LayoutTemplate, AlertCircle, Plus, Trash2, Edit } from 'lucide-react';
 
 export default function Templates({ instances, currentUser, apiBase }) {
   const [templates, setTemplates] = useState([]);
@@ -15,6 +15,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
   
   const [loading, setLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState(null);
   
   // Template Builder State
   const [name, setName] = useState('');
@@ -75,6 +76,53 @@ export default function Templates({ instances, currentUser, apiBase }) {
   const handleAddButton = () => {
       if (buttons.length >= 3) return;
       setButtons([...buttons, { type: 'QUICK_REPLY', text: '' }]);
+  };
+
+  const openEdit = (tpl) => {
+    let comps = [];
+    try { comps = typeof tpl.components === 'string' ? JSON.parse(tpl.components) : tpl.components; } catch(e){}
+    setName(tpl.name);
+    setCategory(tpl.category);
+    setLanguage(tpl.language);
+    
+    let h = comps.find(c => c.type === 'HEADER');
+    if (h) {
+      setHeaderType(h.format || 'NONE');
+      setHeaderText(h.text || '');
+    } else {
+      setHeaderType('NONE');
+      setHeaderText('');
+    }
+    
+    let b = comps.find(c => c.type === 'BODY');
+    if (b) setBodyText(b.text || '');
+    
+    let f = comps.find(c => c.type === 'FOOTER');
+    if (f) setFooterText(f.text || '');
+    
+    let btns = comps.find(c => c.type === 'BUTTONS');
+    if (btns) setButtons(btns.buttons || []);
+    else setButtons([]);
+    
+    setEditingTemplateId(tpl.id);
+    setIsCreating(true);
+  };
+  
+  const deleteTemplate = async (templateName) => {
+      if (!confirm("Delete template? This will also delete it from WhatsApp.")) return;
+      try {
+          const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstance}/${templateName}`, {
+              method: 'DELETE',
+              headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+          });
+          if (res.ok) fetchTemplates();
+          else {
+              const data = await res.json();
+              setError(data.error || "Failed to delete");
+          }
+      } catch (e) {
+          setError("Network error");
+      }
   };
 
   const createTemplate = async () => {
@@ -145,14 +193,21 @@ export default function Templates({ instances, currentUser, apiBase }) {
         
         const payload = { name, category, language, components };
 
-        const res = await fetch(`${apiBase}/api/meta/templates/create/${selectedInstance}`, {
+        const url = editingTemplateId 
+            ? `${apiBase}/api/meta/templates/edit/${selectedInstance}/${editingTemplateId}`
+            : `${apiBase}/api/meta/templates/create/${selectedInstance}`;
+            
+        const payloadToSend = editingTemplateId ? { components } : payload;
+            
+        const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payloadToSend)
         });
         const data = await res.json();
         if (res.ok) {
             setIsCreating(false);
+            setEditingTemplateId(null);
             setName(''); setBodyText(''); setHeaderText(''); setFooterText('');
             setHeaderType('NONE'); setButtons([]); setExamples({body: {}, header: {}});
             syncTemplates();
@@ -186,7 +241,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
       
       {isCreating ? (
           <div className="bg-[#111b21] rounded-xl border border-gray-800 p-6 mb-6">
-              <h3 className="text-lg font-bold mb-4">Create New Template</h3>
+              <h3 className="text-lg font-bold mb-4">{editingTemplateId ? 'Edit Template' : 'Create New Template'}</h3>
               
               <div className="space-y-6">
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -195,9 +250,10 @@ export default function Templates({ instances, currentUser, apiBase }) {
                           <input 
                               type="text" 
                               value={name} 
+                              disabled={!!editingTemplateId}
                               onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_'))} 
                               placeholder="e.g. order_confirmation"
-                              className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-4 py-2"
+                              className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-4 py-2 disabled:opacity-50"
                           />
                           <p className="text-xs text-gray-500 mt-1">Lowercase, numbers, underscores.</p>
                       </div>
@@ -205,8 +261,9 @@ export default function Templates({ instances, currentUser, apiBase }) {
                           <label className="block text-sm text-gray-400 mb-1">Category</label>
                           <select 
                               value={category} 
+                              disabled={!!editingTemplateId}
                               onChange={(e) => setCategory(e.target.value)}
-                              className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-4 py-2"
+                              className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-4 py-2 disabled:opacity-50"
                           >
                               <option value="MARKETING">Marketing (Promotions, Offers)</option>
                               <option value="UTILITY">Utility (Updates, Alerts)</option>
@@ -217,8 +274,9 @@ export default function Templates({ instances, currentUser, apiBase }) {
                           <label className="block text-sm text-gray-400 mb-1">Language</label>
                           <select 
                               value={language} 
+                              disabled={!!editingTemplateId}
                               onChange={(e) => setLanguage(e.target.value)}
-                              className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-4 py-2"
+                              className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-4 py-2 disabled:opacity-50"
                           >
                               <option value="en">English (en)</option>
                               <option value="en_US">English (US)</option>
@@ -322,9 +380,9 @@ export default function Templates({ instances, currentUser, apiBase }) {
                   </div>
                   
                   <div className="flex justify-end gap-3 pt-4 border-t border-gray-800">
-                      <button onClick={() => setIsCreating(false)} className="px-4 py-2 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800">Cancel</button>
+                      <button onClick={() => { setIsCreating(false); setEditingTemplateId(null); }} className="px-4 py-2 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800">Cancel</button>
                       <button onClick={createTemplate} disabled={loading} className="bg-[#25D366] hover:bg-[#20bd5a] text-black font-bold px-4 py-2 rounded-lg">
-                          {loading ? 'Creating...' : 'Submit to Meta for Verification'}
+                          {loading ? 'Submitting...' : (editingTemplateId ? 'Save Changes' : 'Submit to Meta for Verification')}
                       </button>
                   </div>
               </div>
@@ -358,15 +416,23 @@ export default function Templates({ instances, currentUser, apiBase }) {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {templates.map(tpl => (
             <div key={tpl.id} className="bg-[#111b21] rounded-xl border border-gray-800 p-5 flex flex-col hover:border-gray-700 transition-colors">
+                <div className="flex justify-end gap-2 mb-2">
+                    <button onClick={() => openEdit(tpl)} className="text-gray-400 hover:text-blue-400 p-1"><Edit size={16}/></button>
+                    <button onClick={() => deleteTemplate(tpl.name)} className="text-gray-400 hover:text-red-400 p-1"><Trash2 size={16}/></button>
+                </div>
                 <div className="flex justify-between items-start mb-3">
-                    <h3 className="font-bold text-lg text-white truncate pr-2" title={tpl.name}>{tpl.name}</h3>
-                    <span className={`px-2 py-1 rounded text-xs font-bold whitespace-nowrap ${
-                        tpl.status === 'APPROVED' ? 'bg-green-500/20 text-green-500' : 
-                        tpl.status === 'REJECTED' ? 'bg-red-500/20 text-red-500' : 
-                        'bg-yellow-500/20 text-yellow-500'
-                    }`}>
-                        {tpl.status}
-                    </span>
+                    <div className="flex-1 min-w-0 pr-2">
+                        <h3 className="font-bold text-lg text-white truncate" title={tpl.name}>{tpl.name}</h3>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className={`px-2 py-1 rounded text-xs font-bold whitespace-nowrap ${
+                            tpl.status === 'APPROVED' ? 'bg-green-500/20 text-green-500' : 
+                            tpl.status === 'REJECTED' ? 'bg-red-500/20 text-red-500' : 
+                            'bg-yellow-500/20 text-yellow-500'
+                        }`}>
+                            {tpl.status}
+                        </span>
+                    </div>
                 </div>
                 <div className="flex gap-2 text-xs text-gray-500 mb-4">
                     <span className="bg-[#202c33] px-2 py-1 rounded">{tpl.category}</span>
