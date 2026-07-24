@@ -1990,7 +1990,11 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
         
         const data = await response.json();
         if (!response.ok || data.error) {
-            return res.status(400).json({ error: data.error?.message || 'Meta API error' });
+            let errMsg = data.error?.error_user_msg || data.error?.message || 'Meta API error';
+            if (data.error?.error_data) {
+                errMsg += " Details: " + JSON.stringify(data.error.error_data);
+            }
+            return res.status(400).json({ error: errMsg });
         }
         
         res.json({ success: true, data });

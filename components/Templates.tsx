@@ -105,7 +105,7 @@ export default function Templates({ instances, currentUser, apiBase }) {
             if (headerType === 'TEXT') {
                 headerComp.text = headerText;
                 if (headerVars.length > 0) {
-                    headerComp.example = { header_text: [headerVars.map(v => examples.header[v])] };
+                    headerComp.example = { header_text: headerVars.map(v => examples.header[v]) };
                 }
             } else {
                 // Media headers require example handler in meta api, we will omit for simple creation or provide a dummy
