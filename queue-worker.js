@@ -203,7 +203,53 @@ const setupWorker = (instancesMap) => {
                         name: options.templateName,
                         language: { code: options.templateLanguage || 'en' }
                     };
-                    if (mediaUrl) {
+                    
+                    let componentsPayload = [];
+                    try {
+                        const tplRes = await pool.query('SELECT components FROM meta_templates WHERE instance_id = $1 AND name = $2', [instanceId, options.templateName]);
+                        if (tplRes.rows.length > 0) {
+                            const dbComponents = tplRes.rows[0].components || [];
+                            let userVars = [];
+                            if (finalMessage && finalMessage.includes('|')) {
+                                userVars = finalMessage.split('|').map(s => s.trim()).slice(1);
+                            }
+                            let varIndex = 0;
+                            for (const c of dbComponents) {
+                                if (c.type === 'HEADER' && (c.format === 'IMAGE' || c.format === 'VIDEO' || c.format === 'DOCUMENT')) {
+                                    if (mediaUrl) {
+                                        let pType = 'image';
+                                        if (c.format === 'VIDEO' || mediaUrl.endsWith('.mp4')) pType = 'video';
+                                        else if (c.format === 'DOCUMENT' || mediaUrl.endsWith('.pdf')) pType = 'document';
+                                        componentsPayload.push({
+                                            type: "header",
+                                            parameters: [
+                                                { type: pType, [pType]: { link: mediaUrl } }
+                                            ]
+                                        });
+                                    }
+                                } else if (c.type === 'BODY') {
+                                    const matches = c.text ? c.text.match(/\{\{\d+\}\}/g) : null;
+                                    let count = 0;
+                                    if (matches) count = new Set(matches).size;
+                                    
+                                    if (count > 0) {
+                                        const parameters = [];
+                                        for (let i = 0; i < count; i++) {
+                                            parameters.push({ type: "text", text: userVars[varIndex] || "-" });
+                                            varIndex++;
+                                        }
+                                        componentsPayload.push({ type: "body", parameters });
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.error("[Meta Template Build Error]", e.message);
+                    }
+                    
+                    if (componentsPayload.length > 0) {
+                        msgData.template.components = componentsPayload;
+                    } else if (mediaUrl) {
                         let pType = 'image';
                         if (mediaUrl.endsWith('.pdf')) pType = 'document';
                         else if (mediaUrl.endsWith('.mp4')) pType = 'video';
@@ -284,6 +330,8 @@ const setupWorker = (instancesMap) => {
                     }
                 }
 
+                console.log(`[Meta API] Sending message to ${number} via ${instance.metaPhoneNumberId}`);
+                console.log(`[Meta API] Request Payload: ${JSON.stringify(msgData)}`);
                 const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
                     method: 'POST',
                     headers: {
@@ -294,14 +342,16 @@ const setupWorker = (instancesMap) => {
                 });
                 
                 const metaJson = await metaRes.json();
+                console.log(`[Meta API] Response: ${JSON.stringify(metaJson)}`);
                 if (!metaRes.ok || metaJson.error) {
+                    console.error(`[Meta API] Error: ${JSON.stringify(metaJson.error)}`);
                     throw new Error(metaJson.error?.message || 'Meta API Error');
                 }
                 
                 const msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
                 await pool.query(
                     'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                    [userId, instanceId, number, 'delivered', msgId, finalMessage || options?.templateName]
+                    [userId, instanceId, number, 'sent', msgId, finalMessage || options?.templateName]
                 );
                 
                 // Also save to chat_messages so it appears in Chat Interface

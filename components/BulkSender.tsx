@@ -522,7 +522,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                   <textarea 
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
-                    placeholder="Hello! Use {Hi|Hello} for spintax support."
+                    placeholder="Hello! Use {Hi|Hello} for spintax. For templates with variables, use: [META TEMPLATE] name | var1 | var2"
                     rows={8}
                     className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-[#25D366]/50 outline-none transition-all resize-none flex-1"
                   />

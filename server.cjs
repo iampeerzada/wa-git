@@ -405,7 +405,11 @@ async function connectToWhatsApp(instanceId) {
             auth: state,
             printQRInTerminal: false,
             browser: Browsers.macOS('Desktop'),
-                        agent: new (require('https')).Agent({ 
+                        agent: process.env.PROXY_URL ? 
+                (process.env.PROXY_URL.startsWith('socks') ? 
+                    new (require('socks-proxy-agent').SocksProxyAgent)(process.env.PROXY_URL) : 
+                    new (require('https-proxy-agent').HttpsProxyAgent)(process.env.PROXY_URL)
+                ) : new (require('https')).Agent({ 
                 family: 4,
                 rejectUnauthorized: false,
                 minVersion: 'TLSv1.2',
@@ -907,6 +911,27 @@ app.get('/api/meta/webhook', (req, res) => {
 app.post('/api/meta/webhook', async (req, res) => {
     const body = req.body;
     if (body.object) {
+        if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.statuses && body.entry[0].changes[0].value.statuses[0]) {
+            const statusObj = body.entry[0].changes[0].value.statuses[0];
+            const msgId = statusObj.id;
+            const status = statusObj.status; // 'sent', 'delivered', 'read', 'failed'
+            const error = statusObj.errors ? JSON.stringify(statusObj.errors) : null;
+            
+            console.log(`[Meta Webhook] Status update for ${msgId}: ${status}`);
+            if (error) console.error(`[Meta Webhook] Error info for ${msgId}: ${error}`);
+
+            try {
+                // Update message logs (bulk sender)
+                await pool.query('UPDATE message_logs SET status = $1 WHERE message_id = $2', [status, msgId]);
+                // Update chat messages (chat interface)
+                await pool.query('UPDATE chat_messages SET status = $1 WHERE id = $2', [status, msgId]);
+                
+                io.emit('message_status', { id: msgId, status });
+            } catch (e) {
+                console.error('[Meta Webhook Status DB Error]', e.message);
+            }
+        }
+
         if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages && body.entry[0].changes[0].value.messages[0]) {
             const phoneNumberId = body.entry[0].changes[0].value.metadata.phone_number_id;
             const msg = body.entry[0].changes[0].value.messages[0];
