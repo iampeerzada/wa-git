@@ -37,8 +37,28 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [showChatLabelModal, setShowChatLabelModal] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
+  const selectedInstanceIdRef = useRef(selectedInstanceId);
+  const selectedSessionRef = useRef(selectedSession);
+  
+  useEffect(() => { selectedInstanceIdRef.current = selectedInstanceId; }, [selectedInstanceId]);
+  useEffect(() => { selectedSessionRef.current = selectedSession; }, [selectedSession]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleSelectSession = async (session: ChatSession) => {
+    setSelectedSession(session);
+    if (session.unreadCount > 0) {
+      try {
+        await fetch(`${apiBase}/api/chat/messages/${selectedInstanceId}/${session.remoteJid}/read`, {
+          method: 'POST',
+          headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+        });
+        setSessions(prev => prev.map(s => s.remoteJid === session.remoteJid ? { ...s, unreadCount: 0 } : s));
+      } catch (e) {
+        console.error('Failed to mark as read', e);
+      }
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -117,10 +137,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     socketRef.current = socket;
 
     socket.on('new_message', (msg: ChatMessage) => {
-      if (msg.instanceId === selectedInstanceId) {
+      const currentInstanceId = selectedInstanceIdRef.current;
+      const currentSession = selectedSessionRef.current;
+      
+      if (msg.instanceId === currentInstanceId) {
         // Update messages if this is the active chat
-        if (selectedSession && msg.remoteJid === selectedSession.remoteJid) {
+        if (currentSession && msg.remoteJid === currentSession.remoteJid) {
           setMessages(prev => [...prev, msg]);
+          if (!msg.fromMe) {
+            fetch(`${apiBase}/api/chat/messages/${currentInstanceId}/${currentSession.remoteJid}/read`, {
+              method: 'POST',
+              headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+            }).catch(e => console.error('Failed to mark incoming message as read', e));
+          }
         }
         
         // Update sessions list
@@ -128,7 +157,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           const existing = prev.find(s => s.remoteJid === msg.remoteJid);
           if (existing) {
             return [
-              { ...existing, lastMessage: msg, unreadCount: selectedSession?.remoteJid === msg.remoteJid ? 0 : existing.unreadCount + 1 },
+              { ...existing, lastMessage: msg, unreadCount: (currentSession?.remoteJid === msg.remoteJid) ? 0 : (existing.unreadCount || 0) + 1 },
               ...prev.filter(s => s.remoteJid !== msg.remoteJid)
             ];
           } else {
@@ -143,7 +172,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     });
 
     socket.on('presence_update', (data: { instanceId: string, remoteJid: string, userJid: string, status: string }) => {
-        if (data.instanceId === selectedInstanceId) {
+        const currentInstanceId = selectedInstanceIdRef.current;
+        if (data.instanceId === currentInstanceId) {
             if (data.status === 'composing' || data.status === 'recording') {
                 setTypingStatus(prev => ({ ...prev, [data.remoteJid]: true }));
                 setTimeout(() => {
@@ -164,7 +194,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     return () => {
       socket.disconnect();
     };
-  }, [selectedInstanceId, selectedSession, apiBase]);
+  }, [apiBase]);
 
   // Fetch Templates
   useEffect(() => {
@@ -522,7 +552,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             filteredSessions.map((session) => (
               <button
                 key={session.remoteJid}
-                onClick={() => setSelectedSession(session)}
+                onClick={() => handleSelectSession(session)}
                 className={`w-full flex items-center gap-3 p-3 hover:bg-[#202c33] transition-colors border-b border-gray-800/50 ${
                   selectedSession?.remoteJid === session.remoteJid ? 'bg-[#2a3942]' : ''
                 }`}

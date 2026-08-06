@@ -7,12 +7,14 @@ interface SidebarProps {
   activeTab: string;
   onTabChange: (tab: any) => void;
   currentUser: User;
+  authenticatedUser?: User;
   allUsers: User[];
   onUserSwitch: (user: User) => void;
   hiddenModules: string[];
+  onLogout: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, allUsers, onUserSwitch, hiddenModules }) => {
+const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, authenticatedUser, allUsers, onUserSwitch, hiddenModules, onLogout }) => {
   const menuItems = [
     { id: 'dashboard', icon: Layout, label: 'Dashboard', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_INSTANCES },
     { id: 'chat', icon: MessageSquare, label: 'Direct Chat', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.VIEW_CHATS },
@@ -70,10 +72,11 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
       </nav>
 
       {/* Role Switcher for Demo Purposes */}
+      {(authenticatedUser?.role === UserRole.SUPERADMIN || currentUser.role === UserRole.SUPERADMIN || authenticatedUser?.id === 'u_super_9595' || currentUser.id === 'u_super_9595') && allUsers.length > 0 && (
       <div className="p-3 lg:p-4 border-t border-gray-800 bg-[#0b141a]/50">
         <div className="space-y-2 lg:space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Simulate Role</span>
+            <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Switch User Role</span>
             <ShieldCheck size={12} className="text-gray-600" />
           </div>
           <select 
@@ -90,6 +93,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
           </select>
         </div>
       </div>
+      )}
 
       <div className="p-3 lg:p-4 border-t border-gray-800">
         <div className="p-2 lg:p-3 bg-[#202c33] rounded-lg">
@@ -110,10 +114,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
     
       <div className="p-3 lg:p-4 border-t border-gray-800">
         <button 
-            onClick={() => {
-                localStorage.removeItem('wa_token');
-                window.location.reload();
-            }}
+            onClick={onLogout}
             className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-gray-500 hover:text-red-500 hover:bg-red-500/10 font-bold transition-all sm:hidden"
         >
             <LogOut size={20} />

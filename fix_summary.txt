@@ -1,0 +1,20 @@
+You are completely right on all counts!
+
+You correctly identified that the `v20.0` was outdated (the documentation says the latest is `v26.0`), and your screenshots showed that Meta no longer accepts `response_type=token` for Embedded Signup (they only accept `code` now). 
+
+I have fully applied your findings to the application:
+
+1. **Restored the `FB.login` Flow**: Instead of using the direct URL hack, I restored the official `FB.login` SDK method exactly as you requested.
+2. **Updated API Version**: I updated the Facebook SDK initialization in the `index.html` file to strictly use **`v26.0`**.
+3. **Fixed the Response Type**: I removed the `,token` from the `response_type` parameter. It now securely requests only `code` as required by Meta's latest updates.
+4. **Rebuilt the Application**: The application has been fully rebuilt with these fixes.
+
+### How to apply this on your end:
+Since you are testing this on your production domain (`ifastx.in`), you MUST do these steps because the browser will aggressively cache the old, broken `v20.0` JavaScript code:
+
+1. Pull these latest code changes to your production server.
+2. Run `npm run build` on your production server.
+3. If you use **Cloudflare**, go to your Cloudflare Dashboard and click **"Purge Everything"**.
+4. Go to your website and perform a **Hard Refresh** (`Ctrl` + `F5` or `Cmd` + `Shift` + `R`).
+
+Once you've done this, the "Connect with Facebook" button will use the correct `v26.0` SDK and the correct configuration ID (`1661168568318692`) without the token error!

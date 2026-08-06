@@ -949,7 +949,7 @@ app.post('/api/meta/webhook', async (req, res) => {
             } else if (msg.type === 'image') {
                 text = msg.image?.caption || '[Image]';
                 mediaType = 'image';
-                mediaUrl = msg.image?.id; // Storing ID for now, proper fetch requires API call
+                mediaUrl = msg.image?.id;
             } else if (msg.type === 'video') {
                 text = msg.video?.caption || '[Video]';
                 mediaType = 'video';
@@ -973,6 +973,10 @@ app.post('/api/meta/webhook', async (req, res) => {
                 if (instanceRes.rows.length > 0) {
                     const instance = instanceRes.rows[0];
                     const instanceId = instance.id;
+                    
+                    if (mediaUrl) {
+                        mediaUrl = `/api/meta/media/${instanceId}/${mediaUrl}`;
+                    }
                     
                     await pool.query(
                         'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
@@ -2210,6 +2214,65 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
             return res.status(400).json({ error: 'Not a valid Meta instance with WABA ID' });
         }
         
+        // Intercept components to handle media uploads for examples
+        for (let comp of components) {
+            if (comp.type === 'HEADER' && comp.format && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(comp.format)) {
+                if (comp.example && (comp.example.header_handle || comp.example.header_url)) {
+                    const urlArr = comp.example.header_handle || comp.example.header_url;
+                    if (urlArr && urlArr.length > 0) {
+                        const sampleUrl = urlArr[0];
+                        if (sampleUrl && sampleUrl.startsWith('http')) {
+                            try {
+                                console.log("[Meta Template] Downloading example media from:", sampleUrl);
+                                const debugRes = await fetch(`https://graph.facebook.com/v20.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
+                                const debugData = await debugRes.json();
+                                const appId = debugData.data?.app_id;
+                                
+                                if (appId) {
+                                    const mediaRes = await fetch(sampleUrl);
+                                    const mediaBuffer = await mediaRes.arrayBuffer();
+                                    const fileLength = mediaBuffer.byteLength;
+                                    const mimeType = mediaRes.headers.get('content-type') || 'image/jpeg';
+                                    
+                                    console.log("[Meta Template] Starting upload session for App ID:", appId);
+                                    const sessionRes = await fetch(`https://graph.facebook.com/v20.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
+                                        method: 'POST',
+                                        headers: { 'Authorization': `Bearer ${inst.meta_access_token}` }
+                                    });
+                                    const sessionData = await sessionRes.json();
+                                    const sessionId = sessionData.id;
+                                    
+                                    if (sessionId) {
+                                        console.log("[Meta Template] Uploading data to session:", sessionId);
+                                        const uploadRes = await fetch(`https://graph.facebook.com/v20.0/${sessionId}`, {
+                                            method: 'POST',
+                                            headers: {
+                                                'Authorization': `Bearer ${inst.meta_access_token}`,
+                                                'file_offset': '0'
+                                            },
+                                            body: Buffer.from(mediaBuffer)
+                                        });
+                                        const uploadData = await uploadRes.json();
+                                        if (uploadData.h) {
+                                            console.log("[Meta Template] Got upload handle:", uploadData.h);
+                                            comp.example.header_handle = [uploadData.h];
+                                            delete comp.example.header_url;
+                                        }
+                                    } else {
+                                        console.error("[Meta Template] Failed to get session ID:", sessionData);
+                                    }
+                                } else {
+                                    console.error("[Meta Template] Failed to get App ID from token:", debugData);
+                                }
+                            } catch (e) {
+                                console.error("[Meta Template] Error uploading media example:", e.message);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         const payload = {
             name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
             language: language || 'en',
@@ -2290,6 +2353,57 @@ app.post('/api/meta/templates/edit/:instanceId/:templateId', authenticate, async
         
         const inst = instanceRes.rows[0];
         
+        for (let comp of components) {
+            if (comp.type === 'HEADER' && comp.format && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(comp.format)) {
+                if (comp.example && (comp.example.header_handle || comp.example.header_url)) {
+                    const urlArr = comp.example.header_handle || comp.example.header_url;
+                    if (urlArr && urlArr.length > 0) {
+                        const sampleUrl = urlArr[0];
+                        if (sampleUrl && sampleUrl.startsWith('http')) {
+                            try {
+                                console.log("[Meta Template] Downloading example media from:", sampleUrl);
+                                const debugRes = await fetch(`https://graph.facebook.com/v20.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
+                                const debugData = await debugRes.json();
+                                const appId = debugData.data?.app_id;
+                                
+                                if (appId) {
+                                    const mediaRes = await fetch(sampleUrl);
+                                    const mediaBuffer = await mediaRes.arrayBuffer();
+                                    const fileLength = mediaBuffer.byteLength;
+                                    const mimeType = mediaRes.headers.get('content-type') || 'image/jpeg';
+                                    
+                                    const sessionRes = await fetch(`https://graph.facebook.com/v20.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
+                                        method: 'POST',
+                                        headers: { 'Authorization': `Bearer ${inst.meta_access_token}` }
+                                    });
+                                    const sessionData = await sessionRes.json();
+                                    const sessionId = sessionData.id;
+                                    
+                                    if (sessionId) {
+                                        const uploadRes = await fetch(`https://graph.facebook.com/v20.0/${sessionId}`, {
+                                            method: 'POST',
+                                            headers: {
+                                                'Authorization': `Bearer ${inst.meta_access_token}`,
+                                                'file_offset': '0'
+                                            },
+                                            body: Buffer.from(mediaBuffer)
+                                        });
+                                        const uploadData = await uploadRes.json();
+                                        if (uploadData.h) {
+                                            comp.example.header_handle = [uploadData.h];
+                                            delete comp.example.header_url;
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                console.error("[Meta Template] Error uploading media example:", e.message);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         const url = `https://graph.facebook.com/v20.0/${req.params.templateId}`;
         const fetchRes = await fetch(url, { 
             method: 'POST',
@@ -2463,6 +2577,20 @@ app.delete('/api/labels/:id', authenticate, async (req, res) => {
     }
 });
 
+app.post('/api/chat/messages/:instanceId/:remoteJid/read', authenticate, async (req, res) => {
+    try {
+        const { instanceId, remoteJid } = req.params;
+        await pool.query(`
+            UPDATE chat_messages 
+            SET status = 'read' 
+            WHERE instance_id = $1 AND remote_jid = $2 AND from_me = false AND status != 'read'
+        `, [instanceId, remoteJid]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/chat/labels', authenticate, async (req, res) => {
     const { instanceId, remoteJid, labelId, action } = req.body;
     try {
@@ -2537,6 +2665,12 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
                 ORDER BY timestamp DESC LIMIT 1
             `, [instanceId, row.remote_jid]);
             
+            const unreadRes = await pool.query(`
+                SELECT COUNT(*) FROM chat_messages 
+                WHERE instance_id = $1 AND remote_jid = $2 AND from_me = false AND status != 'read'
+            `, [instanceId, row.remote_jid]);
+            const unreadCount = parseInt(unreadRes.rows[0].count, 10);
+            
             const labels = await pool.query(`
                 SELECT l.id, l.name, l.color 
                 FROM chat_labels l
@@ -2545,6 +2679,7 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
             `, [instanceId, row.remote_jid]);
 
             sessions.push({
+                unreadCount,
                 remoteJid: row.remote_jid,
                 lastMessage: lastMsg.rows[0] ? {
                     id: lastMsg.rows[0].id,
@@ -2564,6 +2699,35 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
     }
 });
 
+app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
+    try {
+        const { instanceId, mediaId } = req.params;
+        const instRes = await pool.query('SELECT meta_access_token FROM instances WHERE id = $1', [instanceId]);
+        if (instRes.rows.length === 0) return res.status(404).send('Instance not found');
+        const token = instRes.rows[0].meta_access_token;
+        
+        const metadataRes = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const metadata = await metadataRes.json();
+        
+        if (!metadata.url) return res.status(404).send('Media URL not found');
+        
+        const mediaRes = await fetch(metadata.url, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        res.setHeader('Content-Type', metadata.mime_type || 'application/octet-stream');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        
+        const buffer = await mediaRes.arrayBuffer();
+        res.send(Buffer.from(buffer));
+    } catch (e) {
+        console.error("[Meta Media Fetch Error]", e);
+        res.status(500).send('Error fetching media');
+    }
+});
+
 app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, res) => {
     try {
         const { instanceId, remoteJid } = req.params;
@@ -2574,14 +2738,25 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
             LIMIT 100
         `, [instanceId, remoteJid]);
         
-        const mapped = result.rows.map(row => ({
-            id: row.id,
-            instanceId: row.instance_id,
-            remoteJid: row.remote_jid,
-            fromMe: row.from_me,
-            text: row.text,
-            timestamp: row.timestamp
-        }));
+        const mapped = result.rows.map(row => {
+            let mediaUrl = row.media_url;
+            if (mediaUrl && !mediaUrl.startsWith('http') && !mediaUrl.startsWith('/')) {
+                mediaUrl = `/api/meta/media/${row.instance_id}/${mediaUrl}`;
+            }
+            return {
+                id: row.id,
+                instanceId: row.instance_id,
+                remoteJid: row.remote_jid,
+                fromMe: row.from_me,
+                text: row.text,
+                mediaUrl: mediaUrl,
+                mediaType: row.media_type,
+                status: row.status,
+                timestamp: row.timestamp,
+                quotedMsgId: row.quoted_msg_id,
+                quotedMsgJson: row.quoted_msg_json ? JSON.parse(row.quoted_msg_json) : undefined
+            };
+        });
         res.json(mapped);
     } catch (err) {
         res.status(500).json({ error: err.message });

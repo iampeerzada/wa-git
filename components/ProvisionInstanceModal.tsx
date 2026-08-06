@@ -28,19 +28,10 @@ export default function ProvisionInstanceModal({ isOpen, onClose, onSubmit, plan
       return;
     }
     
-    // Initialize if not already initialized
-    window.FB.init({
-      appId: '4126835067540230',
-      cookie: true,
-      xfbml: true,
-      version: 'v20.0'
-    });
-
+    alert("Starting Facebook Login using NEW Config ID (1661168568318692) and Response Type: code");
     window.FB.login(function (response) {
       if (response.authResponse) {
         const code = response.authResponse.code;
-        // The code can be sent to backend, or if you request token, you get accessToken.
-        // The most secure way is to send the code to backend. For demo purposes here, we can set the token directly if returned.
         if (code) {
             setLoading(true);
             fetch('/api/meta/exchange-code', {
@@ -72,8 +63,8 @@ export default function ProvisionInstanceModal({ isOpen, onClose, onSubmit, plan
         alert('User cancelled login or did not fully authorize.');
       }
     }, {
-      config_id: '1551670126364630',
-      response_type: 'code,token',
+      config_id: '1661168568318692',
+      response_type: 'code',
       override_default_response_type: true,
       extras: {
         "setup": {},

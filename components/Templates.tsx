@@ -168,7 +168,7 @@ export default function Templates({ instances, currentUser, apiBase, mediaAssets
                     if (headerType === 'VIDEO') sampleUrl = "https://ifastx.in/sample.mp4";
                     if (headerType === 'DOCUMENT') sampleUrl = "https://ifastx.in/sample.pdf";
                 }
-                headerComp.example = { header_handle: [sampleUrl] };
+                headerComp.example = { header_url: [sampleUrl] };
             }
             components.push(headerComp);
         }

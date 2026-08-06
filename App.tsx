@@ -46,6 +46,19 @@ const App: React.FC = () => {
   ]);
 
   const [users, setUsers] = useState<User[]>([]);
+  const [authenticatedUser, setAuthenticatedUser] = useState<User>(() => {
+    const savedAuthUser = localStorage.getItem('wa_original_user');
+    if (savedAuthUser) return JSON.parse(savedAuthUser);
+    
+    // Fallback for existing sessions
+    const savedUser = localStorage.getItem('wa_cached_user');
+    if (savedUser) {
+       const user = JSON.parse(savedUser);
+       localStorage.setItem('wa_original_user', JSON.stringify(user));
+       return user;
+    }
+    return null;
+  });
   const [currentUser, setCurrentUser] = useState<User>(() => {
     const savedId = localStorage.getItem('wa_current_user_id');
     const savedUser = localStorage.getItem('wa_cached_user');
@@ -124,11 +137,12 @@ const App: React.FC = () => {
     if (currentUser.id === 'u_demo_user') return; // Skip fetch for demo user
     const fetchUsers = async () => {
       try {
+        const authU = authenticatedUser || currentUser;
         const res = await fetch(`${API_BASE}/api/users?_t=${Date.now()}`, {
           headers: {
-            'X-User-ID': currentUser.id,
-            'X-Role': currentUser.role,
-            'X-API-Key': currentUser.apiKey
+            'X-User-ID': authU.id,
+            'X-Role': authU.role,
+            'X-API-Key': authU.apiKey
           }
         });
         if (res.ok) {
@@ -255,11 +269,13 @@ const App: React.FC = () => {
             user = { ...user, id: 'u_super_9595', role: UserRole.SUPERADMIN };
         }
         setCurrentUser(user);
+        setAuthenticatedUser(user);
         setIsAuthenticated(true);
         setShowLandingPage(false);
         localStorage.setItem('wa_auth_session', 'true');
         localStorage.setItem('wa_current_user_id', user.id);
         localStorage.setItem('wa_cached_user', JSON.stringify(user));
+        localStorage.setItem('wa_original_user', JSON.stringify(user));
       } else {
         const data = await res.json();
         setAuthError(data.error || 'Invalid credentials. Check your username and password.');
@@ -363,6 +379,7 @@ const App: React.FC = () => {
     localStorage.removeItem('wa_auth_session');
     localStorage.removeItem('wa_current_user_id');
     localStorage.removeItem('wa_cached_user');
+    localStorage.removeItem('wa_original_user');
   };
 
   const visibleInstances = useMemo(() => {
@@ -598,10 +615,11 @@ const App: React.FC = () => {
         <Sidebar 
           activeTab={activeTab} 
           onTabChange={(tab) => { setActiveTab(tab); setIsSidebarOpen(false); }} 
-          currentUser={currentUser} 
+          currentUser={currentUser} authenticatedUser={authenticatedUser || currentUser} 
           allUsers={users}
           onUserSwitch={setCurrentUser}
           hiddenModules={hiddenModules}
+          onLogout={handleLogout}
         />
       </div>
       
