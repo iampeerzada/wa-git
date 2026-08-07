@@ -1,52 +1,6 @@
-const dns = require('dns');
-try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
 const { Worker } = require('bullmq');
-const IORedis = require('ioredis');
-
-class Redis extends IORedis {
-    constructor(...args) {
-        super(...args);
-        this.on('error', (err) => {
-            if (err.code !== 'ECONNREFUSED') {
-                console.error('[Worker Redis] Error:', err.message);
-            }
-        });
-        this.on('ready', () => {
-            this.config('SET', 'stop-writes-on-bgsave-error', 'no').catch(err => {
-                console.error('[Worker Redis] Failed to set stop-writes-on-bgsave-error:', err.message);
-            });
-        });
-    }
-}
 const { Pool } = require('pg');
-const { 
-  prepareWAMessageMedia, 
-  generateWAMessageFromContent,
-  proto
-} = require('@whiskeysockets/baileys');
-
-const messageCache = new Map();
-setInterval(() => {
-    const now = Date.now();
-    for (const [id, data] of messageCache.entries()) {
-        if (now - data.timestamp > 3600000) {
-            messageCache.delete(id);
-        }
-    }
-}, 600000);
-const saveMessage = (key, message) => {
-    if (key && key.id) {
-        messageCache.set(key.id, { message, timestamp: Date.now() });
-    }
-};
-const getMessage = async (key) => {
-    if (key && key.id) {
-        const data = messageCache.get(key.id);
-        if (data && data.message) return data.message;
-    }
-    return { conversation: '' };
-};
-
+const Redis = require('ioredis');
 require('dotenv').config();
 
 // --- CONFIGURATION ---
@@ -86,45 +40,41 @@ const humanJitter = async (min = 2000, max = 5000) => {
 // --- WORKER INITIALIZATION ---
 const connection = new Redis(REDIS_URL, {
   maxRetriesPerRequest: null,
+  retryStrategy(times) {
+    if (times > 3) return null;
+    return Math.min(times * 50, 2000);
+  }
+});
+connection.on('error', (err) => {
+  if (err.code !== 'ECONNREFUSED') console.error('[Worker Redis] Error:', err.message);
 });
 
 const setupWorker = (instancesMap) => {
-  /**
-   * Enterprise Anti-Ban Worker
-   * Implements BullMQ Rate Limiting + Randomized Human Jitter
-   */
   const worker = new Worker('whatsapp-outbound', async (job) => {
     let { 
       instanceId, 
-      number, 
-      message, 
-      userId, 
-      mediaUrl, 
-      mediaType, 
-      waButtons, 
+      number,
+      message,
+      userId,
+      mediaUrl,
+      mediaType,
+      waButtons,
       options,
-      instanceIds, // Array of instance IDs for rotation
-      templates    // Array of message templates for rotation
+      instanceIds,
+      templates
     } = job.data;
 
     // --- MULTI-INSTANCE & MULTI-TEMPLATE ROTATION ---
     if (instanceIds && Array.isArray(instanceIds) && instanceIds.length > 0) {
-        // Get global rotation counter for this user/campaign
         const rotationKey = `rotation_cursor:${userId}`;
         const rotationCount = await connection.incr(rotationKey);
-        
-        // Rotate Instance: Switch every 5 messages
-        // (1-5 -> Inst 1, 6-10 -> Inst 2, etc.)
         const instIdx = Math.floor((rotationCount - 1) / 5) % instanceIds.length;
         instanceId = instanceIds[instIdx];
     }
 
     if (templates && Array.isArray(templates) && templates.length > 0) {
-        // Rotate Template: Cycle through templates sequentially or randomly
-        // We'll use sequential based on the same rotation counter
-        const rotationKey = `rotation_cursor:${userId}`; // Re-use or fetch if not fetched
-        const rotationCount = await connection.get(rotationKey) || 1; // Simple fetch
-        
+        const rotationKey = `rotation_cursor:${userId}`;
+        const rotationCount = await connection.get(rotationKey) || 1;
         const tplIdx = (rotationCount - 1) % templates.length;
         message = templates[tplIdx];
     }
@@ -157,12 +107,57 @@ const setupWorker = (instancesMap) => {
         console.error('[Worker] Limit Check Error:', err.message);
     }
 
+    // Check Wallet Balance Before Sending
+    let cost = 1;
+    let costType = 'baileys_credit_cost';
+    
+    // We need the instance to know if it's meta
+    const checkInst = instancesMap.get(instanceId);
+    if (checkInst && checkInst.provider === 'meta') {
+        if (options?.templateName) {
+            costType = 'meta_utility_credit_cost'; // Default
+            try {
+                const tplRes = await pool.query('SELECT category FROM meta_templates WHERE name = $1 AND instance_id = $2', [options.templateName, instanceId]);
+                if (tplRes.rows.length > 0) {
+                    const cat = (tplRes.rows[0].category || '').toUpperCase();
+                    if (cat === 'MARKETING') costType = 'meta_marketing_credit_cost';
+                    else if (cat === 'AUTHENTICATION') costType = 'meta_authentication_credit_cost';
+                    else if (cat === 'UTILITY') costType = 'meta_utility_credit_cost';
+                }
+            } catch(e) {
+                console.error('[Worker] Template Category Lookup Error:', e.message);
+            }
+        } else {
+            costType = 'meta_regular_credit_cost';
+        }
+    }
+
+    try {
+        const settingsRes = await pool.query('SELECT key, value FROM system_settings WHERE key = $1', [costType]);
+        if (settingsRes.rows.length > 0 && settingsRes.rows[0].value) {
+            cost = parseFloat(settingsRes.rows[0].value) || 1;
+        }
+
+        const walletRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
+        if (walletRes.rows.length > 0) {
+            const balance = parseFloat(walletRes.rows[0].wallet_balance) || 0;
+            if (balance < cost) {
+                await pool.query(
+                    'INSERT INTO message_logs (user_id, instance_id, recipient, status, error, content) VALUES ($1, $2, $3, $4, $5, $6)',
+                    [userId, instanceId, number, 'failed', `Insufficient wallet balance (needs ${cost}, has ${balance})`, message || options?.templateName]
+                );
+                return; // Stop processing this message
+            }
+        }
+    } catch (err) {
+        console.error('[Worker] Wallet Check Error:', err.message);
+    }
+
     // Retry Logic: 1. Try -> 2. Retry Same -> 3. Retry Different Instance
     const maxAttempts = 3;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            // If retrying with a different instance (Attempt 3), pick a new one
             if (attempt === 3 && instanceIds && instanceIds.length > 1) {
                  const otherInstances = instanceIds.filter(id => id !== instanceId);
                  if (otherInstances.length > 0) {
@@ -176,14 +171,13 @@ const setupWorker = (instancesMap) => {
               throw new Error(`Instance ${instanceId} is offline.`);
             }
 
-            const sock = instance.sock;
-            const jid = toJid(number);
             const finalMessage = solveSpintax(message);
+
+            let msgId = `msg_${Date.now()}`;
 
             if (instance.provider === 'meta') {
                 const jid = number.replace(/[^0-9]/g, '');
                 
-                // Simulate human delay if needed, though Meta API is less strict about bans for fast sending
                 if (options?.complianceMode) {
                     await humanJitter(5000, 15000);
                 }
@@ -196,143 +190,60 @@ const setupWorker = (instancesMap) => {
                     text: { body: finalMessage || ' ' }
                 };
                 
-                // If a template is provided in the job data, use it!
                 if (options?.templateName) {
                     msgData.type = "template";
                     msgData.template = {
                         name: options.templateName,
-                        language: { code: options.templateLanguage || 'en' }
+                        language: { code: options.templateLanguage || "en" }
                     };
-                    
-                    let componentsPayload = [];
-                    try {
-                        const tplRes = await pool.query('SELECT components FROM meta_templates WHERE instance_id = $1 AND name = $2', [instanceId, options.templateName]);
-                        if (tplRes.rows.length > 0) {
-                            const dbComponents = tplRes.rows[0].components || [];
-                            let userVars = [];
-                            if (finalMessage && finalMessage.includes('|')) {
-                                userVars = finalMessage.split('|').map(s => s.trim()).slice(1);
-                            }
-                            let varIndex = 0;
-                            for (const c of dbComponents) {
-                                if (c.type === 'HEADER' && (c.format === 'IMAGE' || c.format === 'VIDEO' || c.format === 'DOCUMENT')) {
-                                    if (mediaUrl) {
-                                        let pType = 'image';
-                                        if (c.format === 'VIDEO' || mediaUrl.endsWith('.mp4')) pType = 'video';
-                                        else if (c.format === 'DOCUMENT' || mediaUrl.endsWith('.pdf')) pType = 'document';
-                                        componentsPayload.push({
-                                            type: "header",
-                                            parameters: [
-                                                { type: pType, [pType]: { link: mediaUrl } }
-                                            ]
-                                        });
-                                    }
-                                } else if (c.type === 'BODY') {
-                                    const matches = c.text ? c.text.match(/\{\{\d+\}\}/g) : null;
-                                    let count = 0;
-                                    if (matches) count = new Set(matches).size;
-                                    
-                                    if (count > 0) {
-                                        const parameters = [];
-                                        for (let i = 0; i < count; i++) {
-                                            parameters.push({ type: "text", text: userVars[varIndex] || "-" });
-                                            varIndex++;
-                                        }
-                                        componentsPayload.push({ type: "body", parameters });
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        console.error("[Meta Template Build Error]", e.message);
-                    }
-                    
-                    if (componentsPayload.length > 0) {
-                        msgData.template.components = componentsPayload;
-                    } else if (mediaUrl) {
-                        let pType = 'image';
-                        if (mediaUrl.endsWith('.pdf')) pType = 'document';
-                        else if (mediaUrl.endsWith('.mp4')) pType = 'video';
-                        else if (mediaType) pType = mediaType;
-                        
+                    if (options.templateVariables && options.templateVariables.length > 0) {
                         msgData.template.components = [
                             {
-                                type: "header",
-                                parameters: [
-                                    {
-                                        type: pType,
-                                        [pType]: { link: mediaUrl }
-                                    }
-                                ]
+                                type: "body",
+                                parameters: options.templateVariables.map(v => ({ type: "text", text: String(v) }))
                             }
                         ];
+                        if (mediaUrl) {
+                            msgData.template.components.push({
+                                type: "header",
+                                parameters: [{ type: mediaType || "image", [mediaType || "image"]: { link: mediaUrl } }]
+                            });
+                        }
+                    } else if (mediaUrl) {
+                        msgData.template.components = [{
+                            type: "header",
+                            parameters: [{ type: mediaType || "image", [mediaType || "image"]: { link: mediaUrl } }]
+                        }];
                     }
                     delete msgData.text;
                 } else if (mediaUrl) {
                     msgData.type = mediaType || "image";
-                    msgData[msgData.type] = { link: mediaUrl };
-                    if (finalMessage) msgData[msgData.type].caption = finalMessage;
+                    msgData[mediaType || "image"] = { link: mediaUrl };
+                    if (finalMessage) msgData[mediaType || "image"].caption = finalMessage;
                     delete msgData.text;
-                }
-                
-                                if (!options?.templateName && waButtons && waButtons.length > 0) {
-                    const replyButtons = waButtons.filter(b => b.type === 'reply').slice(0, 3);
-                    const urlButton = waButtons.find(b => b.type === 'url' || b.type === 'link');
-                    const callButton = waButtons.find(b => b.type === 'call');
-                    
-                    if (replyButtons.length > 0) {
-                        msgData.type = 'interactive';
-                        msgData.interactive = {
-                            type: 'button',
-                            body: { text: finalMessage || ' ' },
-                            action: {
-                                buttons: replyButtons.map((btn, i) => ({
-                                    type: 'reply',
-                                    reply: { id: btn.id || ('btn_' + i), title: btn.displayText.substring(0, 20) }
-                                }))
-                            }
-                        };
-                        if (mediaUrl) {
-                            msgData.interactive.header = {
-                                type: mediaType || "image",
-                                [mediaType || "image"]: { link: mediaUrl }
-                            };
+                } else if (waButtons && waButtons.length > 0) {
+                    msgData.type = "interactive";
+                    msgData.interactive = {
+                        type: "button",
+                        body: { text: finalMessage || ' ' },
+                        action: {
+                            buttons: waButtons.map((btn, idx) => ({
+                                type: "reply",
+                                reply: { id: btn.id || `btn_${idx}`, title: btn.displayText.substring(0, 20) }
+                            }))
                         }
-                        delete msgData.text;
-                        delete msgData[mediaType || "image"];
-                    } else if (urlButton || callButton) {
-                        msgData.type = 'interactive';
-                        const actionParameters = urlButton ? {
-                            display_text: urlButton.displayText,
-                            url: urlButton.url || urlButton.phoneNumber
-                        } : {
-                            display_text: callButton.displayText,
-                            phone_number: callButton.phoneNumber || callButton.url
+                    };
+                    if (mediaUrl) {
+                        msgData.interactive.header = {
+                            type: mediaType || "image",
+                            [mediaType || "image"]: { link: mediaUrl }
                         };
-                        const actionName = urlButton ? 'cta_url' : 'cta_call';
-                        
-                        msgData.interactive = {
-                            type: actionName,
-                            body: { text: finalMessage || ' ' },
-                            action: {
-                                name: actionName,
-                                parameters: actionParameters
-                            }
-                        };
-                        if (mediaUrl) {
-                            msgData.interactive.header = {
-                                type: mediaType || "image",
-                                [mediaType || "image"]: { link: mediaUrl }
-                            };
-                        }
-                        delete msgData.text;
-                        delete msgData[mediaType || "image"];
                     }
+                    delete msgData.text;
                 }
 
                 console.log(`[Meta API] Sending message to ${number} via ${instance.metaPhoneNumberId}`);
-                console.log(`[Meta API] Request Payload: ${JSON.stringify(msgData)}`);
-                const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
+                const metaRes = await fetch(`https://graph.facebook.com/v26.0/${instance.metaPhoneNumberId}/messages`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${instance.metaAccessToken}`,
@@ -342,150 +253,117 @@ const setupWorker = (instancesMap) => {
                 });
                 
                 const metaJson = await metaRes.json();
-                console.log(`[Meta API] Response: ${JSON.stringify(metaJson)}`);
                 if (!metaRes.ok || metaJson.error) {
-                    console.error(`[Meta API] Error: ${JSON.stringify(metaJson.error)}`);
                     throw new Error(metaJson.error?.message || 'Meta API Error');
                 }
                 
-                const msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
-                await pool.query(
-                    'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                    [userId, instanceId, number, 'sent', msgId, finalMessage || options?.templateName]
-                );
+                msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
                 
-                // Also save to chat_messages so it appears in Chat Interface
-                await pool.query(
-                    'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
-                    [msgId, instanceId, jid, true, finalMessage || options?.templateName, mediaUrl, mediaType, new Date(), 'sent']
-                );
-
-                // Update Quota
-                await pool.query(
-                    'UPDATE subscriptions SET messages_sent_today = messages_sent_today + 1 WHERE user_id = $1',
-                    [userId]
-                );
-                
-                return { success: true, messageId: msgId };
-            }
-            if (waButtons && waButtons.length > 0) {
-                // ... (Existing Button Logic) ...
-                const buttons = waButtons.map(btn => {
-                  const type = String(btn.type).toLowerCase();
-                  if (type === 'url' || type === 'link') {
-                    return {
-                      name: 'cta_url',
-                      buttonParamsJson: JSON.stringify({
-                        display_text: btn.displayText,
-                        url: btn.url,
-                        merchant_url: btn.url
-                      })
-                    };
-                  } else if (type === 'call') {
-                    return {
-                      name: 'cta_call',
-                      buttonParamsJson: JSON.stringify({
-                        display_text: btn.displayText,
-                        id: btn.phoneNumber || btn.url || "1234567890",
-                        phone_number: btn.phoneNumber || btn.url || "1234567890"
-                      })
-                    };
-                  } else {
-                    return {
-                      name: 'quick_reply',
-                      buttonParamsJson: JSON.stringify({
-                        display_text: btn.displayText,
-                        id: String(btn.id || btn.displayText)
-                      })
-                    };
-                  }
-                });
-
-                let headerOptions = {
-                  hasMediaAttachment: false
-                };
-                if (headerTitle) {
-                  headerOptions.title = headerTitle;
-                }
-
-                if (mediaUrl) {
-                  const type = (mediaType === 'video' || mediaType === 'document') ? mediaType : 'image';
-                  const mediaPayload = { [type]: { url: mediaUrl } };
-                  const preparedMedia = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
-                  
-                  headerOptions.hasMediaAttachment = true;
-                  if (type === 'image') headerOptions.imageMessage = preparedMedia.imageMessage;
-                  else if (type === 'video') headerOptions.videoMessage = preparedMedia.videoMessage;
-                  else if (type === 'document') headerOptions.documentMessage = preparedMedia.documentMessage;
-                }
-
-                const interactiveMessage = {
-                  body: proto.Message.InteractiveMessage.Body.create({ text: finalMessage || ' ' }),
-                  nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                    buttons: buttons,
-                    messageVersion: 1
-                  })
-                };
-
-                if (headerTitle || mediaUrl) {
-                  interactiveMessage.header = proto.Message.InteractiveMessage.Header.create(headerOptions);
-                }
-
-                if (footerText) {
-                  interactiveMessage.footer = proto.Message.InteractiveMessage.Footer.create({ text: footerText });
-                }
-
-                const content = {
-                  viewOnceMessage: {
-                    message: {
-                      messageContextInfo: {
-                        deviceListMetadata: {},
-                        deviceListMetadataVersion: 2
-                      },
-                      interactiveMessage: proto.Message.InteractiveMessage.fromObject(interactiveMessage)
-                    }
-                  }
-                };
-
-                const msg = generateWAMessageFromContent(jid, content, { 
-                  userJid: sock.user.id,
-                  upload: sock.waUploadToServer
-                });
-
-                await sock.relayMessage(jid, msg.message, { messageId: msg.key.id }); saveMessage(msg.key, msg.message);
-
-                await pool.query(
-                  'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                  [userId, instanceId, number, 'delivered', msg.key.id, finalMessage]
-                );
             } else {
-                // Standard Text/Media Message fallback
-                let payload = {};
-                if (mediaUrl) {
-                  const type = mediaType || 'image';
-                  payload = { [type]: { url: mediaUrl }, caption: finalMessage };
-                } else {
-                  payload = { text: finalMessage };
-                }
+                // Baileys
+                const sock = instance.sock;
+                const jid = toJid(number);
                 
-                const sentMsg = await sock.sendMessage(jid, payload);
-                await pool.query(
-                  'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                  [userId, instanceId, number, 'delivered', sentMsg.key.id, finalMessage]
-                );
+                const { generateWAMessageFromContent, proto, prepareWAMessageMedia } = require('@whiskeysockets/baileys');
+                
+                if (waButtons && waButtons.length > 0) {
+                    const buttons = waButtons.map((btn, idx) => {
+                      const type = String(btn.type).toLowerCase();
+                      if (type === 'url' || type === 'link') {
+                        return {
+                          name: 'cta_url',
+                          buttonParamsJson: JSON.stringify({ display_text: btn.displayText, url: btn.url, merchant_url: btn.url })
+                        };
+                      } else if (type === 'call') {
+                        return {
+                          name: 'cta_call',
+                          buttonParamsJson: JSON.stringify({ display_text: btn.displayText, id: btn.phoneNumber || "123", phone_number: btn.phoneNumber || "123" })
+                        };
+                      } else {
+                        return {
+                          name: 'quick_reply',
+                          buttonParamsJson: JSON.stringify({ display_text: btn.displayText, id: String(btn.id || `btn_${idx}`) })
+                        };
+                      }
+                    });
+
+                    let headerOptions = { hasMediaAttachment: false };
+                    
+                    if (mediaUrl) {
+                      const type = (mediaType === 'video' || mediaType === 'document') ? mediaType : 'image';
+                      const mediaPayload = { [type]: { url: mediaUrl } };
+                      const preparedMedia = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
+                      headerOptions.hasMediaAttachment = true;
+                      if (type === 'image') headerOptions.imageMessage = preparedMedia.imageMessage;
+                      else if (type === 'video') headerOptions.videoMessage = preparedMedia.videoMessage;
+                      else if (type === 'document') headerOptions.documentMessage = preparedMedia.documentMessage;
+                    }
+
+                    const interactiveMessage = {
+                      body: proto.Message.InteractiveMessage.Body.create({ text: finalMessage || ' ' }),
+                      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                        buttons: buttons,
+                        messageVersion: 1
+                      })
+                    };
+                    
+                    if (mediaUrl) {
+                      interactiveMessage.header = proto.Message.InteractiveMessage.Header.create(headerOptions);
+                    }
+
+                    const content = {
+                      viewOnceMessage: {
+                        message: {
+                          messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+                          interactiveMessage: proto.Message.InteractiveMessage.fromObject(interactiveMessage)
+                        }
+                      }
+                    };
+
+                    const msg = generateWAMessageFromContent(jid, content, { userJid: sock.user.id, upload: sock.waUploadToServer });
+                    await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+                    msgId = msg.key.id;
+                } else if (mediaUrl) {
+                    const sendPayload = {};
+                    const type = (mediaType === 'video' || mediaType === 'document' || mediaType === 'audio') ? mediaType : 'image';
+                    sendPayload[type] = { url: mediaUrl };
+                    if (finalMessage && type !== 'audio') sendPayload.caption = finalMessage;
+                    
+                    const res = await sock.sendMessage(jid, sendPayload);
+                    msgId = res.key.id;
+                } else {
+                    const res = await sock.sendMessage(jid, { text: finalMessage });
+                    msgId = res.key.id;
+                }
             }
 
-            // Update Quota
+            // Log Success
+            await pool.query(
+                'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
+                [userId, instanceId, number, 'sent', msgId, finalMessage || options?.templateName]
+            );
+
+            // Update Quota and Wallet
             await pool.query(
                 'UPDATE subscriptions SET messages_sent_today = messages_sent_today + 1 WHERE user_id = $1',
                 [userId]
+            );
+            
+            await pool.query(
+                'UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2',
+                [cost, userId]
+            );
+            
+            await pool.query(
+                'INSERT INTO wallet_transactions (user_id, amount, type, description, message_number, message_id, status) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                [userId, cost, 'debit', `Message to ${number} (${costType})`, number, msgId, 'sent']
             );
 
             // 3. POST-SEND COOL DOWN
             if (options?.complianceMode) {
                 await humanJitter(1000, 2000);
             }
-
+            
             sent = true;
             break; // Exit retry loop on success
 
@@ -493,9 +371,7 @@ const setupWorker = (instancesMap) => {
             lastError = err;
             console.error(`[Worker Attempt ${attempt}] Error: ${err.message}`);
             
-            // If it's the last attempt, don't wait, just let it fail
             if (attempt < maxAttempts) {
-                // Wait before retry
                 if (options?.complianceMode) {
                     await humanJitter(2000, 4000);
                 }
@@ -514,11 +390,8 @@ const setupWorker = (instancesMap) => {
 
     return { status: 'sent' };
   }, { 
-    connection, 
-    // CRITICAL: Concurrency is limited to ensure messages are drip-fed
-    concurrency: 5, 
-    // CRITICAL: BullMQ Rate Limiter (Safety Valve)
-    // Limits the queue to 1 message per instance roughly every 4 seconds globally
+    connection,
+    concurrency: 5,
     limiter: {
       max: 1,
       duration: 4000

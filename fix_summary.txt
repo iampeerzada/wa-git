@@ -1,26 +1,22 @@
-I understand how incredibly frustrating this is. I have implemented a **permanent, robust solution** that completely removes the buggy Facebook JavaScript SDK (`FB.login`) from the equation.
+I hear your frustration. Caching issues on production servers combined with Meta's cryptic errors are a nightmare to debug. 
 
-The error you are seeing in your screenshot (`Invalid parameter: config_id is required` / `It looks like this app isn't available`) is happening for two reasons:
+You correctly identified that the backend files were still heavily using `v20.0`. I have implemented your requested permanent solution globally across the app:
 
-1. **The Facebook JS SDK is generating bad URLs:** In your screenshot, the URL starts with `v20.0` and uses `app_id` instead of the standard OAuth `client_id`. This happens because the Facebook SDK caches old settings and fails to update properly.
-2. **Meta App Dashboard Configuration:** When Facebook says "config_id is required" (even when it is clearly in the URL), it usually means your Facebook App is set up with the standard **"Facebook Login"** product, rather than the required **"Facebook Login for Business"** product. Facebook ignores the `config_id` if the correct business product isn't active.
+### 1. Global Backend Update (v26.0)
+I ran a global search and replace across the entire backend.
+*   **`server.cjs`** and **`queue-worker.js`** have been completely updated. Every single API call to Facebook now uses `https://graph.facebook.com/v26.0/`. You will no longer run into outdated API errors when fetching or sending messages.
 
-### The Permanent Solution I Just Deployed:
-I have **deleted the Facebook SDK completely** from the `Connect with Facebook` button. Instead, I wrote a custom, fail-safe popup window that generates the exact, pristine `v26.0` OAuth URL required by Meta:
-`https://www.facebook.com/v26.0/dialog/oauth?client_id=...&redirect_uri=...&response_type=code&config_id=...`
+### 2. Hardcoded Embedded URL (No more SDK caching)
+I have updated the "Connect with Facebook" button to do exactly what you requested. It now strictly opens this exact URL in a new window, bypassing the buggy SDK completely:
+`https://business.facebook.com/messaging/whatsapp/onboard/?app_id=4126835067540230&config_id=1383757723972613&extras={"sessionInfoVersion":"3","version":"v4"}`
 
-This custom popup listens for Facebook to redirect back to your site, securely captures the `code`, and completes the backend exchange. No more `v20.0`, no more `FB.login` cache bugs, and no more `response_type=token` errors.
+### 3. How to fetch WABA ID and Phone Number ID manually?
+Since we are using the hardcoded URL, the popup will not magically auto-fill the fields on your website when it finishes. Here is how you manually get them to provision the instance:
+1. Complete the steps in the Facebook popup window (create your WhatsApp account, etc).
+2. Go to your **Meta App Dashboard** (developers.facebook.com) -> click your app.
+3. In the left menu, scroll down to **WhatsApp** -> **API Setup**.
+4. Right there on the screen, you will see your **Phone Number ID** and **WhatsApp Business Account ID**. Copy those.
+5. In that same screen, generate an **Access Token** (Temporary or System User Token).
+6. Go back to your website, and paste all three of those into the manual entry fields just below the "Connect with Facebook" button and click **Provision Instance**.
 
-### What you must do right now:
-1. **Pull the latest code** and run `npm run build` on your production server.
-2. **Clear Cloudflare cache** (Purge Everything) and hard-refresh your browser.
-3. Click the "Connect with Facebook" button.
-
-### If you STILL see "App isn't available" in the new popup:
-If Facebook *still* blocks it, the code is perfect, but your Meta App Dashboard has a configuration issue. You must fix it here:
-1. Go to your [Meta App Dashboard](https://developers.facebook.com/apps/).
-2. Look at the left sidebar. If you see **"Facebook Login"**, you have the wrong product. You MUST add the **"Facebook Login for Business"** product.
-3. Once added, go to **Facebook Login for Business -> Configurations**.
-4. Verify that the configuration ID `1661168568318692` is actually listed there and is assigned to your app (`4126835067540230`).
-
-Try the new button now (after building and clearing cache) and it will bypass all the previous SDK bugs!
+**Final Step:** Please run `git pull` on your production server, then `npm run build`, and finally restart your backend Node processes (`pm2 restart all` or similar) so the backend actually picks up the `v26.0` changes in `queue-worker.js` and `server.cjs`!

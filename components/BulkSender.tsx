@@ -93,7 +93,9 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   const isSuspended = currentUser.subscription.status !== 'active';
 
   const isSuper = currentUser.role === UserRole.SUPERADMIN;
-  const showQuickButtons = isSuper || !hiddenModules.includes('bulk-quick-buttons');
+  const selectedInst = instances.find(i => i.id === selectedInstance);
+  const isBaileys = !selectedInst || selectedInst.provider !== 'meta';
+  const showQuickButtons = (isSuper || !hiddenModules.includes('bulk-quick-buttons')) && !isBaileys;
   const showMedia = isSuper || !hiddenModules.includes('bulk-media');
   const showTplBtn = isSuper || !hiddenModules.includes('bulk-templates');
 

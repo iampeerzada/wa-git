@@ -208,6 +208,29 @@ pool.connect(async (err, client, release) => {
             )
         `);
         console.log('[Database] system_settings table verified.');
+        try {
+            await client.query('ALTER TABLE users ADD COLUMN wallet_balance DECIMAL(10,4) DEFAULT 0.00;');
+            console.log('[Database] Added wallet_balance column to users');
+        } catch (e) { }
+
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(50),
+                amount DECIMAL(10,4),
+                type VARCHAR(20),
+                description TEXT,
+                message_number VARCHAR(50),
+                message_id TEXT,
+                status VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        try {
+            await client.query("INSERT INTO system_settings (key, value) VALUES ('baileys_credit_cost', '1'), ('meta_template_credit_cost', '2'), ('meta_regular_credit_cost', '1') ON CONFLICT DO NOTHING;");
+        } catch(e) {}
+
     } catch (dbErr) {
         console.error('[Database] Permission test FAILED:', dbErr.message);
         console.error('[Database] ACTION REQUIRED: Run the GRANT commands in database.sql');
@@ -219,7 +242,16 @@ pool.connect(async (err, client, release) => {
 // Redis & Queue
 let outboundQueue;
 try {
-    const redisConnection = new Redis(REDIS_URL, { maxRetriesPerRequest: null });
+    const redisConnection = new Redis(REDIS_URL, { 
+        maxRetriesPerRequest: null,
+        retryStrategy(times) {
+            if (times > 3) return null;
+            return Math.min(times * 50, 2000);
+        }
+    });
+    redisConnection.on('error', (err) => {
+        if (err.code !== 'ECONNREFUSED') console.error('[Redis] Error:', err.message);
+    });
     outboundQueue = new Queue('whatsapp-outbound', { connection: redisConnection });
     outboundQueue.on('error', (err) => {
         if (err.code !== 'ECONNREFUSED') {
@@ -304,6 +336,30 @@ async function sendSystemNotification(targetUserId, messageText, additionalNumbe
 }
 
 // Daily Count Alert at 12:10 AM
+
+cron.schedule('0 0 * * *', async () => {
+    try {
+        console.log('[Cron] Resetting daily limits...');
+        await pool.query('UPDATE subscriptions SET messages_sent_today = 0');
+    } catch (err) {
+        console.error('[Cron Error] Resetting daily limits:', err.message);
+    }
+});
+
+cron.schedule('0 0 1 * *', async () => {
+    try {
+        console.log('[Cron] Resetting monthly limits...');
+        await pool.query('UPDATE subscriptions SET messages_sent_this_month = 0');
+    } catch (err) {}
+});
+
+cron.schedule('0 0 1 1 *', async () => {
+    try {
+        console.log('[Cron] Resetting yearly limits...');
+        await pool.query('UPDATE subscriptions SET messages_sent_this_year = 0');
+    } catch (err) {}
+});
+
 cron.schedule('10 0 * * *', async () => {
     try {
         console.log('[Cron] Running daily count alert...');
@@ -1185,7 +1241,7 @@ app.post('/api/meta/webhook', async (req, res) => {
                                         }
                                     }
                                     
-                                    let resp = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+                                    let resp = await fetch(`https://graph.facebook.com/v26.0/${phoneNumberId}/messages`, {
                                         method: 'POST',
                                         headers: {
                                             'Authorization': `Bearer ${instance.meta_access_token}`,
@@ -1251,7 +1307,7 @@ app.post('/api/meta/webhook', async (req, res) => {
                             const aiText = response.text;
                             // Clean the 'to' number (remove non-digits, optional +)
                             const toNum = from.replace(/[^0-9]/g, '');
-                            fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+                            fetch(`https://graph.facebook.com/v26.0/${phoneNumberId}/messages`, {
                                 method: 'POST',
                                 headers: {
                                     'Authorization': `Bearer ${instance.meta_access_token}`,
@@ -1667,7 +1723,7 @@ app.post('/api/meta/exchange-code', authenticate, async (req, res) => {
             return res.status(500).json({ error: 'META_APP_SECRET not configured on the server. Please add it to your server configuration.' });
         }
 
-        const tokenResponse = await fetch(`https://graph.facebook.com/v20.0/oauth/access_token?client_id=${appId}&client_secret=${appSecret}&code=${code}`);
+        const tokenResponse = await fetch(`https://graph.facebook.com/v26.0/oauth/access_token?client_id=${appId}&client_secret=${appSecret}&code=${code}`);
         const tokenData = await tokenResponse.json();
 
         if (tokenData.error) {
@@ -1677,7 +1733,7 @@ app.post('/api/meta/exchange-code', authenticate, async (req, res) => {
         const accessToken = tokenData.access_token;
         
         // Let's get the WABAs associated with this user
-        const debugResponse = await fetch(`https://graph.facebook.com/v20.0/debug_token?input_token=${accessToken}&access_token=${appId}|${appSecret}`);
+        const debugResponse = await fetch(`https://graph.facebook.com/v26.0/debug_token?input_token=${accessToken}&access_token=${appId}|${appSecret}`);
         const debugData = await debugResponse.json();
         
         let wabaId = '';
@@ -1690,7 +1746,7 @@ app.post('/api/meta/exchange-code', authenticate, async (req, res) => {
                 wabaId = wabaScope.target_ids[0];
                 
                 // Fetch Phone Numbers for this WABA
-                const pnResponse = await fetch(`https://graph.facebook.com/v20.0/${wabaId}/phone_numbers`, {
+                const pnResponse = await fetch(`https://graph.facebook.com/v26.0/${wabaId}/phone_numbers`, {
                     headers: { 'Authorization': `Bearer ${accessToken}` }
                 });
                 const pnData = await pnResponse.json();
@@ -2176,7 +2232,7 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         const inst = instanceRes.rows[0];
         if (!inst.meta_waba_id || !inst.meta_access_token) return res.status(400).json({ error: 'Not a properly configured Meta instance' });
 
-        const url = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates`;
+        const url = `https://graph.facebook.com/v26.0/${inst.meta_waba_id}/message_templates`;
         console.log(`[META SYNC] Fetching templates for WABA ID ${inst.meta_waba_id}...`);
         const fetchRes = await fetch(url, { headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } });
         const json = await fetchRes.json();
@@ -2224,7 +2280,7 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
                         if (sampleUrl && sampleUrl.startsWith('http')) {
                             try {
                                 console.log("[Meta Template] Downloading example media from:", sampleUrl);
-                                const debugRes = await fetch(`https://graph.facebook.com/v20.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
+                                const debugRes = await fetch(`https://graph.facebook.com/v26.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
                                 const debugData = await debugRes.json();
                                 const appId = debugData.data?.app_id;
                                 
@@ -2235,7 +2291,7 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
                                     const mimeType = mediaRes.headers.get('content-type') || 'image/jpeg';
                                     
                                     console.log("[Meta Template] Starting upload session for App ID:", appId);
-                                    const sessionRes = await fetch(`https://graph.facebook.com/v20.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
+                                    const sessionRes = await fetch(`https://graph.facebook.com/v26.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
                                         method: 'POST',
                                         headers: { 'Authorization': `Bearer ${inst.meta_access_token}` }
                                     });
@@ -2244,7 +2300,7 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
                                     
                                     if (sessionId) {
                                         console.log("[Meta Template] Uploading data to session:", sessionId);
-                                        const uploadRes = await fetch(`https://graph.facebook.com/v20.0/${sessionId}`, {
+                                        const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${sessionId}`, {
                                             method: 'POST',
                                             headers: {
                                                 'Authorization': `Bearer ${inst.meta_access_token}`,
@@ -2281,7 +2337,7 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
             components: components
         };
 
-        const response = await fetch(`https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates`, {
+        const response = await fetch(`https://graph.facebook.com/v26.0/${inst.meta_waba_id}/message_templates`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${inst.meta_access_token}`,
@@ -2321,7 +2377,7 @@ app.delete('/api/meta/templates/:instanceId/:templateName', authenticate, async 
         
         const inst = instanceRes.rows[0];
         
-        const url = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}/message_templates?name=${req.params.templateName}`;
+        const url = `https://graph.facebook.com/v26.0/${inst.meta_waba_id}/message_templates?name=${req.params.templateName}`;
         const fetchRes = await fetch(url, { 
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${inst.meta_access_token}` } 
@@ -2362,7 +2418,7 @@ app.post('/api/meta/templates/edit/:instanceId/:templateId', authenticate, async
                         if (sampleUrl && sampleUrl.startsWith('http')) {
                             try {
                                 console.log("[Meta Template] Downloading example media from:", sampleUrl);
-                                const debugRes = await fetch(`https://graph.facebook.com/v20.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
+                                const debugRes = await fetch(`https://graph.facebook.com/v26.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
                                 const debugData = await debugRes.json();
                                 const appId = debugData.data?.app_id;
                                 
@@ -2372,7 +2428,7 @@ app.post('/api/meta/templates/edit/:instanceId/:templateId', authenticate, async
                                     const fileLength = mediaBuffer.byteLength;
                                     const mimeType = mediaRes.headers.get('content-type') || 'image/jpeg';
                                     
-                                    const sessionRes = await fetch(`https://graph.facebook.com/v20.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
+                                    const sessionRes = await fetch(`https://graph.facebook.com/v26.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
                                         method: 'POST',
                                         headers: { 'Authorization': `Bearer ${inst.meta_access_token}` }
                                     });
@@ -2380,7 +2436,7 @@ app.post('/api/meta/templates/edit/:instanceId/:templateId', authenticate, async
                                     const sessionId = sessionData.id;
                                     
                                     if (sessionId) {
-                                        const uploadRes = await fetch(`https://graph.facebook.com/v20.0/${sessionId}`, {
+                                        const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${sessionId}`, {
                                             method: 'POST',
                                             headers: {
                                                 'Authorization': `Bearer ${inst.meta_access_token}`,
@@ -2404,7 +2460,7 @@ app.post('/api/meta/templates/edit/:instanceId/:templateId', authenticate, async
             }
         }
 
-        const url = `https://graph.facebook.com/v20.0/${req.params.templateId}`;
+        const url = `https://graph.facebook.com/v26.0/${req.params.templateId}`;
         const fetchRes = await fetch(url, { 
             method: 'POST',
             headers: { 
@@ -2706,7 +2762,7 @@ app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
         if (instRes.rows.length === 0) return res.status(404).send('Instance not found');
         const token = instRes.rows[0].meta_access_token;
         
-        const metadataRes = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
+        const metadataRes = await fetch(`https://graph.facebook.com/v26.0/${mediaId}`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         const metadata = await metadataRes.json();
@@ -2831,7 +2887,7 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
                     if (ext.includes(';')) ext = ext.split(';')[0];
                     form.append('file', blob, 'upload.' + ext);
                     
-                    const uploadRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/media`, {
+                    const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${instance.metaPhoneNumberId}/media`, {
                         method: 'POST',
                         headers: {
                             'Authorization': `Bearer ${instance.metaAccessToken}`
@@ -2852,7 +2908,7 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
                 delete msgData.text;
             }
             
-            const metaRes = await fetch(`https://graph.facebook.com/v20.0/${instance.metaPhoneNumberId}/messages`, {
+            const metaRes = await fetch(`https://graph.facebook.com/v26.0/${instance.metaPhoneNumberId}/messages`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${instance.metaAccessToken}`,

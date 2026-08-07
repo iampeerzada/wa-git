@@ -23,73 +23,25 @@ export default function ProvisionInstanceModal({ isOpen, onClose, onSubmit, plan
   const [loading, setLoading] = useState(false);
 
   const launchWhatsAppSignup = () => {
-    // A robust, manual popup approach that bypasses all Facebook JS SDK caching bugs
+    // The user requested to strictly use this manual embedded URL as the SDK is failing in production.
     const appId = '4126835067540230';
     const configId = '1383757723972613';
     
-    // Using the official Facebook Login for Business URL
-    const extras = encodeURIComponent(JSON.stringify({ "setup": {}, "sessionInfoVersion": "3" }));
-    const redirectUri = encodeURIComponent(window.location.origin + '/');
+    const url = `https://business.facebook.com/messaging/whatsapp/onboard/?app_id=${appId}&config_id=${configId}&extras=%7B%22sessionInfoVersion%22%3A%223%22%2C%22version%22%3A%22v4%22%7D`;
     
-    const oauthUrl = `https://www.facebook.com/v26.0/dialog/oauth?client_id=${appId}&redirect_uri=${redirectUri}&response_type=code&config_id=${configId}&extras=${extras}&display=popup`;
+    // Open the official Facebook onboarding popup
+    window.open(url, '_blank', 'width=1000,height=800');
     
-    // Open the manual popup
-    const popup = window.open(oauthUrl, 'fb_oauth', 'width=800,height=700,scrollbars=yes');
-    
-    if (!popup) {
-        alert("Popup was blocked by your browser. Please allow popups for this site.");
-        return;
-    }
-
-    // Set up a listener to catch the redirect when it comes back to our origin
-    const checkPopup = setInterval(() => {
-        try {
-            if (popup.closed) {
-                clearInterval(checkPopup);
-                return;
-            }
-            
-            // Check if the popup has redirected back to our origin
-            const popupUrl = popup.location.href;
-            if (popupUrl.includes(window.location.origin) && popupUrl.includes('code=')) {
-                clearInterval(checkPopup);
-                const urlParams = new URLSearchParams(popup.location.search);
-                const code = urlParams.get('code');
-                popup.close();
-                
-                if (code) {
-                    setLoading(true);
-                    fetch('/api/meta/exchange-code', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': "Bearer " + localStorage.getItem('wa_token') },
-                        body: JSON.stringify({ code })
-                    })
-                    .then(res => res.json())
-                    .then(data => {
-                        setLoading(false);
-                        if (data.error) {
-                            alert('Meta Setup Error: ' + data.error);
-                        } else {
-                            setMetaAccessToken(data.accessToken);
-                            if (data.phoneNumberId) setMetaPhoneNumberId(data.phoneNumberId);
-                            if (data.wabaId) setMetaWabaId(data.wabaId);
-                            alert("Facebook connected successfully! Verify your details and submit.");
-                        }
-                    })
-                    .catch(err => {
-                        setLoading(false);
-                        alert('Connection error');
-                    });
-                }
-            } else if (popupUrl.includes('error=')) {
-                clearInterval(checkPopup);
-                alert("Facebook returned an error. Please try again.");
-                popup.close();
-            }
-        } catch (e) {
-            // Ignore DOMException for cross-origin tracking
-        }
-    }, 500);
+    // Alert the user on how to retrieve the details manually
+    alert(
+      "Facebook setup opened in a new window!\n\n" +
+      "HOW TO GET YOUR CREDENTIALS:\n" +
+      "1. Complete the Facebook setup in the popup window.\n" +
+      "2. When finished, go to your Meta App Dashboard > WhatsApp > API Setup.\n" +
+      "3. Copy the 'Phone Number ID' and 'WhatsApp Business Account ID'.\n" +
+      "4. Generate a 'System User Access Token' (or Temporary Access Token).\n" +
+      "5. Paste them into the manual entry section right here on this page."
+    );
   };
 
   if (!isOpen) return null;

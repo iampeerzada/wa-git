@@ -1,9 +1,13 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, RefreshCw, Menu } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { io } from 'socket.io-client';
+import { Plus, RefreshCw, Menu, Bell, AlertCircle } from 'lucide-react';
 import { InstanceStatus, WhatsAppInstance, MessageTemplate, ContactGroup, User, UserRole, Plan, PlanInterval, Subscription, MediaAsset, Permission } from './types';
 import Dashboard from './components/Dashboard';
 import CodeSnippets from './components/CodeSnippets';
+import { HeaderWallet } from './components/HeaderWallet';
+import WalletManager from './components/WalletManager';
+
 import Sidebar from './components/Sidebar';
 import BulkSender from './components/BulkSender';
 import MetaAutomations from './components/MetaAutomations';
@@ -17,6 +21,7 @@ import MediaLibrary from './components/MediaLibrary';
 import AutoResponderManager from './components/AutoResponderManager';
 import ChatInterface from './components/ChatInterface';
 import TeamManager from './components/TeamManager';
+import { ProfileView } from './components/ProfileView';
 import LoginPage from './components/LoginPage';
 import ProvisionInstanceModal from './components/ProvisionInstanceModal';
 import LandingPage from './components/LandingPage';
@@ -49,20 +54,12 @@ const App: React.FC = () => {
   const [authenticatedUser, setAuthenticatedUser] = useState<User>(() => {
     const savedAuthUser = localStorage.getItem('wa_original_user');
     if (savedAuthUser) return JSON.parse(savedAuthUser);
-    
-    // Fallback for existing sessions
-    const savedUser = localStorage.getItem('wa_cached_user');
-    if (savedUser) {
-       const user = JSON.parse(savedUser);
-       localStorage.setItem('wa_original_user', JSON.stringify(user));
-       return user;
-    }
     return null;
   });
   const [currentUser, setCurrentUser] = useState<User>(() => {
     const savedId = localStorage.getItem('wa_current_user_id');
-    const savedUser = localStorage.getItem('wa_cached_user');
-    return savedUser ? JSON.parse(savedUser) : {
+    const savedOriginalUser = localStorage.getItem('wa_original_user');
+    return savedOriginalUser ? JSON.parse(savedOriginalUser) : {
       id: savedId || 'u_super_9595',
       username: '9595956392',
       role: UserRole.SUPERADMIN,
@@ -167,7 +164,7 @@ const App: React.FC = () => {
                };
             }
             setCurrentUser(me);
-            localStorage.setItem('wa_cached_user', JSON.stringify(me));
+            localStorage.setItem('wa_original_user', JSON.stringify(me));
           }
         }
       } catch (err) {
@@ -242,9 +239,42 @@ const App: React.FC = () => {
       }
     };
 
-    const interval = setInterval(fetchAllData, 5000);
+        const interval = setInterval(fetchAllData, 30000);
     fetchAllData();
-    return () => clearInterval(interval);
+    
+    // Add real-time Socket.IO listeners
+    const socket = io(API_BASE);
+    socket.on('connect', () => {
+        setIsBackendConnected(true);
+        fetchAllData(); // Refresh data on reconnect
+    });
+    
+    socket.on('disconnect', () => {
+        setIsBackendConnected(false);
+    });
+
+    socket.on('qr', (data) => {
+        setInstances(prev => prev.map(inst => 
+            inst.id === data.instanceId ? { ...inst, qr: data.qr, status: 'qr' } : inst
+        ));
+    });
+
+    socket.on('status', (data) => {
+        setInstances(prev => prev.map(inst => 
+            inst.id === data.instanceId ? { ...inst, status: data.status, qr: null } : inst
+        ));
+    });
+
+    socket.on('wallet_update', (data) => {
+        if (data.userId === currentUser.id) {
+            setCurrentUser(prev => ({ ...prev, walletBalance: data.balance }));
+        }
+    });
+
+    return () => {
+        clearInterval(interval);
+        socket.disconnect();
+    };
   }, [currentUser.id, currentUser.role, currentUser.apiKey, isAuthenticated, refreshTrigger]);
 
   // Sync templates to local storage
@@ -274,7 +304,6 @@ const App: React.FC = () => {
         setShowLandingPage(false);
         localStorage.setItem('wa_auth_session', 'true');
         localStorage.setItem('wa_current_user_id', user.id);
-        localStorage.setItem('wa_cached_user', JSON.stringify(user));
         localStorage.setItem('wa_original_user', JSON.stringify(user));
       } else {
         const data = await res.json();
@@ -306,7 +335,6 @@ const App: React.FC = () => {
     };
     setCurrentUser(demoUser);
     localStorage.setItem('wa_current_user_id', demoUser.id);
-    localStorage.setItem('wa_cached_user', JSON.stringify(demoUser));
     localStorage.setItem('wa_auth_session', 'true');
     setInstances([
        { id: 'inst_demo_1', name: 'Sales Line 1', status: InstanceStatus.OPEN, qr: null, phone: '919876543210', messagesProcessed: 1240, lastPing: new Date().toISOString(), assignedTo: 'u_demo_user', createdAt: new Date().toISOString() },
@@ -363,8 +391,7 @@ const App: React.FC = () => {
         setShowLandingPage(false);
         localStorage.setItem('wa_auth_session', 'true');
         localStorage.setItem('wa_current_user_id', userId);
-        localStorage.setItem('wa_cached_user', JSON.stringify(createdUser));
-      } else {
+        } else {
         const errData = await res.json();
         setAuthError(errData.error || 'Signup failed on server.');
       }
@@ -378,7 +405,6 @@ const App: React.FC = () => {
     setShowLandingPage(true);
     localStorage.removeItem('wa_auth_session');
     localStorage.removeItem('wa_current_user_id');
-    localStorage.removeItem('wa_cached_user');
     localStorage.removeItem('wa_original_user');
   };
 
@@ -632,41 +658,75 @@ const App: React.FC = () => {
             >
               <Menu size={24} />
             </button>
-            <h1 className="text-lg md:text-xl font-bold text-white capitalize">{activeTab.replace('-', ' ')}</h1>
+                        <h1 className="text-lg md:text-xl font-bold text-white capitalize">{activeTab.replace('-', ' ')}</h1>
             <span className={`hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold border ${
                 currentUser.role === UserRole.SUPERADMIN ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20' :
-                currentUser.role === UserRole.RESELLER ? 'bg-purple-500/10 text-purple-500 border-purple-500/20' :
-                'bg-blue-500/10 text-blue-500 border-blue-500/20'
+                currentUser.role === UserRole.RESELLER ? 'bg-blue-500/10 text-blue-500 border-blue-500/20' :
+                'bg-green-500/10 text-green-500 border-green-500/20'
             }`}>
-              {(currentUser.role || 'user').toUpperCase()}: {currentUser.username}
+              {currentUser.role.toUpperCase()}
             </span>
           </div>
-          <div className="flex items-center gap-2 sm:gap-4">
-            <div className="hidden lg:flex flex-col items-end">
-                <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest">API Endpoint Status</span>
-                <code className={`text-[10px] font-mono ${isBackendConnected ? 'text-[#25D366]' : 'text-red-500'}`}>
-                    {isBackendConnected ? 'LIVE GATEWAY' : 'BACKEND DISCONNECTED'}
-                </code>
+          <div className="flex items-center gap-4">
+            <button 
+                onClick={() => handleCreateInstance()}
+                className="hidden sm:flex items-center gap-2 bg-[#25D366]/10 text-[#25D366] hover:bg-[#25D366]/20 px-3 py-1.5 rounded-lg text-sm font-bold border border-[#25D366]/20 transition-all"
+            >
+                <Plus size={16} /> Add Instance
+            </button>
+            <HeaderWallet currentUser={currentUser} apiBase={API_BASE} />
+            <div className="relative group">
+              <button className="hidden sm:block p-2 text-gray-400 hover:text-white transition-colors relative">
+                <Bell size={20} />
+                <span className="absolute top-1 right-1 w-2 h-2 bg-[#25D366] rounded-full"></span>
+              </button>
+              <div className="absolute right-0 mt-2 w-64 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
+                  <div className="p-3 border-b border-gray-700 font-bold text-white text-sm">Notifications</div>
+                  <div className="p-3 space-y-3">
+                      <div className="flex justify-between text-xs">
+                          <span className="text-gray-400">Daily Messages Sent:</span>
+                          <span className="text-white font-bold">{currentUser.subscription?.messagesSentToday || 0}</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                          <span className="text-gray-400">Undelivered:</span>
+                          <span className="text-red-400 font-bold">0</span>
+                      </div>
+                      {(!currentUser.walletBalance || currentUser.walletBalance < 10) && (
+                          <div className="text-xs text-orange-400 font-bold bg-orange-400/10 p-2 rounded flex items-center gap-2">
+                             <AlertCircle size={14} /> Low Wallet Balance!
+                          </div>
+                      )}
+                  </div>
+              </div>
             </div>
-            <button 
-                onClick={() => setRefreshTrigger(prev => prev + 1)}
-                className="bg-gray-800 hover:bg-gray-700 text-white px-3 py-2 rounded-lg font-bold flex items-center gap-2 transition-all active:scale-95 border border-gray-700"
-                title="Refresh Data"
-            >
-                <RefreshCw size={18} />
-            </button>
-            <button 
-                onClick={handleCreateInstance}
-                className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-green-500/20"
-            >
-                <Plus size={20} />
-                <span className="hidden sm:inline">Provision Instance</span>
-            </button>
-            <button onClick={handleLogout} className="hidden sm:block text-gray-500 hover:text-white text-xs font-bold px-3 uppercase tracking-widest">Logout</button>
+            <div className="relative group">
+                <button className="w-8 h-8 rounded-full bg-gradient-to-r from-[#25D366] to-teal-500 flex items-center justify-center text-sm font-bold text-white shadow-lg hover:scale-105 transition-transform">
+                  {currentUser.username.charAt(0).toUpperCase()}
+                </button>
+                <div className="absolute right-0 mt-2 w-48 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all overflow-hidden">
+                    <div className="p-3 border-b border-gray-700 font-bold text-white text-sm bg-black/20 text-center">
+                        {currentUser.username}
+                    </div>
+                    <button onClick={() => setActiveTab('profile')} className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-[#2a3942] hover:text-white transition-colors">
+                        My Profile
+                    </button>
+                    <button onClick={() => {
+                        localStorage.removeItem('wa_current_user_id');
+                        localStorage.removeItem('wa_original_user');
+                        localStorage.removeItem('wa_auth_session');
+                        setIsAuthenticated(false);
+                        setAuthenticatedUser(null);
+                        setCurrentUser(null as any);
+                    }} className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-red-400/10 transition-colors font-bold border-t border-gray-700">
+                        Log Out
+                    </button>
+                </div>
+            </div>
           </div>
         </header>
 
         <div className={`flex-1 min-h-0 ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain'}`}>
+          {activeTab === 'profile' && <ProfileView currentUser={currentUser} plans={plans} />}
           {activeTab === 'dashboard' && (
             <Dashboard 
               instances={visibleInstances} 
@@ -685,6 +745,7 @@ const App: React.FC = () => {
               apiBase={API_BASE}
             />
           )}
+          {activeTab === 'wallet' && <WalletManager apiBase={API_BASE} currentUser={currentUser} users={users} />}
           {activeTab === 'users' && <UserManagement users={visibleUsers} currentUser={currentUser} setUsers={setUsers} plans={plans} apiBase={API_BASE} />}
           {activeTab === 'billing' && <BillingManager currentUser={currentUser} plans={plans} setPlans={setPlans} users={users} setUsers={setUsers} instances={visibleInstances} apiBase={API_BASE} />}
           {activeTab === 'api-docs' && <ApiDocumentation instances={instances} currentUser={currentUser} apiBase={API_BASE} />}
