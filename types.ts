@@ -192,3 +192,22 @@ export interface ChatSession {
   unreadCount: number;
   labels?: ChatLabel[];
 }
+
+export interface ScheduledCampaign {
+  id: string;
+  userId: string;
+  instanceId: string;
+  name: string;
+  message: string;
+  mediaUrl?: string;
+  mediaType?: string;
+  buttons?: InteractiveButton[];
+  numbers: string[];
+  options?: any;
+  totalRecipients: number;
+  scheduledAt: string;
+  status: 'scheduled' | 'processing' | 'completed' | 'cancelled' | 'failed';
+  createdAt: string;
+  executedAt?: string;
+  error?: string;
+}

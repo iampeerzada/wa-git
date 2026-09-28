@@ -47,9 +47,105 @@ const App: React.FC = () => {
   });
 
   const [plans, setPlans] = useState<Plan[]>([
-    { id: 'p_basic', name: 'Basic', price: 1499, interval: PlanInterval.MONTHLY, dailyLimit: 500, monthlyLimit: 15000, yearlyLimit: 182500, maxInstances: 2, rateLimitPerMin: 30, features: ['Standard Support', 'Daily Reports'], description: 'Ideal for small businesses starting their automation journey.', icon: 'Package' },
-    { id: 'p_pro', name: 'Pro', price: 4999, interval: PlanInterval.MONTHLY, dailyLimit: 5000, monthlyLimit: 150000, yearlyLimit: 1825000, maxInstances: 10, rateLimitPerMin: 100, features: ['Priority Support', 'API Access', 'Webhooks'], description: 'Advanced tools for scaling communication and bulk engagement.', icon: 'Rocket' },
-    { id: 'p_enterprise', name: 'Enterprise', price: 24999, interval: PlanInterval.YEARLY, dailyLimit: 0, monthlyLimit: 0, yearlyLimit: 0, maxInstances: 100, rateLimitPerMin: 500, features: ['Unlimited Messages', 'Dedicated Support', 'White-label Docs'], description: 'Unlimited possibilities with dedicated support and high speed.', icon: 'Crown' },
+    { 
+      id: 'p_basic', 
+      name: 'Basic (Baileys)', 
+      price: 1499, 
+      interval: PlanInterval.MONTHLY, 
+      dailyLimit: 500, 
+      monthlyLimit: 15000, 
+      yearlyLimit: 182500, 
+      maxInstances: 2, 
+      rateLimitPerMin: 30, 
+      features: [
+        '500 Messages / Day Quota',
+        '2 WhatsApp Web (QR) Instances',
+        'Smart Anti-Ban Engine with Spintax',
+        'Excel (.xlsx / .csv) 1-Click Bulk Sender',
+        'Auto-Responder Keyword Bot',
+        'REST API & Webhooks Access',
+        '24/7 Priority Support in India & Global'
+      ], 
+      description: 'Ideal for small businesses using WhatsApp Web.', 
+      icon: 'Package',
+      allowedProviders: 'baileys',
+      metaSetupFee: 0
+    },
+    { 
+      id: 'p_pro', 
+      name: 'Pro (Baileys)', 
+      price: 4999, 
+      interval: PlanInterval.MONTHLY, 
+      dailyLimit: 5000, 
+      monthlyLimit: 150000, 
+      yearlyLimit: 1825000, 
+      maxInstances: 10, 
+      rateLimitPerMin: 100, 
+      features: [
+        '5,000 Messages / Day Quota',
+        '10 Multi-Session WhatsApp Web Instances',
+        'Multi-Device Account Rotation Engine',
+        'Dynamic Excel Contact Variables & Tags',
+        'High-Speed BullMQ Message Queue',
+        'Auto-Responder Keyword Rules & Delays',
+        'Full REST API & Real-time Webhooks',
+        '24/7 Priority Support in India & Global'
+      ], 
+      description: 'Advanced tools for scaling communication and bulk engagement.', 
+      icon: 'Rocket',
+      allowedProviders: 'baileys',
+      metaSetupFee: 0
+    },
+    { 
+      id: 'p_meta_starter', 
+      name: 'Meta Cloud Starter', 
+      price: 2999, 
+      interval: PlanInterval.MONTHLY, 
+      dailyLimit: 0, 
+      monthlyLimit: 0, 
+      yearlyLimit: 0, 
+      maxInstances: 5, 
+      rateLimitPerMin: 1000, 
+      features: [
+        'Official Meta Cloud API (100% Zero Ban Risk)',
+        'Meta Verified Business Account (WABA)',
+        'Pre-Approved Rich Media Templates (Buttons & Media)',
+        '5 Meta Registered Phone Numbers',
+        'Instant Cloud Webhooks & Read Receipts',
+        'Wallet-based Transparent Per-Message Billing',
+        'Interactive Quick Replies & Call-to-Action Buttons',
+        '24/7 Priority Support in India & Global'
+      ], 
+      description: 'Official Meta Cloud API plan. One-time setup + recurring platform charge. Template msgs billed from Wallet.', 
+      icon: 'Globe',
+      allowedProviders: 'meta',
+      metaSetupFee: 1999
+    },
+    { 
+      id: 'p_enterprise', 
+      name: 'Enterprise (Hybrid)', 
+      price: 24999, 
+      interval: PlanInterval.YEARLY, 
+      dailyLimit: 0, 
+      monthlyLimit: 0, 
+      yearlyLimit: 0, 
+      maxInstances: 100, 
+      rateLimitPerMin: 500, 
+      features: [
+        'Dual Engine: Official Meta Cloud + Baileys Web QR',
+        'Unlimited WhatsApp Multi-Session Messaging',
+        '100 Connected WhatsApp Instances / Phone Numbers',
+        'Anti-Ban Rotation & Smart Fallback Routing',
+        'Excel (.xlsx / .csv) 1-Click Bulk Broadcast',
+        'Dedicated High-Priority Worker Queue',
+        'White-Label Documentation & Webhooks',
+        'VIP Technical Assistance & Account Manager'
+      ], 
+      description: 'Unlimited possibilities for both Baileys and Meta Cloud API.', 
+      icon: 'Crown',
+      allowedProviders: 'both',
+      metaSetupFee: 2999
+    },
   ]);
 
   const [users, setUsers] = useState<User[]>([]);
@@ -127,7 +223,11 @@ const App: React.FC = () => {
               yearlyLimit: ((p.daily_limit !== undefined ? p.daily_limit : (p.dailyLimit || 0))) * 365,
               maxInstances: p.max_instances !== undefined ? p.max_instances : (p.maxInstances || 1),
               rateLimitPerMin: p.rate_limit_per_min || p.rateLimitPerMin || 20,
-              features: p.features || ['Standard Support', 'API Access'],
+              features: Array.isArray(p.features) && p.features.length > 0 
+                ? p.features 
+                : (typeof p.features === 'string' && p.features.trim() 
+                    ? (() => { try { return JSON.parse(p.features); } catch { return p.features.split('\n').filter(Boolean); } })() 
+                    : undefined),
               description: p.description,
               icon: p.icon,
               allowedProviders: p.allowedProviders || p.allowed_providers || 'baileys',

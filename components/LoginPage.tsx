@@ -177,9 +177,9 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin, onSignup, onBackToHome, 
               </button>
             )}
             <div className="mb-4 flex flex-col items-center">
-               <BrandLogo size="md" className="scale-125 mb-4 mt-2" />
+               <BrandLogo size="md" className="scale-125 mb-4 mt-2" iFontSize="24px" textFontSize="25px" />
             </div>
-            <h2 className="text-2xl font-bold text-white mb-2">
+            <h2 className="font-bold text-white mb-2" style={{ fontSize: '20px' }}>
               {isSignup ? 'Create Account' : (isOtpMode ? 'Login with Email OTP' : 'Gateway Access')}
             </h2>
             <div className="flex items-center gap-2 justify-center">

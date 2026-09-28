@@ -4,7 +4,8 @@ import { User, UserRole, Plan, PlanInterval, WhatsAppInstance } from '../types';
 import { 
   CreditCard, Plus, Trash2, CheckCircle2, AlertTriangle, Zap, Calendar, 
   TrendingUp, Layers, Settings2, Users, IndianRupee, MessageCircle, 
-  Info, Edit3, Crown, Star, Rocket, Shield, Globe, Cpu, Package, RefreshCw, X, Smartphone, Wallet
+  Info, Edit3, Crown, Star, Rocket, Shield, Globe, Cpu, Package, RefreshCw, X, Smartphone, Wallet,
+  ArrowUp, ArrowDown, Sparkles, ListPlus, Check
 } from 'lucide-react';
 
 interface BillingManagerProps {
@@ -22,6 +23,61 @@ const RAZORPAY_KEY_ID = 'rzp_live_RmMPzyo61J8piH';
 
 const ICON_MAP: Record<string, any> = {
   Zap, Crown, Star, Rocket, Shield, Globe, Cpu, Package, Layers
+};
+
+const DEFAULT_BAILEYS_FEATURES = [
+  'Unlimited Messages / Day (Fair Usage)',
+  'Multi-Session WhatsApp Web QR Login',
+  'Smart Anti-Ban Engine with Spintax Delay',
+  '1-Click Excel (.xlsx / .csv) Bulk Sender',
+  'Auto-Responder Keyword Bot & Dynamic Rules',
+  'REST API Access & Real-Time Incoming Webhooks',
+  '24/7 Priority Support in India & Global'
+];
+
+const DEFAULT_META_FEATURES = [
+  'Official Meta Cloud API (100% Zero Ban Risk)',
+  'Meta Verified WhatsApp Business Account (WABA)',
+  'Pre-Approved Rich Media Templates (Buttons & Media)',
+  'Registered WhatsApp Business Phone Numbers',
+  'Instant Cloud Webhooks & Read Receipts',
+  'Wallet-based Transparent Per-Message Billing',
+  'Interactive Quick Replies & Call-to-Action Buttons',
+  '24/7 Priority Support in India & Global'
+];
+
+const DEFAULT_HYBRID_FEATURES = [
+  'Dual Engine: Official Meta Cloud + Baileys Web QR',
+  'Unlimited WhatsApp Multi-Session Messaging',
+  'Total Connected Instances / Phone Numbers',
+  'Anti-Ban Rotation & Smart Fallback Routing',
+  'Excel (.xlsx / .csv) 1-Click Bulk Broadcast',
+  'Dedicated High-Priority Worker Queue',
+  'White-Label Documentation & Webhooks',
+  'VIP Technical Assistance & Account Manager'
+];
+
+const POPULAR_FEATURE_SUGGESTIONS = [
+  'Official Meta Cloud API (Zero Ban Risk)',
+  'Pre-Approved Rich Media Templates',
+  'Interactive Buttons & Quick Replies',
+  '1-Click Excel (.xlsx / .csv) Bulk Sender',
+  'Smart Anti-Ban Engine with Spintax',
+  'Auto-Responder Keyword Bot',
+  'Multi-Session Account Rotation',
+  'REST API & Real-time Webhooks',
+  'Wallet-Based Transparent Billing',
+  'Human-like Typing Simulation & Interval',
+  '24/7 Priority Support in India & Global',
+  'White-label Documentation',
+  'Dedicated High-Speed Queue Worker',
+  'OTP & Transactional SMS Alert Support'
+];
+
+const getDefaultFeatures = (provider: 'baileys' | 'meta' | 'both' = 'baileys') => {
+  if (provider === 'meta') return [...DEFAULT_META_FEATURES];
+  if (provider === 'both') return [...DEFAULT_HYBRID_FEATURES];
+  return [...DEFAULT_BAILEYS_FEATURES];
 };
 
 interface MetaStatsProps {
@@ -158,6 +214,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
   const [planFilterTab, setPlanFilterTab] = useState<'all' | 'baileys' | 'meta'>('all');
   const [showRefillModal, setShowRefillModal] = useState(false);
   const [refillAmount, setRefillAmount] = useState<string>('500');
+  const [featureInput, setFeatureInput] = useState<string>('');
   
   const [newPlan, setNewPlan] = useState<Partial<Plan>>({
     name: '',
@@ -168,7 +225,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
     yearlyLimit: 0,
     maxInstances: 1,
     rateLimitPerMin: 20,
-    features: ['API Access'],
+    features: getDefaultFeatures('baileys'),
     assignedTo: '',
     description: '',
     icon: 'Package',
@@ -409,14 +466,23 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
     };
 
     try {
+      const prov = newPlan.allowedProviders || 'baileys';
+      const resolvedFeatures = (newPlan.features && newPlan.features.length > 0)
+        ? newPlan.features
+        : getDefaultFeatures(prov);
+
       if (editingPlanId) {
+        const payload = {
+          ...newPlan,
+          features: resolvedFeatures
+        };
         const res = await fetch(`${apiBase}/api/plans/${editingPlanId}`, {
           method: 'PATCH',
           headers,
-          body: JSON.stringify(newPlan)
+          body: JSON.stringify(payload)
         });
         if (res.ok) {
-          setPlans(prev => prev.map(p => p.id === editingPlanId ? { ...p, ...newPlan as Plan } : p));
+          setPlans(prev => prev.map(p => p.id === editingPlanId ? { ...p, ...payload as Plan } : p));
           setEditingPlanId(null);
         } else {
           const err = await res.json();
@@ -427,7 +493,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
         const planToCreate = {
           ...newPlan,
           id,
-          features: (newPlan.features || []).length > 0 ? newPlan.features! : ['API Access', 'Standard Support']
+          features: resolvedFeatures
         };
         const res = await fetch(`${apiBase}/api/plans`, {
           method: 'POST',
@@ -448,6 +514,42 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleAddFeature = (featureText?: string) => {
+    const textToAdd = (featureText !== undefined ? featureText : featureInput).trim();
+    if (!textToAdd) return;
+    const currentFeatures = newPlan.features || [];
+    if (currentFeatures.includes(textToAdd)) return;
+    setNewPlan(p => ({ ...p, features: [...(p.features || []), textToAdd] }));
+    if (featureText === undefined) setFeatureInput('');
+  };
+
+  const handleRemoveFeature = (indexToRemove: number) => {
+    setNewPlan(p => ({
+      ...p,
+      features: (p.features || []).filter((_, idx) => idx !== indexToRemove)
+    }));
+  };
+
+  const handleMoveFeature = (index: number, direction: 'up' | 'down') => {
+    const list = [...(newPlan.features || [])];
+    if (direction === 'up' && index > 0) {
+      const temp = list[index - 1];
+      list[index - 1] = list[index];
+      list[index] = temp;
+      setNewPlan(p => ({ ...p, features: list }));
+    } else if (direction === 'down' && index < list.length - 1) {
+      const temp = list[index + 1];
+      list[index + 1] = list[index];
+      list[index] = temp;
+      setNewPlan(p => ({ ...p, features: list }));
+    }
+  };
+
+  const handleLoadRecommendedFeatures = () => {
+    const prov = newPlan.allowedProviders || 'baileys';
+    setNewPlan(p => ({ ...p, features: getDefaultFeatures(prov) }));
   };
 
   const handleDeletePlan = async (id: string) => {
@@ -471,8 +573,16 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
   };
 
   const handleEditPlan = (plan: Plan) => {
-    setNewPlan({ ...plan });
+    const prov = plan.allowedProviders || 'baileys';
+    const planFeatures = (plan.features && plan.features.length > 0)
+      ? [...plan.features]
+      : getDefaultFeatures(prov);
+    setNewPlan({
+      ...plan,
+      features: planFeatures
+    });
     setEditingPlanId(plan.id);
+    setFeatureInput('');
     setIsAdding(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -487,7 +597,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
       yearlyLimit: 0,
       maxInstances: 1,
       rateLimitPerMin: 20,
-      features: ['API Access'],
+      features: getDefaultFeatures('baileys'),
       assignedTo: '',
       description: '',
       icon: 'Package',
@@ -495,6 +605,7 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
       metaSetupFee: 0
     });
     setEditingPlanId(null);
+    setFeatureInput('');
   };
 
   const userRolePlans = isSuper 
@@ -791,6 +902,133 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
                   <span>Meta Cloud Plan Architecture: One-time setup fee (₹{newPlan.metaSetupFee || 0}) + recurring platform fee (₹{newPlan.price || 0}/{newPlan.interval}). Message/template charges are deducted per-message from the user's Wallet.</span>
                 </div>
               )}
+
+              {/* Dynamic Plan Features Section */}
+              <div className="lg:col-span-3 bg-[#16222b] border border-gray-800 p-3 sm:p-4 rounded-xl space-y-3">
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
+                  <div>
+                    <label className="text-[11px] font-bold text-white flex items-center gap-1.5 uppercase tracking-wider">
+                      <ListPlus size={14} className="text-[#25D366]" />
+                      <span>Plan Features & Highlights (Displayed on Frontend & Homepage)</span>
+                    </label>
+                    <p className="text-[10px] text-gray-400">
+                      Configure bullet points that showcase what is included in this plan.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLoadRecommendedFeatures}
+                    className="text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 px-2.5 py-1 rounded-lg border border-gray-700 transition-all flex items-center gap-1 cursor-pointer w-fit"
+                  >
+                    <Sparkles size={12} className="text-yellow-400" />
+                    <span>Reset to Recommended ({newPlan.allowedProviders || 'baileys'})</span>
+                  </button>
+                </div>
+
+                {/* Add Custom Feature Input */}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={featureInput}
+                    onChange={e => setFeatureInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddFeature();
+                      }
+                    }}
+                    placeholder="Type a feature (e.g., 5,000 Messages / Day, Zero Ban Risk, Excel Bulk Dispatcher)..."
+                    className="flex-1 bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleAddFeature()}
+                    className="bg-[#25D366] hover:bg-[#20bd5a] text-[#0b141a] px-3.5 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition-all cursor-pointer shrink-0"
+                  >
+                    <Plus size={14} />
+                    <span>Add</span>
+                  </button>
+                </div>
+
+                {/* Quick Add Suggestions Chips */}
+                <div>
+                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                    Quick Suggestions (Click to Add):
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {POPULAR_FEATURE_SUGGESTIONS.map((sug, sIdx) => {
+                      const alreadyAdded = (newPlan.features || []).includes(sug);
+                      return (
+                        <button
+                          key={sIdx}
+                          type="button"
+                          disabled={alreadyAdded}
+                          onClick={() => handleAddFeature(sug)}
+                          className={`text-[10px] px-2 py-0.5 rounded-lg border transition-all cursor-pointer flex items-center gap-1 ${
+                            alreadyAdded
+                              ? 'bg-gray-800/40 text-gray-600 border-gray-800 cursor-not-allowed'
+                              : 'bg-[#202c33] text-gray-300 border-gray-700 hover:border-[#25D366] hover:text-[#25D366]'
+                          }`}
+                        >
+                          {alreadyAdded ? <Check size={10} /> : <Plus size={10} />}
+                          <span>{sug}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Active Features List */}
+                <div className="space-y-1.5 pt-1">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider flex items-center justify-between">
+                    <span>Active Features ({(newPlan.features || []).length}):</span>
+                    {(newPlan.features || []).length === 0 && (
+                      <span className="text-amber-400 font-normal">No features added yet. Click suggestions or type above.</span>
+                    )}
+                  </p>
+                  <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+                    {(newPlan.features || []).map((feat, idx) => (
+                      <div
+                        key={idx}
+                        className="bg-[#202c33] border border-gray-800 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs text-white group hover:border-gray-700"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <CheckCircle2 size={13} className="text-[#25D366] shrink-0" />
+                          <span className="truncate">{feat}</span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            disabled={idx === 0}
+                            onClick={() => handleMoveFeature(idx, 'up')}
+                            className="p-1 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                            title="Move Up"
+                          >
+                            <ArrowUp size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={idx === (newPlan.features || []).length - 1}
+                            onClick={() => handleMoveFeature(idx, 'down')}
+                            className="p-1 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                            title="Move Down"
+                          >
+                            <ArrowDown size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveFeature(idx)}
+                            className="p-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded cursor-pointer"
+                            title="Remove Feature"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="flex justify-end gap-2 mt-4 pt-3 border-t border-gray-800">
@@ -895,6 +1133,19 @@ const BillingManager: React.FC<BillingManagerProps> = ({ currentUser, plans, set
                       <PlanDetail label="Message Speed" value={`${plan.rateLimitPerMin} msgs/min`} />
                     </>
                   )}
+                </div>
+
+                {/* Dynamically Rendered Features List */}
+                <div className="my-2 pt-2 border-t border-gray-800/60 space-y-1">
+                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Features Included</p>
+                  <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
+                    {((plan.features && plan.features.length > 0) ? plan.features : getDefaultFeatures(providerTag)).map((feat, fIdx) => (
+                      <div key={fIdx} className="flex items-start gap-1.5 text-[11px] text-gray-300">
+                        <CheckCircle2 size={12} className={isMetaPlan ? 'text-blue-400 shrink-0 mt-0.5' : 'text-[#25D366] shrink-0 mt-0.5'} />
+                        <span className="leading-tight text-[11px]">{feat}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 {isSuper ? (

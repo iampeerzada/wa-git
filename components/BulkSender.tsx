@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { WhatsAppInstance, InstanceStatus, MessageTemplate, ContactGroup, User, UserRole, Plan, MediaAsset, InteractiveButton } from '../types';
-import { Send, Users, Clock, ShieldCheck, Play, Pause, RotateCcw, CheckCircle2, XCircle, AlertTriangle, FileText, ChevronDown, ChevronUp, Maximize2, Copy, Check, Lock, Layers, Image as ImageIcon, Eye, Smartphone, MoreVertical, Paperclip, Smile, ExternalLink, Phone, Reply, Zap, Activity, ShieldAlert, History, ChevronLeft, ChevronRight, Filter, Calendar, X } from 'lucide-react';
+import { WhatsAppInstance, InstanceStatus, MessageTemplate, ContactGroup, User, UserRole, Plan, MediaAsset, InteractiveButton, ScheduledCampaign } from '../types';
+import { Send, Users, Clock, ShieldCheck, Play, Pause, RotateCcw, CheckCircle2, XCircle, AlertTriangle, FileText, ChevronDown, ChevronUp, Maximize2, Copy, Check, Lock, Layers, Image as ImageIcon, Eye, Smartphone, MoreVertical, Paperclip, Smile, ExternalLink, Phone, Reply, Zap, Activity, ShieldAlert, History, ChevronLeft, ChevronRight, Filter, Calendar, X, Trash2, RefreshCw } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from 'recharts';
 
 interface BulkSenderProps {
@@ -12,7 +12,7 @@ interface BulkSenderProps {
   plans: Plan[];
   mediaAssets: MediaAsset[];
   hiddenModules: string[];
-  initialViewMode?: 'sender' | 'history';
+  initialViewMode?: 'sender' | 'history' | 'scheduled';
 }
 
 const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, contactGroups, currentUser, plans, mediaAssets, hiddenModules, initialViewMode }) => {
@@ -31,9 +31,27 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   const [metaTemplates, setMetaTemplates] = useState<any[]>([]);
   const [selectedMetaTemplate, setSelectedMetaTemplate] = useState<{name: string, language: string} | null>(null);
   const [logs, setLogs] = useState<{ msg: string; type: 'success' | 'error' | 'info' | 'warning' }[]>([]);
-  const [viewMode, setViewMode] = useState<'sender' | 'history'>(initialViewMode || 'sender');
+  const [viewMode, setViewMode] = useState<'sender' | 'history' | 'scheduled'>(initialViewMode || 'sender');
   const [historyLogs, setHistoryLogs] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  // Scheduler state
+  const [scheduledCampaigns, setScheduledCampaigns] = useState<ScheduledCampaign[]>([]);
+  const [isLoadingScheduled, setIsLoadingScheduled] = useState(false);
+  const [isSchedulingMode, setIsSchedulingMode] = useState(false);
+  const [campaignName, setCampaignName] = useState('');
+  const [scheduledDate, setScheduledDate] = useState(() => {
+    const today = new Date();
+    return today.toISOString().split('T')[0];
+  });
+  const [scheduledTime, setScheduledTime] = useState(() => {
+    const now = new Date(Date.now() + 30 * 60000);
+    return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  });
+  const [scheduledFilterStatus, setScheduledFilterStatus] = useState<string>('all');
+  const [scheduledSearchTerm, setScheduledSearchTerm] = useState<string>('');
+  const [selectedScheduledCampaign, setSelectedScheduledCampaign] = useState<ScheduledCampaign | null>(null);
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
 
   // Pagination & Filter state
   const [historyPage, setHistoryPage] = useState(1);
@@ -60,8 +78,118 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   useEffect(() => {
       if (viewMode === 'history') {
           fetchHistory();
+      } else if (viewMode === 'scheduled') {
+          fetchScheduledCampaigns();
       }
   }, [viewMode, selectedInstance, historyPage, historyLimit, historyMonth, historyYear, historyStatus, historyInstanceFilter]);
+
+  useEffect(() => {
+    fetchScheduledCampaigns();
+  }, []);
+
+  const fetchScheduledCampaigns = async () => {
+    setIsLoadingScheduled(true);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/scheduled`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok && data.campaigns) {
+        setScheduledCampaigns(data.campaigns);
+      }
+    } catch (e) {
+      console.error("Error fetching scheduled campaigns:", e);
+    } finally {
+      setIsLoadingScheduled(false);
+    }
+  };
+
+  const handleCancelScheduled = async (id: string) => {
+    if (!confirm('Are you sure you want to cancel this scheduled campaign?')) return;
+    setActionLoadingId(id);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/scheduled/${id}/cancel`, {
+        method: 'POST',
+        headers: {
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        fetchScheduledCampaigns();
+      } else {
+        alert(data.error || 'Failed to cancel campaign');
+      }
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleExecuteNowScheduled = async (id: string) => {
+    if (!confirm('Execute this campaign now immediately?')) return;
+    setActionLoadingId(id);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/scheduled/${id}/execute-now`, {
+        method: 'POST',
+        headers: {
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert('Campaign execution started successfully!');
+        fetchScheduledCampaigns();
+      } else {
+        alert(data.error || 'Failed to execute campaign');
+      }
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleDeleteScheduled = async (id: string) => {
+    if (!confirm('Delete this scheduled campaign record?')) return;
+    setActionLoadingId(id);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/scheduled/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        }
+      });
+      if (res.ok) {
+        fetchScheduledCampaigns();
+      }
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const applySchedulePreset = (minutesAhead: number) => {
+    const d = new Date(Date.now() + minutesAhead * 60000);
+    setScheduledDate(d.toISOString().split('T')[0]);
+    setScheduledTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  };
+
+  const applyTomorrowPreset = (hour: number, minute: number = 0) => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(hour, minute, 0, 0);
+    setScheduledDate(d.toISOString().split('T')[0]);
+    setScheduledTime(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  };
 
   useEffect(() => {
     if (selectedInstance && instances.find(i => i.id === selectedInstance)?.provider === 'meta') {
@@ -198,6 +326,75 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       return;
     }
 
+    if (isSchedulingMode) {
+      const combinedDateTimeStr = `${scheduledDate}T${scheduledTime}:00`;
+      const targetDate = new Date(combinedDateTimeStr);
+      if (isNaN(targetDate.getTime())) {
+        alert("Please select a valid scheduled date and time.");
+        return;
+      }
+      if (targetDate.getTime() <= Date.now()) {
+        alert("Scheduled time must be in the future.");
+        return;
+      }
+
+      setIsSending(true);
+      addLog(`Scheduling Campaign "${campaignName.trim() || 'Bulk Campaign'}" for ${targetDate.toLocaleString()}...`, 'info');
+
+      try {
+        const payload: any = {
+          instanceId: selectedInstance,
+          name: campaignName.trim() || `Campaign ${targetDate.toLocaleDateString()}`,
+          numbers: numberList,
+          message,
+          buttons: activeButtons.length > 0 ? activeButtons : undefined,
+          scheduledAt: targetDate.toISOString(),
+          options: {
+            delayMin,
+            delayMax,
+            simulateTyping: true,
+            complianceMode: true
+          }
+        };
+
+        if (selectedMetaTemplate) {
+          payload.options.templateName = selectedMetaTemplate.name;
+          payload.options.templateLanguage = selectedMetaTemplate.language;
+        }
+
+        if (selectedMedia) {
+          payload.mediaUrl = selectedMedia;
+          const asset = mediaAssets.find(a => a.url === selectedMedia);
+          payload.mediaType = asset?.type || 'image';
+        }
+
+        const res = await fetch(`${apiBase}/api/campaigns/schedule`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-User-ID': currentUser.id,
+            'Authorization': `Bearer ${currentUser.accessToken}`
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (res.ok && data.success) {
+          addLog(`Campaign successfully scheduled for ${targetDate.toLocaleString()}!`, 'success');
+          addLog(`Scheduled Campaign ID: ${data.campaign.id}`, 'info');
+          fetchScheduledCampaigns();
+          alert(`Campaign "${data.campaign.name}" scheduled for ${targetDate.toLocaleString()} with ${numberList.length} recipients!`);
+        } else {
+          throw new Error(data.error || 'Failed to schedule campaign');
+        }
+      } catch (err: any) {
+        addLog(`Scheduling Error: ${err.message}`, 'error');
+        alert(err.message);
+      } finally {
+        setIsSending(false);
+      }
+      return;
+    }
 
     setIsSending(true);
     setProgress({ current: 0, total: numberList.length, success: 0, failed: 0, queued: 0 });
@@ -283,7 +480,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
 
   return (
     <div className="max-w-6xl mx-auto space-y-4 pb-8">
-      <div className="flex bg-[#111b21] p-1 rounded-xl border border-gray-800 w-full sm:w-fit mb-4 overflow-x-auto">
+      <div className="flex bg-[#111b21] p-1 rounded-xl border border-gray-800 w-full sm:w-fit mb-4 overflow-x-auto gap-1">
         <button
           onClick={() => setViewMode('sender')}
           className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
@@ -294,6 +491,24 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         >
           <Send className="w-3.5 h-3.5" />
           <span>New Campaign</span>
+        </button>
+        <button
+          onClick={() => { setViewMode('scheduled'); fetchScheduledCampaigns(); }}
+          className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
+            viewMode === 'scheduled'
+              ? 'bg-[#25D366] text-black shadow-md shadow-[#25D366]/10'
+              : 'text-gray-400 hover:text-white hover:bg-white/5'
+          }`}
+        >
+          <Calendar className="w-3.5 h-3.5" />
+          <span>Scheduled Campaigns</span>
+          {scheduledCampaigns.filter(c => c.status === 'scheduled').length > 0 && (
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+              viewMode === 'scheduled' ? 'bg-black text-[#25D366]' : 'bg-amber-400 text-black'
+            }`}>
+              {scheduledCampaigns.filter(c => c.status === 'scheduled').length}
+            </span>
+          )}
         </button>
         <button
           onClick={() => setViewMode('history')}
@@ -574,14 +789,174 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 </div>
               </div>
 
+              {/* Campaign Scheduling Mode Section */}
+              <div className="p-3.5 bg-[#17242c] border border-gray-800 rounded-xl space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <label className="text-[11px] font-bold text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
+                    <Clock size={14} className="text-[#25D366]" />
+                    Dispatch Timing &amp; Scheduler
+                  </label>
+                  <div className="flex bg-[#111b21] p-0.5 rounded-lg border border-gray-700/60">
+                    <button
+                      type="button"
+                      onClick={() => setIsSchedulingMode(false)}
+                      className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        !isSchedulingMode 
+                          ? 'bg-[#25D366] text-black shadow-xs' 
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <Zap size={12} />
+                      <span>Send Immediately</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsSchedulingMode(true)}
+                      className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        isSchedulingMode 
+                          ? 'bg-amber-400 text-black shadow-xs' 
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <Calendar size={12} />
+                      <span>Schedule for Later</span>
+                    </button>
+                  </div>
+                </div>
+
+                {isSchedulingMode && (
+                  <div className="space-y-3 pt-2 border-t border-gray-800/80 animate-in fade-in duration-200">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        Campaign Name (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={campaignName}
+                        onChange={(e) => setCampaignName(e.target.value)}
+                        placeholder="e.g. Festival Offer Blast, Product Launch, Renewal Reminder"
+                        className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder-gray-500 focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                          Scheduled Date
+                        </label>
+                        <input
+                          type="date"
+                          min={new Date().toISOString().split('T')[0]}
+                          value={scheduledDate}
+                          onChange={(e) => setScheduledDate(e.target.value)}
+                          className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                          Scheduled Time
+                        </label>
+                        <input
+                          type="time"
+                          value={scheduledTime}
+                          onChange={(e) => setScheduledTime(e.target.value)}
+                          className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Quick Presets */}
+                    <div>
+                      <span className="block text-[9px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">
+                        Quick Schedule Presets:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => applySchedulePreset(15)}
+                          className="px-2.5 py-1 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white border border-gray-700/60 text-[10px] font-medium transition-all cursor-pointer"
+                        >
+                          +15 Mins
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applySchedulePreset(30)}
+                          className="px-2.5 py-1 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white border border-gray-700/60 text-[10px] font-medium transition-all cursor-pointer"
+                        >
+                          +30 Mins
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applySchedulePreset(60)}
+                          className="px-2.5 py-1 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white border border-gray-700/60 text-[10px] font-medium transition-all cursor-pointer"
+                        >
+                          +1 Hour
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applySchedulePreset(180)}
+                          className="px-2.5 py-1 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white border border-gray-700/60 text-[10px] font-medium transition-all cursor-pointer"
+                        >
+                          +3 Hours
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applyTomorrowPreset(10, 0)}
+                          className="px-2.5 py-1 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white border border-gray-700/60 text-[10px] font-medium transition-all cursor-pointer"
+                        >
+                          Tomorrow 10 AM
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applyTomorrowPreset(18, 0)}
+                          className="px-2.5 py-1 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white border border-gray-700/60 text-[10px] font-medium transition-all cursor-pointer"
+                        >
+                          Tomorrow 6 PM
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="p-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300 flex items-center gap-2">
+                      <Clock size={13} className="shrink-0 text-blue-400" />
+                      <span>
+                        Auto-dispatch scheduled for:{' '}
+                        <strong className="text-white">
+                          {new Date(`${scheduledDate}T${scheduledTime}:00`).toLocaleString(undefined, {
+                            dateStyle: 'medium',
+                            timeStyle: 'short'
+                          })}
+                        </strong>{' '}
+                        ({Intl.DateTimeFormat().resolvedOptions().timeZone})
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="flex flex-row gap-2 pt-1">
                 <button 
                   onClick={handleStartBulk}
                   disabled={isSending || liveInstances.length === 0 || isSuspended || (isBaileysInstance && !agreeProtection)}
-                  className="flex-1 bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-30 text-[#0b141a] py-2 sm:py-2.5 px-4 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md shadow-green-500/10 cursor-pointer disabled:cursor-not-allowed"
+                  className={`flex-1 ${
+                    isSchedulingMode 
+                      ? 'bg-amber-400 hover:bg-amber-300 text-black shadow-amber-500/15' 
+                      : 'bg-[#25D366] hover:bg-[#20bd5a] text-[#0b141a] shadow-green-500/10'
+                  } disabled:opacity-30 py-2 sm:py-2.5 px-4 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer disabled:cursor-not-allowed`}
                 >
-                  {isSending ? <Pause size={16} /> : <Play size={16} />}
-                  <span>{isSending ? 'Drip-feeding...' : 'Launch Campaign'}</span>
+                  {isSending ? (
+                    <Pause size={16} />
+                  ) : isSchedulingMode ? (
+                    <Calendar size={16} />
+                  ) : (
+                    <Play size={16} />
+                  )}
+                  <span>
+                    {isSending
+                      ? (isSchedulingMode ? 'Scheduling Campaign...' : 'Drip-feeding...')
+                      : isSchedulingMode
+                      ? `Schedule Campaign (${new Date(`${scheduledDate}T${scheduledTime}:00`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+                      : 'Launch Campaign Now'}
+                  </span>
                 </button>
                 <button 
                   onClick={() => { setNumbers(''); setMessage(''); setLogs([]); setSelectedGroup(''); setSelectedMedia(''); setActiveButtons([]); setProgress({ current:0, total:0, success:0, failed:0, queued: 0 })}}
@@ -815,6 +1190,290 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         </div>
       </div>
         </>
+      ) : viewMode === 'scheduled' ? (
+        <div className="space-y-4">
+          {/* Top Metrics Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+            <div className="bg-[#111b21] border border-gray-800/80 p-3.5 sm:p-4 rounded-xl shadow-xs">
+              <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Total Scheduled</span>
+              <p className="text-xl sm:text-2xl font-black text-white mt-1">{scheduledCampaigns.length}</p>
+            </div>
+            <div className="bg-[#111b21] border border-amber-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs bg-amber-500/5">
+              <span className="text-[10px] uppercase font-bold text-amber-400 tracking-wider flex items-center gap-1.5">
+                <Clock size={12} /> Pending Queue
+              </span>
+              <p className="text-xl sm:text-2xl font-black text-amber-300 mt-1">
+                {scheduledCampaigns.filter(c => c.status === 'scheduled').length}
+              </p>
+            </div>
+            <div className="bg-[#111b21] border border-green-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs bg-green-500/5">
+              <span className="text-[10px] uppercase font-bold text-[#25D366] tracking-wider flex items-center gap-1.5">
+                <CheckCircle2 size={12} /> Executed / Done
+              </span>
+              <p className="text-xl sm:text-2xl font-black text-[#25D366] mt-1">
+                {scheduledCampaigns.filter(c => c.status === 'completed').length}
+              </p>
+            </div>
+            <div className="bg-[#111b21] border border-blue-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs bg-blue-500/5">
+              <span className="text-[10px] uppercase font-bold text-blue-400 tracking-wider flex items-center gap-1.5">
+                <Users size={12} /> Queued Recipients
+              </span>
+              <p className="text-xl sm:text-2xl font-black text-blue-300 mt-1">
+                {scheduledCampaigns.filter(c => c.status === 'scheduled').reduce((acc, c) => acc + (c.totalRecipients || (c.numbers?.length || 0)), 0)}
+              </p>
+            </div>
+          </div>
+
+          {/* Search, Filter & Action Bar */}
+          <div className="bg-[#111b21] p-3.5 rounded-xl border border-gray-800 flex flex-wrap items-center justify-between gap-3 shadow-md">
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+              <input 
+                type="text"
+                placeholder="Search campaign name, message..."
+                value={scheduledSearchTerm}
+                onChange={(e) => setScheduledSearchTerm(e.target.value)}
+                className="bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:border-[#25D366] outline-none flex-1 max-w-sm"
+              />
+
+              <div className="flex items-center gap-1.5">
+                <Filter size={13} className="text-gray-400" />
+                <select
+                  value={scheduledFilterStatus}
+                  onChange={(e) => setScheduledFilterStatus(e.target.value)}
+                  className="bg-[#202c33] border border-gray-700/80 rounded-xl px-2.5 py-1.5 text-xs text-gray-200 outline-none cursor-pointer"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="scheduled">Pending Scheduled</option>
+                  <option value="processing">Processing</option>
+                  <option value="completed">Completed</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="failed">Failed</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => fetchScheduledCampaigns()}
+                disabled={isLoadingScheduled}
+                className="p-2 bg-[#202c33] hover:bg-[#2a3942] text-gray-300 hover:text-white rounded-xl transition-all cursor-pointer"
+                title="Refresh scheduled list"
+              >
+                <RefreshCw size={14} className={isLoadingScheduled ? 'animate-spin text-[#25D366]' : ''} />
+              </button>
+              <button
+                onClick={() => {
+                  setIsSchedulingMode(true);
+                  setViewMode('sender');
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] text-black font-bold text-xs uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+              >
+                <Calendar size={13} />
+                <span>+ Schedule New</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Scheduled Campaigns List / Cards */}
+          {isLoadingScheduled ? (
+            <div className="p-12 text-center text-gray-400 bg-[#111b21] rounded-xl border border-gray-800">
+              <RefreshCw size={24} className="animate-spin text-[#25D366] mx-auto mb-2" />
+              <p className="text-xs">Fetching scheduled campaigns...</p>
+            </div>
+          ) : (
+            (() => {
+              const filtered = scheduledCampaigns.filter(c => {
+                if (scheduledFilterStatus !== 'all' && c.status !== scheduledFilterStatus) return false;
+                if (scheduledSearchTerm) {
+                  const term = scheduledSearchTerm.toLowerCase();
+                  const matchName = c.name?.toLowerCase().includes(term);
+                  const matchMsg = c.message?.toLowerCase().includes(term);
+                  if (!matchName && !matchMsg) return false;
+                }
+                return true;
+              });
+
+              if (filtered.length === 0) {
+                return (
+                  <div className="p-12 text-center bg-[#111b21] rounded-xl border border-gray-800/80 space-y-3">
+                    <Calendar className="w-10 h-10 text-gray-600 mx-auto" />
+                    <p className="text-sm font-bold text-gray-300">No Scheduled Campaigns Found</p>
+                    <p className="text-xs text-gray-500 max-w-sm mx-auto">
+                      Plan ahead by setting up campaigns with automated dates and times. Messages will automatically dispatch to your recipients.
+                    </p>
+                    <button
+                      onClick={() => {
+                        setIsSchedulingMode(true);
+                        setViewMode('sender');
+                      }}
+                      className="px-4 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] text-black font-bold text-xs uppercase tracking-wider inline-flex items-center gap-2 cursor-pointer shadow-sm"
+                    >
+                      <Calendar size={14} /> Schedule First Campaign
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {filtered.map((campaign) => {
+                    const scheduledDateObj = new Date(campaign.scheduledAt);
+                    const isUpcoming = campaign.status === 'scheduled';
+                    const diffMs = scheduledDateObj.getTime() - Date.now();
+                    const diffMins = Math.round(diffMs / 60000);
+                    const diffHours = Math.round(diffMs / 3600000);
+                    const diffDays = Math.round(diffMs / 86400000);
+
+                    let timeBadge = '';
+                    if (isUpcoming) {
+                      if (diffMs <= 0) timeBadge = 'Due right now';
+                      else if (diffMins < 60) timeBadge = `In ${diffMins} min${diffMins === 1 ? '' : 's'}`;
+                      else if (diffHours < 24) timeBadge = `In ${diffHours} hr${diffHours === 1 ? '' : 's'}`;
+                      else timeBadge = `In ${diffDays} day${diffDays === 1 ? '' : 's'}`;
+                    }
+
+                    const targetInst = instances.find(i => i.id === campaign.instanceId);
+
+                    return (
+                      <div 
+                        key={campaign.id}
+                        className={`bg-[#111b21] border rounded-xl p-4 flex flex-col justify-between transition-all duration-200 shadow-md hover:border-gray-700 ${
+                          campaign.status === 'scheduled' 
+                            ? 'border-amber-500/30 bg-gradient-to-b from-[#111b21] to-amber-950/10' 
+                            : campaign.status === 'completed'
+                            ? 'border-emerald-500/20'
+                            : 'border-gray-800'
+                        }`}
+                      >
+                        <div className="space-y-3">
+                          {/* Top Row: Name, Status & Relative Badge */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="space-y-0.5">
+                              <h4 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
+                                <span>{campaign.name}</span>
+                              </h4>
+                              <p className="text-[10px] font-mono text-gray-500">ID: {campaign.id}</p>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {campaign.status === 'scheduled' && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-400/15 text-amber-300 border border-amber-400/30 flex items-center gap-1 animate-pulse">
+                                  <Clock size={11} /> {timeBadge || 'Scheduled'}
+                                </span>
+                              )}
+                              {campaign.status === 'processing' && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-blue-500/15 text-blue-300 border border-blue-400/30 flex items-center gap-1">
+                                  <RefreshCw size={11} className="animate-spin" /> Processing
+                                </span>
+                              )}
+                              {campaign.status === 'completed' && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-green-500/15 text-[#25D366] border border-green-500/30 flex items-center gap-1">
+                                  <CheckCircle2 size={11} /> Completed
+                                </span>
+                              )}
+                              {campaign.status === 'cancelled' && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-gray-500/15 text-gray-400 border border-gray-600/30 flex items-center gap-1">
+                                  <XCircle size={11} /> Cancelled
+                                </span>
+                              )}
+                              {campaign.status === 'failed' && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-red-500/15 text-red-400 border border-red-500/30 flex items-center gap-1">
+                                  <AlertTriangle size={11} /> Failed
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Time & Instance Metadata */}
+                          <div className="grid grid-cols-2 gap-2 p-2.5 rounded-lg bg-[#202c33]/50 border border-gray-800 text-[11px]">
+                            <div>
+                              <span className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Execution Time</span>
+                              <div className="text-gray-200 font-semibold flex items-center gap-1">
+                                <Calendar size={12} className="text-[#25D366]" />
+                                <span>{scheduledDateObj.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                                <span className="text-gray-400 font-normal">at {scheduledDateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                              </div>
+                            </div>
+                            <div>
+                              <span className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Target Audience</span>
+                              <div className="text-gray-200 font-semibold flex items-center gap-1">
+                                <Users size={12} className="text-blue-400" />
+                                <span>{campaign.totalRecipients || (campaign.numbers?.length || 0)} Recipients</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Message snippet preview */}
+                          <div className="p-2.5 rounded-lg bg-[#0b141a]/60 border border-gray-800/80">
+                            <span className="text-[9px] uppercase font-bold text-gray-500 block mb-1">Message Preview</span>
+                            <p className="text-xs text-gray-300 line-clamp-2 leading-relaxed">
+                              {campaign.message || <span className="italic text-gray-600">No text body (media message)</span>}
+                            </p>
+                            {campaign.mediaUrl && (
+                              <div className="mt-1.5 flex items-center gap-1 text-[10px] text-blue-400 font-semibold">
+                                <ImageIcon size={11} /> Attached {campaign.mediaType || 'Media Asset'}
+                              </div>
+                            )}
+                            {campaign.buttons && campaign.buttons.length > 0 && (
+                              <div className="mt-1 flex items-center gap-1 text-[10px] text-purple-400 font-semibold">
+                                <Zap size={11} /> {campaign.buttons.length} Interactive Buttons attached
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Actions Toolbar */}
+                        <div className="mt-4 pt-3 border-t border-gray-800/80 flex items-center justify-between gap-2">
+                          <button
+                            onClick={() => setSelectedScheduledCampaign(campaign)}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#202c33] hover:bg-[#2a3942] text-xs font-semibold text-gray-300 hover:text-white transition-all flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Eye size={12} />
+                            <span>Details</span>
+                          </button>
+
+                          <div className="flex items-center gap-1.5">
+                            {campaign.status === 'scheduled' && (
+                              <>
+                                <button
+                                  onClick={() => handleExecuteNowScheduled(campaign.id)}
+                                  disabled={actionLoadingId === campaign.id}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#25D366]/15 hover:bg-[#25D366]/25 text-[#25D366] border border-[#25D366]/30 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                  title="Execute right now"
+                                >
+                                  <Zap size={12} />
+                                  <span>Run Now</span>
+                                </button>
+                                <button
+                                  onClick={() => handleCancelScheduled(campaign.id)}
+                                  disabled={actionLoadingId === campaign.id}
+                                  className="px-2.5 py-1.5 rounded-lg bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                  title="Cancel scheduled campaign"
+                                >
+                                  <XCircle size={12} />
+                                  <span>Cancel</span>
+                                </button>
+                              </>
+                            )}
+
+                            <button
+                              onClick={() => handleDeleteScheduled(campaign.id)}
+                              disabled={actionLoadingId === campaign.id}
+                              className="p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 transition-all cursor-pointer"
+                              title="Delete record"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()
+          )}
+        </div>
       ) : (
         <div className="bg-[#111b21] rounded-xl border border-gray-800/80 overflow-hidden shadow-lg">
           <div className="px-3.5 sm:px-5 py-3 border-b border-gray-800 flex flex-wrap justify-between items-center gap-3 bg-[#202c33]/30">
@@ -1266,6 +1925,98 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 className="w-full sm:w-auto px-5 py-2.5 bg-[#25D366] hover:bg-[#128c7e] text-black font-bold text-xs rounded-xl transition-all shadow-md shadow-green-500/10 cursor-pointer"
               >
                 I Understand & Agree
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scheduled Campaign Details Modal */}
+      {selectedScheduledCampaign && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#111b21] border border-gray-800 rounded-2xl max-w-lg w-full max-h-[85vh] flex flex-col overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="p-4 border-b border-gray-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Calendar className="text-[#25D366]" size={16} />
+                  {selectedScheduledCampaign.name}
+                </h3>
+                <p className="text-[10px] font-mono text-gray-500 mt-0.5">
+                  Scheduled for: {new Date(selectedScheduledCampaign.scheduledAt).toLocaleString()}
+                </p>
+              </div>
+              <button 
+                onClick={() => setSelectedScheduledCampaign(null)}
+                className="p-1 text-gray-400 hover:text-white rounded-lg hover:bg-white/5 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto space-y-4 text-xs">
+              <div>
+                <span className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Status</span>
+                <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${
+                  selectedScheduledCampaign.status === 'scheduled' ? 'bg-amber-400/20 text-amber-300' :
+                  selectedScheduledCampaign.status === 'completed' ? 'bg-emerald-500/20 text-[#25D366]' :
+                  selectedScheduledCampaign.status === 'processing' ? 'bg-blue-500/20 text-blue-300' :
+                  'bg-gray-800 text-gray-300'
+                }`}>
+                  {selectedScheduledCampaign.status}
+                </span>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] uppercase font-bold text-gray-400">
+                    Recipients ({selectedScheduledCampaign.numbers?.length || selectedScheduledCampaign.totalRecipients || 0})
+                  </span>
+                  {selectedScheduledCampaign.numbers && selectedScheduledCampaign.numbers.length > 0 && (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedScheduledCampaign.numbers.join('\n'));
+                        alert('Copied numbers to clipboard');
+                      }}
+                      className="text-[10px] text-[#25D366] hover:underline flex items-center gap-1 font-semibold cursor-pointer"
+                    >
+                      <Copy size={11} /> Copy All
+                    </button>
+                  )}
+                </div>
+                <div className="bg-[#0b141a] p-2.5 rounded-xl border border-gray-800 font-mono text-[11px] text-gray-300 max-h-32 overflow-y-auto space-y-1">
+                  {(selectedScheduledCampaign.numbers || []).map((num, i) => (
+                    <div key={i} className="text-gray-400 hover:text-white">{num}</div>
+                  ))}
+                  {(!selectedScheduledCampaign.numbers || selectedScheduledCampaign.numbers.length === 0) && (
+                    <div className="text-gray-600 italic">No phone numbers listed</div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <span className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Message Text</span>
+                <div className="bg-[#0b141a] p-3 rounded-xl border border-gray-800 text-gray-200 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">
+                  {selectedScheduledCampaign.message || <span className="italic text-gray-600">No text body</span>}
+                </div>
+              </div>
+
+              {selectedScheduledCampaign.mediaUrl && (
+                <div>
+                  <span className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Attached Media</span>
+                  <div className="p-2 bg-[#0b141a] rounded-xl border border-gray-800 flex items-center gap-3">
+                    <img src={selectedScheduledCampaign.mediaUrl} alt="media" className="w-12 h-12 rounded object-cover" />
+                    <span className="text-[11px] text-gray-300 truncate">{selectedScheduledCampaign.mediaUrl}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-3 border-t border-gray-800 flex justify-end gap-2 bg-[#202c33]/30">
+              <button
+                onClick={() => setSelectedScheduledCampaign(null)}
+                className="px-4 py-2 rounded-xl bg-[#2a3942] hover:bg-[#32444f] text-white text-xs font-bold transition-all cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>

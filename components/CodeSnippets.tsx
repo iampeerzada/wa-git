@@ -13,7 +13,12 @@ CREATE TABLE IF NOT EXISTS plans (
     name VARCHAR(50),
     daily_limit INT DEFAULT 0,
     max_instances INT DEFAULT 1,
-    rate_limit_per_min INT DEFAULT 20
+    price DECIMAL(10,2) DEFAULT 0.00,
+    description TEXT,
+    icon VARCHAR(50),
+    allowed_providers VARCHAR(20) DEFAULT 'baileys',
+    meta_setup_fee DECIMAL(10,2) DEFAULT 0.00,
+    features TEXT
 );
 
 CREATE TABLE IF NOT EXISTS users (

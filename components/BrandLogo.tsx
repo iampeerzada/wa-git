@@ -1,35 +1,55 @@
 import React from 'react';
-import { Wifi } from 'lucide-react';
 
 interface BrandLogoProps {
   className?: string;
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   isMeta?: boolean;
+  textColor?: string;
+  iFontSize?: string;
+  textFontSize?: string;
+  subFontSize?: string;
 }
 
-const BrandLogo: React.FC<BrandLogoProps> = ({ className = '', size = 'md', isMeta = false }) => {
+const BrandLogo: React.FC<BrandLogoProps> = ({ 
+  className = '', 
+  size = 'md', 
+  isMeta = false, 
+  textColor,
+  iFontSize,
+  textFontSize,
+  subFontSize
+}) => {
   const sizes = {
-    xs: { text: 'text-lg', sub: 'text-[6px]', icon: 14, wifi: 16, wifiPos: '-top-3 -left-1' },
-    sm: { text: 'text-xl', sub: 'text-[8px]', icon: 16, wifi: 18, wifiPos: '-top-4 -left-1' },
-    md: { text: 'text-3xl', sub: 'text-[10px]', icon: 24, wifi: 24, wifiPos: '-top-5 -left-1.5' },
-    lg: { text: 'text-4xl', sub: 'text-xs', icon: 32, wifi: 32, wifiPos: '-top-6 -left-2' },
-    xl: { text: 'text-6xl', sub: 'text-sm', icon: 48, wifi: 44, wifiPos: '-top-8 -left-3' },
+    xs: { text: 'text-lg', sub: 'text-[6px]', icon: 14 },
+    sm: { text: 'text-xl', sub: 'text-[8px]', icon: 16 },
+    md: { text: 'text-3xl', sub: 'text-[10px]', icon: 24 },
+    lg: { text: 'text-4xl', sub: 'text-xs', icon: 32 },
+    xl: { text: 'text-6xl', sub: 'text-sm', icon: 48 },
   };
   const s = sizes[size];
   const color = isMeta ? '#1877F2' : '#25D366'; // Meta blue or WhatsApp green
   
   return (
-    <div className={`flex flex-col items-start justify-center pt-8 ${className}`}>
+    <div className={`flex flex-col items-start justify-center ${className}`}>
       <div className="flex items-end leading-none">
-        <div className="relative flex flex-col items-center mr-[1px]">
-          <Wifi 
-            className={`text-[#F5A10F] absolute ${s.wifiPos}`} 
-            size={s.wifi} 
-            strokeWidth={3} 
-          />
-          <span className={`${s.text} font-black text-white leading-none tracking-tighter mt-1`}>i</span>
-        </div>
-        <span className={`${s.text} font-black text-white leading-none tracking-tighter`}>FastX</span>
+        <span 
+          className={`${s.text} font-black ${textColor ? '' : 'text-white'} leading-none tracking-tighter`}
+          style={{
+            ...(textColor ? { color: textColor } : {}),
+            ...(iFontSize ? { fontSize: iFontSize } : {})
+          }}
+        >
+          i
+        </span>
+        <span 
+          className={`${s.text} font-black ${textColor ? '' : 'text-white'} leading-none tracking-tighter`}
+          style={{
+            ...(textColor ? { color: textColor } : {}),
+            ...(textFontSize ? { fontSize: textFontSize } : {})
+          }}
+        >
+          FastX
+        </span>
         
         {isMeta ? (
           <svg xmlns="http://www.w3.org/2000/svg" width={s.icon} height={s.icon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`text-[#1877F2] ml-2 drop-shadow-[0_0_10px_rgba(24,119,242,0.3)]`}>
@@ -44,8 +64,11 @@ const BrandLogo: React.FC<BrandLogoProps> = ({ className = '', size = 'md', isMe
           </svg>
         )}
       </div>
-      <span className={`${s.sub} font-black uppercase tracking-widest text-white mt-1 ml-6 text-opacity-90`}>
-        {isMeta ? 'Meta Verified Partner' : 'Whatsapp API Gateway'}
+      <span 
+        className={`${s.sub} font-black uppercase tracking-widest ${textColor ? 'text-slate-500' : 'text-white text-opacity-90'} mt-1`}
+        style={subFontSize ? { fontSize: subFontSize } : undefined}
+      >
+        {isMeta ? 'Meta Verified Partner' : 'Whatsapp Business API Gateway'}
       </span>
     </div>
   );
