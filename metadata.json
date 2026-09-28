@@ -1,5 +1,6 @@
 {
   "name": "Remix: WhatsApp Instance Manager Pro",
   "description": "A high-fidelity dashboard for managing multi-session WhatsApp API instances using Baileys. Includes automated instance creation, QR code handling, and message management simulation.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

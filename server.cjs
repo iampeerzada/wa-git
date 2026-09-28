@@ -32,29 +32,42 @@ const {
     generateWAMessageFromContent,
     downloadMediaMessage,
     Browsers,
-    proto
+    proto,
+    makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 
 const messageCache = new Map();
 setInterval(() => {
     const now = Date.now();
     for (const [id, data] of messageCache.entries()) {
-        if (now - data.timestamp > 3600000) {
+        if (now - data.timestamp > 7200000) {
             messageCache.delete(id);
         }
     }
 }, 600000);
+
 const saveMessage = (key, message) => {
-    if (key && key.id) {
+    if (key && key.id && message) {
         messageCache.set(key.id, { message, timestamp: Date.now() });
     }
 };
+
 const getMessage = async (key) => {
     if (key && key.id) {
         const data = messageCache.get(key.id);
         if (data && data.message) return data.message;
+
+        try {
+            const res = await pool.query('SELECT text, content FROM chat_messages WHERE id = $1', [key.id]);
+            if (res.rows.length > 0) {
+                const txt = res.rows[0].text || res.rows[0].content;
+                if (txt) {
+                    return { conversation: txt };
+                }
+            }
+        } catch (e) {}
     }
-    return { conversation: '' };
+    return proto.Message.fromObject({});
 };
 
 
@@ -178,14 +191,28 @@ pool.connect(async (err, client, release) => {
         }
         
 
+        // Verify instances table columns
+        const instanceColQueries = [
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS provider VARCHAR(20) DEFAULT 'baileys'",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS meta_access_token TEXT",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS meta_phone_number_id VARCHAR(50)",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS meta_waba_id VARCHAR(50)",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS instance_key VARCHAR(100)",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS qr_code TEXT",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN DEFAULT FALSE"
+        ];
+        for (const colQuery of instanceColQueries) {
+            try {
+                await client.query(colQuery);
+            } catch (e) {
+                // Column already exists or handled
+            }
+        }
         try {
-            await client.query("ALTER TABLE instances ADD COLUMN provider VARCHAR(20) DEFAULT 'baileys'");
-            await client.query("ALTER TABLE instances ADD COLUMN meta_access_token TEXT");
-            await client.query("ALTER TABLE instances ADD COLUMN meta_phone_number_id VARCHAR(50)");
-            await client.query("ALTER TABLE instances ADD COLUMN meta_waba_id VARCHAR(50)");
-            console.log('[Database] Added Meta columns to instances');
+            await client.query("UPDATE instances SET instance_key = id WHERE instance_key IS NULL OR instance_key = ''");
+            console.log('[Database] Added Meta and instance_key columns to instances');
         } catch (e) {
-            // Probably already exists
+            console.warn('[Database] Instance Key Notice:', e.message);
         }
 
         try {
@@ -209,8 +236,9 @@ pool.connect(async (err, client, release) => {
         `);
         console.log('[Database] system_settings table verified.');
         try {
-            await client.query('ALTER TABLE users ADD COLUMN wallet_balance DECIMAL(10,4) DEFAULT 0.00;');
-            console.log('[Database] Added wallet_balance column to users');
+            await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance DECIMAL(10,4) DEFAULT 0.00;');
+            await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255);');
+            console.log('[Database] Added wallet_balance and full_name columns to users');
         } catch (e) { }
 
         await client.query(`
@@ -344,13 +372,15 @@ cron.schedule('0 0 * * *', async () => {
     } catch (err) {
         console.error('[Cron Error] Resetting daily limits:', err.message);
     }
-});
+}, { timezone: 'Asia/Kolkata' });
 
 cron.schedule('0 0 1 * *', async () => {
     try {
         console.log('[Cron] Resetting monthly limits...');
         await pool.query('UPDATE subscriptions SET messages_sent_this_month = 0');
     } catch (err) {}
+}, {
+    timezone: "Asia/Kolkata"
 });
 
 cron.schedule('0 0 1 1 *', async () => {
@@ -381,14 +411,37 @@ cron.schedule('10 0 * * *', async () => {
     } catch (err) {
         console.error('[Cron Error] Daily Count Alert:', err.message);
     }
-});
+}, { timezone: 'Asia/Kolkata' });
 
 // --- AUTHENTICATION MIDDLEWARE ---
 
 const authenticate = async (req, res, next) => {
-    const userId = req.headers['x-user-id'];
-    const role = req.headers['x-role'];
-    const apiKey = req.headers['x-api-key'];
+    let userId = req.headers['x-user-id'];
+    let role = req.headers['x-role'];
+    let apiKey = req.headers['x-api-key'] || req.headers['x-instance-key'] || req.headers['wa_api_key'] || req.headers['wa_instance_id'];
+
+    // Support Bearer authorization token header
+    if (!apiKey && req.headers['authorization']) {
+        const authHeader = req.headers['authorization'];
+        if (authHeader.startsWith('Bearer ')) {
+            apiKey = authHeader.substring(7).trim();
+        } else {
+            apiKey = authHeader.trim();
+        }
+    }
+
+    // Support query parameters
+    if (!apiKey) {
+        apiKey = req.query?.access_token || req.query?.api_key || req.query?.apiKey || req.query?.wa_api_key || req.query?.wa_instance_id || req.query?.instance_key || req.query?.instanceKey || req.query?.insta_id || req.query?.instaId || req.query?.token;
+    }
+
+    // Support body parameters
+    if (!apiKey && req.body) {
+        apiKey = req.body.api_key || req.body.apiKey || req.body.wa_api_key || req.body.wa_instance_id || req.body.instance_key || req.body.instanceKey || req.body.insta_id || req.body.instaId || req.body.token;
+    }
+
+    if (!userId && req.query?.user_id) userId = req.query.user_id;
+    if (!userId && req.body?.user_id) userId = req.body.user_id;
 
     // Special Case: Allow POST /api/users for signups or initial setup
     if (req.path === '/api/users' && req.method === 'POST') {
@@ -397,15 +450,30 @@ const authenticate = async (req, res, next) => {
     }
 
     if (!userId && !apiKey) {
-        return res.status(401).json({ error: 'Identification header X-User-ID or X-API-Key missing' });
+        return res.status(401).json({ error: 'Identification header or parameter (X-API-Key, X-Instance-Key, access_token, or Bearer token) missing' });
     }
 
     try {
         let userResult;
+        let authInstance = null;
+
         if (userId) {
             userResult = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
         } else if (apiKey) {
             userResult = await pool.query('SELECT * FROM users WHERE api_key = $1', [apiKey]);
+            
+            // If key is not a user API key, check if it matches an instance ID, instance_key, or Meta IDs
+            if (!userResult || userResult.rows.length === 0) {
+                const instRes = await pool.query(
+                    'SELECT * FROM instances WHERE id = $1 OR instance_key = $1 OR meta_phone_number_id = $1 OR meta_waba_id = $1 OR meta_access_token = $1', 
+                    [apiKey]
+                );
+                if (instRes.rows.length > 0) {
+                    authInstance = instRes.rows[0];
+                    req.authInstanceId = authInstance.id;
+                    userResult = await pool.query('SELECT * FROM users WHERE id = $1', [authInstance.user_id]);
+                }
+            }
         }
 
         if (userResult && userResult.rows.length > 0) {
@@ -416,7 +484,6 @@ const authenticate = async (req, res, next) => {
             if (subscription && subscription.status === 'active' && subscription.expiry_date && new Date(subscription.expiry_date) < new Date()) {
                 subscription.status = 'expired';
                 pool.query('UPDATE subscriptions SET status = $1 WHERE user_id = $2', ['expired', subscription.user_id]).catch(() => {});
-                sendSystemNotification(dbUser.id, `⚠️ *Account Expired*\n\nYour subscription has expired. Please renew your plan to continue sending messages.`);
             } else if (subscription && subscription.status === 'expired' && (subscription.expiry_date === null || new Date(subscription.expiry_date) > new Date())) {
                 subscription.status = 'active';
                 pool.query('UPDATE subscriptions SET status = $1 WHERE user_id = $2', ['active', subscription.user_id]).catch(() => {});
@@ -426,11 +493,16 @@ const authenticate = async (req, res, next) => {
                 ...dbUser, 
                 subscription: subscription 
             };
+            if (req.user.id === 'u_super_9595') {
+                req.user.role = 'superadmin';
+            }
+            if (authInstance) {
+                req.authInstanceId = authInstance.id;
+            }
         } else if (userId === 'u_super_9595') {
-            // Seed bypass for initial superadmin
             req.user = { id: 'u_super_9595', role: 'superadmin' };
         } else {
-            return res.status(403).json({ error: 'User context not found in database.' });
+            return res.status(403).json({ error: 'Invalid API Key or Instance Key provided.' });
         }
     } catch (e) {
         console.error(`[Auth] User lookup failed:`, e);
@@ -458,9 +530,14 @@ async function connectToWhatsApp(instanceId) {
         const sock = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
-            auth: state,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+            },
+            generateHighQualityLinkPreview: true,
+            syncFullHistory: false,
             printQRInTerminal: false,
-            browser: Browsers.macOS('Desktop'),
+            browser: Browsers.ubuntu('Desktop'),
                         agent: process.env.PROXY_URL ? 
                 (process.env.PROXY_URL.startsWith('socks') ? 
                     new (require('socks-proxy-agent').SocksProxyAgent)(process.env.PROXY_URL) : 
@@ -471,11 +548,11 @@ async function connectToWhatsApp(instanceId) {
                 minVersion: 'TLSv1.2',
                 ciphers: 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384'
             }),
-            markOnlineOnConnect: false,
+            markOnlineOnConnect: true,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 10000,
-            retryRequestDelayMs: 5000,
+            retryRequestDelayMs: 250,
             getMessage,
             options: {
                 headers: {
@@ -495,6 +572,9 @@ async function connectToWhatsApp(instanceId) {
             if (qr) {
                 instancesMap.set(instanceId, { ...instancesMap.get(instanceId), qr, status: 'qr_required' });
                 await pool.query('UPDATE instances SET status = $1, qr_code = $2 WHERE id = $3', ['qr_required', qr, instanceId]).catch(e => console.error('QR Update Error:', e.message));
+                io.emit('qr', { instanceId, qr });
+                io.emit('status', { instanceId, status: 'qr', qr });
+                io.emit('instances_updated', { instanceId });
             }
 
             if (connection === 'close') {
@@ -505,6 +585,9 @@ async function connectToWhatsApp(instanceId) {
                 
                 const instanceData = instancesMap.get(instanceId);
                 const phone = instanceData?.phone || instanceId;
+
+                io.emit('status', { instanceId, status: shouldReconnect ? 'connecting' : 'closed', phoneNumber: phone });
+                io.emit('instances_updated', { instanceId });
 
                 if (!shouldReconnect) {
                     instancesMap.delete(instanceId);
@@ -543,6 +626,8 @@ async function connectToWhatsApp(instanceId) {
                 instancesMap.set(instanceId, { sock, status: 'open', qr: null, phone });
                 await pool.query('UPDATE instances SET status = $1, phone_number = $2, qr_code = NULL WHERE id = $3', ['open', phone, instanceId]).catch(e => console.error('Open State Update Error:', e.message));
                 console.log(`[Instance ${instanceId}] Connected as ${phone}`);
+                io.emit('status', { instanceId, status: 'open', phoneNumber: phone });
+                io.emit('instances_updated', { instanceId });
             }
         });
 
@@ -598,7 +683,9 @@ async function connectToWhatsApp(instanceId) {
         sock.ev.on('messages.upsert', async (m) => {
             if (m.type !== 'notify') return;
             const msg = m.messages[0];
-            if (!msg.message) return;
+            if (!msg || !msg.message) return;
+
+            saveMessage(msg.key, msg.message);
 
             const from = msg.key.remoteJid;
             const fromMe = msg.key.fromMe;
@@ -769,8 +856,10 @@ async function connectToWhatsApp(instanceId) {
                         }
                             
                             if (response.text) {
-                                await sock.sendMessage(from, { text: response.text });
-                                // the message will be picked up by messages.upsert since it's fromMe=true? Actually no, sock.sendMessage doesn't trigger upsert sometimes, but let's assume it does, or we can just let it be.
+                                const sentMsg = await sock.sendMessage(from, { text: response.text });
+                                if (sentMsg && sentMsg.key && sentMsg.message) {
+                                    saveMessage(sentMsg.key, sentMsg.message);
+                                }
                             }
                         }
                     } catch (aiErr) {
@@ -787,12 +876,20 @@ async function connectToWhatsApp(instanceId) {
             try {
                 // Fetch active rules for this instance
                 const ruleResult = await pool.query(
-                    'SELECT * FROM auto_responder_rules WHERE instance_id = $1 AND is_active = TRUE AND LOWER(trigger_keyword) = LOWER($2)',
-                    [instanceId, text.trim()]
+                    'SELECT * FROM auto_responder_rules WHERE instance_id = $1 AND is_active = TRUE',
+                    [instanceId]
                 );
 
-                if (ruleResult.rows.length > 0) {
-                    const rule = ruleResult.rows[0];
+                const msgLower = text.trim().toLowerCase();
+                const matchedRule = ruleResult.rows.find(rule => {
+                    const rawKw = (rule.trigger_keyword || '').toLowerCase();
+                    const keywords = rawKw.split(',').map(k => k.trim()).filter(Boolean);
+                    if (keywords.length === 0) return false;
+                    return keywords.some(k => msgLower === k || msgLower.includes(k) || k.includes(msgLower));
+                });
+
+                if (matchedRule) {
+                    const rule = matchedRule;
                     console.log(`[AutoResponder] Match found for "${text}" on instance ${instanceId}`);
                     
                     // Simple Response Logic
@@ -893,8 +990,14 @@ async function connectToWhatsApp(instanceId) {
                           upload: sock.waUploadToServer
                         });
                         await sock.relayMessage(from, msgGen.message, { messageId: msgGen.key.id });
+                        if (msgGen && msgGen.key && msgGen.message) {
+                            saveMessage(msgGen.key, msgGen.message);
+                        }
                     } else {
-                        await sock.sendMessage(from, payload);
+                        const sent = await sock.sendMessage(from, payload);
+                        if (sent && sent.key && sent.message) {
+                            saveMessage(sent.key, sent.message);
+                        }
                     }
                     
                     // Log the auto-response event
@@ -940,9 +1043,25 @@ app.post('/api/login', async (req, res) => {
         if (result.rows.length > 0) {
             const user = result.rows[0];
             const sub = await pool.query('SELECT * FROM subscriptions WHERE user_id = $1', [user.id]);
+            const subRow = sub.rows[0] || null;
             return res.json({ 
-                ...user, 
-                subscription: sub.rows[0] || null 
+                ...user,
+                id: user.id,
+                username: user.username,
+                fullName: user.full_name || user.username,
+                email: user.email,
+                mobile: user.mobile,
+                role: user.role,
+                parentId: user.parent_id,
+                apiKey: user.api_key,
+                permissions: user.permissions || [],
+                subscription: subRow ? {
+                    planId: subRow.plan_id,
+                    status: subRow.status,
+                    expiryDate: subRow.expiry_date,
+                    customMaxInstances: subRow.custom_max_instances,
+                    customDailyLimit: subRow.custom_daily_limit
+                } : null
             });
         }
         res.status(401).json({ error: 'Invalid username or password' });
@@ -978,11 +1097,15 @@ app.post('/api/meta/webhook', async (req, res) => {
 
             try {
                 // Update message logs (bulk sender)
-                await pool.query('UPDATE message_logs SET status = $1 WHERE message_id = $2', [status, msgId]);
+                if (error) {
+                    await pool.query('UPDATE message_logs SET status = $1, error = $2 WHERE message_id = $3', [status, error, msgId]);
+                } else {
+                    await pool.query('UPDATE message_logs SET status = $1 WHERE message_id = $2', [status, msgId]);
+                }
                 // Update chat messages (chat interface)
                 await pool.query('UPDATE chat_messages SET status = $1 WHERE id = $2', [status, msgId]);
                 
-                io.emit('message_status', { id: msgId, status });
+                io.emit('message_status', { id: msgId, msgId: msgId, status });
             } catch (e) {
                 console.error('[Meta Webhook Status DB Error]', e.message);
             }
@@ -1005,19 +1128,27 @@ app.post('/api/meta/webhook', async (req, res) => {
             } else if (msg.type === 'image') {
                 text = msg.image?.caption || '[Image]';
                 mediaType = 'image';
-                mediaUrl = msg.image?.id;
+                mediaUrl = msg.image?.id || msg.image?.url;
             } else if (msg.type === 'video') {
                 text = msg.video?.caption || '[Video]';
                 mediaType = 'video';
-                mediaUrl = msg.video?.id;
+                mediaUrl = msg.video?.id || msg.video?.url;
             } else if (msg.type === 'document') {
                 text = msg.document?.caption || msg.document?.filename || '[Document]';
                 mediaType = 'document';
-                mediaUrl = msg.document?.id;
+                mediaUrl = msg.document?.id || msg.document?.url;
             } else if (msg.type === 'audio') {
                 text = '[Audio]';
                 mediaType = 'audio';
-                mediaUrl = msg.audio?.id;
+                mediaUrl = msg.audio?.id || msg.audio?.url;
+            } else if (msg.type === 'sticker') {
+                text = '[Sticker]';
+                mediaType = 'image';
+                mediaUrl = msg.sticker?.id || msg.sticker?.url;
+            } else if (msg.type === 'location') {
+                text = `📍 Location: ${msg.location?.name || ''} (${msg.location?.latitude}, ${msg.location?.longitude})`;
+            } else if (msg.type === 'contacts') {
+                text = `👤 Contact: ${msg.contacts?.[0]?.name?.formatted_name || 'Contact card'}`;
             }
             
             const msgId = msg.id;
@@ -1030,7 +1161,14 @@ app.post('/api/meta/webhook', async (req, res) => {
                     const instance = instanceRes.rows[0];
                     const instanceId = instance.id;
                     
-                    if (mediaUrl) {
+                    if (pushName) {
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
+                            [instanceId, from, pushName]
+                        ).catch(() => {});
+                    }
+
+                    if (mediaUrl && !mediaUrl.startsWith('/')) {
                         mediaUrl = `/api/meta/media/${instanceId}/${mediaUrl}`;
                     }
                     
@@ -1082,36 +1220,77 @@ app.post('/api/meta/webhook', async (req, res) => {
                             const stateRes = await pool.query('SELECT current_node_id FROM customer_flow_states WHERE remote_jid = $1 AND instance_id = $2', [from, instanceId]);
                             if (stateRes.rows.length > 0 && stateRes.rows[0].current_node_id) {
                                 const currentNodeId = stateRes.rows[0].current_node_id;
+                                const childOptions = autoRes.rows.filter(r => r.parent_id == currentNodeId);
                                 
-                                // Look for children of current node that match the keyword
-                                const childNode = autoRes.rows.find(r => r.parent_id == currentNodeId && (r.keyword || '').toLowerCase().trim() === msgText);
+                                // Step 1a: Check exact keyword match
+                                let childNode = childOptions.find(r => {
+                                    if (r.match_type === 'contains' || r.match_type === 'all') return false;
+                                    const kList = (r.keyword || '').toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
+                                    return kList.some(k => k !== '*' && msgText === k);
+                                });
+
+                                // Step 1b: Check contains keyword match
+                                if (!childNode) {
+                                    childNode = childOptions.find(r => {
+                                        if (r.match_type !== 'contains') return false;
+                                        const kList = (r.keyword || '').toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
+                                        return kList.some(k => k !== '*' && msgText.includes(k));
+                                    });
+                                }
+
+                                // Step 1c: Check wildcard/fallback '*'
+                                if (!childNode) {
+                                    childNode = childOptions.find(r => {
+                                        const kList = (r.keyword || '').toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
+                                        return r.match_type === 'all' || kList.includes('*') || (r.keyword && r.keyword.trim() === '*');
+                                    });
+                                }
+
                                 if (childNode) {
                                     matchedNode = childNode;
-                                } else {
-                                    // Optionally handle "invalid option" here, or let it fallback to global
                                 }
                             }
                             
                             // 2. If no option matched, check global roots (parent_id IS NULL)
                             if (!matchedNode) {
-                                let isFirstMessage = null;
-                                for (const rule of autoRes.rows) {
-                                    if (rule.parent_id) continue; // Skip non-root nodes for global triggers
-                                    let match = false;
-                                    const keyword = rule.keyword ? rule.keyword.toLowerCase().trim() : '';
-                                    if (rule.match_type === 'welcome') {
-                                        if (isFirstMessage === null) {
-                                            const msgCountRes = await pool.query('SELECT COUNT(*) as count FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 AND from_me = false', [instanceId, from]);
-                                            isFirstMessage = parseInt(msgCountRes.rows[0].count) <= 1;
-                                        }
-                                        if (isFirstMessage) match = true;
-                                    } else if (rule.match_type === 'exact' && msgText === keyword) match = true;
-                                    else if (rule.match_type === 'contains' && msgText.includes(keyword)) match = true;
-                                    
-                                    if (match) {
-                                        matchedNode = rule;
-                                        break;
+                                const rootNodes = autoRes.rows.filter(rule => !rule.parent_id);
+
+                                // Step 2a: Check exact keyword match on root nodes
+                                matchedNode = rootNodes.find(rule => {
+                                    if (rule.match_type !== 'exact') return false;
+                                    const rawKw = rule.keyword ? rule.keyword.toLowerCase().trim() : '';
+                                    const kList = rawKw.split(',').map(k => k.trim()).filter(Boolean);
+                                    return kList.some(k => k !== '*' && msgText === k);
+                                });
+
+                                // Step 2b: Check contains keyword match on root nodes
+                                if (!matchedNode) {
+                                    matchedNode = rootNodes.find(rule => {
+                                        if (rule.match_type !== 'contains') return false;
+                                        const rawKw = rule.keyword ? rule.keyword.toLowerCase().trim() : '';
+                                        const kList = rawKw.split(',').map(k => k.trim()).filter(Boolean);
+                                        return kList.some(k => k !== '*' && msgText.includes(k));
+                                    });
+                                }
+
+                                // Step 2c: Check welcome rules for new users
+                                if (!matchedNode) {
+                                    const welcomeRule = rootNodes.find(rule => rule.match_type === 'welcome');
+                                    if (welcomeRule) {
+                                        const msgCountRes = await pool.query('SELECT COUNT(*) as count FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 AND from_me = false', [instanceId, from]);
+                                        const isFirst = parseInt(msgCountRes.rows[0].count, 10) <= 1;
+                                        if (isFirst) matchedNode = welcomeRule;
                                     }
+                                }
+
+                                // Step 2d: Check wildcard / catch-all '*' or match_type === 'all'
+                                if (!matchedNode) {
+                                    matchedNode = rootNodes.find(rule => {
+                                        if (rule.match_type === 'all') return true;
+                                        const rawKw = rule.keyword ? rule.keyword.toLowerCase().trim() : '';
+                                        const kList = rawKw.split(',').map(k => k.trim()).filter(Boolean);
+                                        return kList.includes('*') || rawKw === '*';
+                                    });
                                 }
                             }
                             
@@ -1354,20 +1533,90 @@ app.post('/api/meta/webhook', async (req, res) => {
 
 app.get('/api/message-logs', authenticate, async (req, res) => {
     try {
-        const { instanceId, limit = 100 } = req.query;
-        let query = 'SELECT * FROM message_logs WHERE user_id = $1';
-        let params = [req.user.id];
+        const { instanceId, limit = 50, page = 1, month, year, status } = req.query;
+        const pageNum = Math.max(1, parseInt(page, 10) || 1);
+        const limitNum = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
+        const offset = (pageNum - 1) * limitNum;
+
+        let baseWhereClauses = ['user_id = $1'];
+        let baseParams = [req.user.id];
 
         if (instanceId) {
-            query += ' AND instance_id = $2';
-            params.push(instanceId);
+            baseParams.push(instanceId);
+            baseWhereClauses.push(`instance_id = $${baseParams.length}`);
         }
 
-        query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
-        params.push(limit);
+        if (year && year !== 'all') {
+            baseParams.push(parseInt(year, 10));
+            baseWhereClauses.push(`EXTRACT(YEAR FROM created_at) = $${baseParams.length}`);
+        }
 
-        const result = await pool.query(query, params);
-        res.json(result.rows);
+        if (month && month !== 'all') {
+            baseParams.push(parseInt(month, 10));
+            baseWhereClauses.push(`EXTRACT(MONTH FROM created_at) = $${baseParams.length}`);
+        }
+
+        const baseWhereSql = baseWhereClauses.join(' AND ');
+
+        // Calculate overall stats for the instance/month/year selection
+        const statsRes = await pool.query(
+            `SELECT 
+               COUNT(*) as total_count,
+               COUNT(*) FILTER (WHERE status = 'delivered' OR status = 'success' OR status = 'sent') as delivered_count,
+               COUNT(*) FILTER (WHERE status = 'failed') as failed_count,
+               COUNT(*) FILTER (WHERE status != 'delivered' AND status != 'success' AND status != 'sent' AND status != 'failed') as pending_count
+             FROM message_logs WHERE ${baseWhereSql}`,
+            baseParams
+        );
+
+        // Filter by status if specified
+        let filteredWhereClauses = [...baseWhereClauses];
+        let filteredParams = [...baseParams];
+
+        if (status && status !== 'all') {
+            if (status === 'delivered' || status === 'sent' || status === 'success') {
+                filteredWhereClauses.push(`(status = 'delivered' OR status = 'success' OR status = 'sent')`);
+            } else if (status === 'failed') {
+                filteredWhereClauses.push(`status = 'failed'`);
+            } else if (status === 'pending') {
+                filteredWhereClauses.push(`(status != 'delivered' AND status != 'success' AND status != 'sent' AND status != 'failed')`);
+            } else {
+                filteredParams.push(status);
+                filteredWhereClauses.push(`status = $${filteredParams.length}`);
+            }
+        }
+
+        const filteredWhereSql = filteredWhereClauses.join(' AND ');
+
+        const countRes = await pool.query(`SELECT COUNT(*) FROM message_logs WHERE ${filteredWhereSql}`, filteredParams);
+        const total = parseInt(countRes.rows[0].count, 10) || 0;
+
+        let dataParams = [...filteredParams];
+        dataParams.push(limitNum);
+        const limitIdx = dataParams.length;
+        dataParams.push(offset);
+        const offsetIdx = dataParams.length;
+
+        const dataRes = await pool.query(
+            `SELECT * FROM message_logs WHERE ${filteredWhereSql} ORDER BY created_at DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+            dataParams
+        );
+
+        const stats = statsRes.rows[0] || {};
+
+        res.json({
+            logs: dataRes.rows,
+            total,
+            page: pageNum,
+            limit: limitNum,
+            totalPages: Math.ceil(total / limitNum) || 1,
+            stats: {
+                total: parseInt(stats.total_count, 10) || 0,
+                delivered: parseInt(stats.delivered_count, 10) || 0,
+                failed: parseInt(stats.failed_count, 10) || 0,
+                pending: parseInt(stats.pending_count, 10) || 0
+            }
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1375,13 +1624,130 @@ app.get('/api/message-logs', authenticate, async (req, res) => {
 
 // --- USER MANAGEMENT ---
 
+
+app.get('/api/wallet/ledger', authenticate, async (req, res) => {
+    try {
+        const query = req.user.role === 'superadmin' && req.query.userId 
+            ? 'SELECT * FROM wallet_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100'
+            : 'SELECT * FROM wallet_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100';
+            
+        const userId = req.user.role === 'superadmin' && req.query.userId ? req.query.userId : req.user.id;
+        
+        const result = await pool.query(query, [userId]);
+        const balanceRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
+        
+        res.json({ 
+            balance: balanceRes.rows.length > 0 ? parseFloat(balanceRes.rows[0].wallet_balance) : 0,
+            ledger: result.rows 
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/wallet/fund', authenticate, async (req, res) => {
+    if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Unauthorized' });
+    const { userId, amount, description } = req.body;
+    try {
+        await pool.query('UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2', [amount, userId]);
+        await pool.query(
+            'INSERT INTO wallet_transactions (user_id, amount, type, description, status) VALUES ($1, $2, $3, $4, $5)',
+            [userId, amount, amount >= 0 ? 'credit' : 'debit', description || 'Manual Adjustment', 'completed']
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/wallet/settings', authenticate, async (req, res) => {
+    try {
+        const keys = ['baileys_credit_cost', 'meta_template_credit_cost', 'meta_regular_credit_cost', 'meta_utility_credit_cost', 'meta_marketing_credit_cost', 'meta_authentication_credit_cost'];
+        const result = await pool.query('SELECT key, value FROM system_settings WHERE key = ANY($1)', [keys]);
+        res.json({ settings: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/wallet/settings', authenticate, async (req, res) => {
+    if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Unauthorized' });
+    const { settings } = req.body;
+    try {
+        for (const [key, value] of Object.entries(settings)) {
+            await pool.query(
+                'INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', 
+                [key, value]
+            );
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/wallet/refill-intent', authenticate, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { amount } = req.body;
+        
+        if (!amount || amount < 500) {
+            return res.status(400).json({ error: 'Minimum amount is 500' });
+        }
+
+        // Just return a mock order ID
+        res.json({ success: true, orderId: 'rzp_order_' + Date.now() });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.post('/api/wallet/refill-success', authenticate, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { amount, paymentId } = req.body;
+        
+        await pool.query(
+            "INSERT INTO wallet_transactions (user_id, amount, type, description, status) VALUES ($1, $2, 'credit', $3, 'completed')",
+            [userId, amount, `Razorpay Refill (${paymentId})`]
+        );
+        
+        await pool.query(
+            "UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2",
+            [amount, userId]
+        );
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
 app.get('/api/users', authenticate, async (req, res) => {
+    console.log('[DEBUG /api/users] User:', req.user);
     try {
         let query = `
             SELECT u.*, 
             s.plan_id as sub_plan_id, s.status as sub_status, s.expiry_date as sub_expiry,
-            s.messages_sent_today, s.messages_sent_this_month, s.messages_sent_this_year,
-            s.custom_max_instances, s.custom_daily_limit
+            GREATEST(
+              CASE WHEN s.last_reset_date < CURRENT_DATE THEN 0 ELSE COALESCE(s.messages_sent_today, 0) END,
+              COALESCE((SELECT COUNT(*) FROM message_logs WHERE user_id = u.id AND status != 'failed' AND created_at >= CURRENT_DATE), 0)
+            ) as messages_sent_today, 
+            GREATEST(
+              COALESCE(s.messages_sent_this_month, 0),
+              COALESCE(s.messages_sent_today, 0),
+              COALESCE((SELECT COUNT(*) FROM message_logs WHERE user_id = u.id AND status != 'failed' AND created_at >= DATE_TRUNC('month', CURRENT_DATE)), 0)
+            ) as messages_sent_this_month, 
+            GREATEST(
+              COALESCE(s.messages_sent_this_year, 0),
+              COALESCE(s.messages_sent_this_month, 0),
+              COALESCE(s.messages_sent_today, 0),
+              COALESCE((SELECT COUNT(*) FROM message_logs WHERE user_id = u.id AND status != 'failed' AND created_at >= DATE_TRUNC('year', CURRENT_DATE)), 0)
+            ) as messages_sent_this_year,
+            COALESCE((SELECT COUNT(*) FROM message_logs WHERE user_id = u.id AND status = 'failed' AND created_at >= CURRENT_DATE), 0) as undelivered_today,
+            COALESCE((SELECT COUNT(*) FROM message_logs WHERE user_id = u.id AND status = 'failed'), 0) as undelivered_total,
+            s.custom_max_instances, s.custom_daily_limit, s.meta_setup_waived, s.custom_meta_setup_fee
             FROM users u
             LEFT JOIN subscriptions s ON u.id = s.user_id
         `;
@@ -1412,6 +1778,7 @@ app.get('/api/users', authenticate, async (req, res) => {
             return {
                 id: u.id,
                 username: u.username,
+                fullName: u.full_name || u.username,
                 email: u.email,
                 mobile: u.mobile,
                 role: u.role,
@@ -1422,11 +1789,15 @@ app.get('/api/users', authenticate, async (req, res) => {
                     planId: u.sub_plan_id,
                     status: status,
                     expiryDate: u.sub_expiry,
-                    messagesSentToday: u.messages_sent_today,
-                    messagesSentThisMonth: u.messages_sent_this_month,
-                    messagesSentThisYear: u.messages_sent_this_year,
+                    messagesSentToday: parseInt(u.messages_sent_today, 10) || 0,
+                    messagesSentThisMonth: parseInt(u.messages_sent_this_month, 10) || 0,
+                    messagesSentThisYear: parseInt(u.messages_sent_this_year, 10) || 0,
+                    undeliveredToday: parseInt(u.undelivered_today, 10) || 0,
+                    undeliveredTotal: parseInt(u.undelivered_total, 10) || 0,
                     customMaxInstances: u.custom_max_instances,
-                    customDailyLimit: u.custom_daily_limit
+                    customDailyLimit: u.custom_daily_limit,
+                    metaSetupWaived: Boolean(u.meta_setup_waived),
+                    customMetaSetupFee: u.custom_meta_setup_fee !== null && u.custom_meta_setup_fee !== undefined ? u.custom_meta_setup_fee : null
                 }
             };
         });
@@ -1437,9 +1808,18 @@ app.get('/api/users', authenticate, async (req, res) => {
 });
 
 app.post('/api/users', authenticate, async (req, res) => {
-    const { id, username, email, mobile, password, role, parentId, apiKey, subscription } = req.body;
+    const { id, username, fullName, email, mobile, password, role, parentId, apiKey, subscription } = req.body;
     
-    console.log(`[Backend] Attempting to create user: ${username} with ID ${id}`);
+    // Determine appropriate role and parent_id
+    let targetRole = role || 'admin';
+    let targetParentId = parentId || (req.user.role === 'superadmin' ? null : req.user.id);
+    
+    // Non-superadmins cannot create reseller or superadmin roles
+    if (req.user.role !== 'superadmin' && (targetRole === 'reseller' || targetRole === 'superadmin')) {
+        targetRole = 'team_member';
+    }
+
+    console.log(`[Backend] Attempting to create user: ${username} (${fullName || 'No Full Name'}) with ID ${id}, role: ${targetRole}`);
 
     const client = await pool.connect();
     try {
@@ -1453,8 +1833,8 @@ app.post('/api/users', authenticate, async (req, res) => {
         }
 
         await client.query(
-            'INSERT INTO users (id, username, email, mobile, password, role, parent_id, api_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-            [id, username, email, mobile, password, role, parentId, apiKey]
+            'INSERT INTO users (id, username, full_name, email, mobile, password, role, parent_id, api_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            [id, username, fullName || username, email, mobile, password, targetRole, targetParentId, apiKey]
         );
 
         let finalSub = null;
@@ -1473,10 +1853,11 @@ app.post('/api/users', authenticate, async (req, res) => {
         res.status(201).json({
             id,
             username,
+            fullName: fullName || username,
             email,
             mobile,
-            role,
-            parentId,
+            role: targetRole,
+            parentId: targetParentId,
             apiKey,
             createdAt: new Date().toISOString(),
             subscription: finalSub ? {
@@ -1498,7 +1879,7 @@ app.post('/api/users', authenticate, async (req, res) => {
 });
 
 app.put('/api/users/:id', authenticate, async (req, res) => {
-    const { username, email, mobile, password, role, planId, expiryDate, customMaxInstances, customDailyLimit } = req.body;
+    const { username, fullName, email, mobile, password, role, planId, expiryDate, customMaxInstances, customDailyLimit, metaSetupWaived, customMetaSetupFee } = req.body;
     const { id } = req.params;
 
     const client = await pool.connect();
@@ -1519,6 +1900,7 @@ app.put('/api/users/:id', authenticate, async (req, res) => {
         let userIdx = 2;
 
         if (username !== undefined) { userUpdates.push(`username = $${userIdx++}`); userValues.push(username); }
+        if (fullName !== undefined) { userUpdates.push(`full_name = $${userIdx++}`); userValues.push(fullName); }
         if (email !== undefined) { userUpdates.push(`email = $${userIdx++}`); userValues.push(email); }
         if (mobile !== undefined) { userUpdates.push(`mobile = $${userIdx++}`); userValues.push(mobile); }
         if (password) { userUpdates.push(`password = $${userIdx++}`); userValues.push(password); }
@@ -1544,6 +1926,8 @@ app.put('/api/users/:id', authenticate, async (req, res) => {
         }
         if (customMaxInstances !== undefined) { subUpdates.push(`custom_max_instances = $${subIdx++}`); subValues.push(customMaxInstances === '' ? null : customMaxInstances); }
         if (customDailyLimit !== undefined) { subUpdates.push(`custom_daily_limit = $${subIdx++}`); subValues.push(customDailyLimit === '' ? null : customDailyLimit); }
+        if (metaSetupWaived !== undefined) { subUpdates.push(`meta_setup_waived = $${subIdx++}`); subValues.push(Boolean(metaSetupWaived)); }
+        if (customMetaSetupFee !== undefined) { subUpdates.push(`custom_meta_setup_fee = $${subIdx++}`); subValues.push(customMetaSetupFee === '' || customMetaSetupFee === null ? null : parseInt(customMetaSetupFee)); }
 
         if (subUpdates.length > 0) {
             const existingSub = await client.query('SELECT user_id FROM subscriptions WHERE user_id = $1', [id]);
@@ -1551,8 +1935,8 @@ app.put('/api/users/:id', authenticate, async (req, res) => {
                 await client.query(`UPDATE subscriptions SET ${subUpdates.join(', ')} WHERE user_id = $1`, subValues);
             } else if (planId) {
                 await client.query(
-                    'INSERT INTO subscriptions (user_id, plan_id, status, expiry_date, custom_max_instances, custom_daily_limit) VALUES ($1, $2, $3, $4, $5, $6)',
-                    [id, planId, 'active', expiryDate || null, customMaxInstances === '' ? null : customMaxInstances, customDailyLimit === '' ? null : customDailyLimit]
+                    'INSERT INTO subscriptions (user_id, plan_id, status, expiry_date, custom_max_instances, custom_daily_limit, meta_setup_waived, custom_meta_setup_fee) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+                    [id, planId, 'active', expiryDate || null, customMaxInstances === '' ? null : customMaxInstances, customDailyLimit === '' ? null : customDailyLimit, Boolean(metaSetupWaived), customMetaSetupFee === '' || customMetaSetupFee === null ? null : parseInt(customMetaSetupFee)]
                 );
             }
         }
@@ -1594,6 +1978,45 @@ app.patch('/api/users/:id/password', authenticate, async (req, res) => {
     }
 });
 
+app.put('/api/profile', authenticate, async (req, res) => {
+    const { username, fullName, email, mobile, password } = req.body;
+    const userId = req.user.id;
+
+    try {
+        const userUpdates = [];
+        const userValues = [userId];
+        let userIdx = 2;
+
+        if (username) { userUpdates.push(`username = $${userIdx++}`); userValues.push(username); }
+        if (fullName !== undefined) { userUpdates.push(`full_name = $${userIdx++}`); userValues.push(fullName); }
+        if (email !== undefined) { userUpdates.push(`email = $${userIdx++}`); userValues.push(email); }
+        if (mobile !== undefined) { userUpdates.push(`mobile = $${userIdx++}`); userValues.push(mobile); }
+        if (password) { userUpdates.push(`password = $${userIdx++}`); userValues.push(password); }
+
+        if (userUpdates.length > 0) {
+            await pool.query(`UPDATE users SET ${userUpdates.join(', ')} WHERE id = $1`, userValues);
+        }
+
+        const updatedRes = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+        const u = updatedRes.rows[0];
+        res.json({
+            success: true,
+            user: {
+                id: u.id,
+                username: u.username,
+                fullName: u.full_name || u.username,
+                email: u.email,
+                mobile: u.mobile,
+                role: u.role,
+                apiKey: u.api_key
+            }
+        });
+    } catch (err) {
+        console.error(`[Backend] Profile Update Failed: ${err.message}`);
+        res.status(400).json({ error: err.message });
+    }
+});
+
 // --- SYSTEM SETTINGS ---
 
 app.get('/api/settings/hidden-modules', authenticate, async (req, res) => {
@@ -1629,7 +2052,22 @@ app.post('/api/settings/hidden-modules', authenticate, async (req, res) => {
 app.get('/api/plans', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM plans ORDER BY price ASC');
-        res.json(result.rows);
+        const plans = result.rows.map(r => ({
+            id: r.id,
+            name: r.name,
+            dailyLimit: r.daily_limit,
+            daily_limit: r.daily_limit,
+            maxInstances: r.max_instances,
+            max_instances: r.max_instances,
+            price: parseFloat(r.price || 0),
+            description: r.description,
+            icon: r.icon,
+            allowedProviders: r.allowed_providers || 'baileys',
+            allowed_providers: r.allowed_providers || 'baileys',
+            metaSetupFee: parseFloat(r.meta_setup_fee || 0),
+            meta_setup_fee: parseFloat(r.meta_setup_fee || 0)
+        }));
+        res.json(plans);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1642,11 +2080,13 @@ app.post('/api/plans', authenticate, async (req, res) => {
     const { id, name, price, description, icon } = req.body;
     const daily_limit = req.body.dailyLimit || req.body.daily_limit || 0;
     const max_instances = req.body.maxInstances || req.body.max_instances || 1;
+    const allowed_providers = req.body.allowedProviders || req.body.allowed_providers || 'baileys';
+    const meta_setup_fee = req.body.metaSetupFee !== undefined ? req.body.metaSetupFee : (req.body.meta_setup_fee !== undefined ? req.body.meta_setup_fee : 0);
     
     try {
         await pool.query(
-            'INSERT INTO plans (id, name, daily_limit, max_instances, price, description, icon) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-            [id, name, price, daily_limit, max_instances, description, icon]
+            'INSERT INTO plans (id, name, daily_limit, max_instances, price, description, icon, allowed_providers, meta_setup_fee) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            [id, name, daily_limit, max_instances, price, description, icon, allowed_providers, meta_setup_fee]
         );
         res.status(201).json({ success: true });
     } catch (err) {
@@ -1661,11 +2101,13 @@ app.patch('/api/plans/:id', authenticate, async (req, res) => {
     const { name, price, description, icon } = req.body;
     const daily_limit = req.body.dailyLimit !== undefined ? req.body.dailyLimit : (req.body.daily_limit !== undefined ? req.body.daily_limit : 0);
     const max_instances = req.body.maxInstances !== undefined ? req.body.maxInstances : (req.body.max_instances !== undefined ? req.body.max_instances : 1);
+    const allowed_providers = req.body.allowedProviders || req.body.allowed_providers || 'baileys';
+    const meta_setup_fee = req.body.metaSetupFee !== undefined ? req.body.metaSetupFee : (req.body.meta_setup_fee !== undefined ? req.body.meta_setup_fee : 0);
     
     try {
         await pool.query(
-            'UPDATE plans SET name = $1, price = $2, daily_limit = $3, max_instances = $4, description = $5, icon = $6 WHERE id = $7',
-            [name, price, daily_limit, max_instances, description, icon, req.params.id]
+            'UPDATE plans SET name = $1, price = $2, daily_limit = $3, max_instances = $4, description = $5, icon = $6, allowed_providers = $7, meta_setup_fee = $8 WHERE id = $9',
+            [name, price, daily_limit, max_instances, description, icon, allowed_providers, meta_setup_fee, req.params.id]
         );
         res.json({ success: true });
     } catch (err) {
@@ -1683,13 +2125,75 @@ app.delete('/api/plans/:id', authenticate, async (req, res) => {
     }
 });
 
+app.post('/api/subscription/activate', authenticate, async (req, res) => {
+    const { planId, paymentId } = req.body;
+    if (!planId) return res.status(400).json({ error: 'planId is required' });
+
+    try {
+        const planRes = await pool.query('SELECT * FROM plans WHERE id = $1', [planId]);
+        if (planRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Plan not found' });
+        }
+        const plan = planRes.rows[0];
+
+        const currentSub = await pool.query('SELECT expiry_date FROM subscriptions WHERE user_id = $1', [req.user.id]);
+        let baseDate = new Date();
+        if (currentSub.rows.length > 0 && currentSub.rows[0].expiry_date) {
+            const existingExp = new Date(currentSub.rows[0].expiry_date);
+            if (existingExp > baseDate) {
+                baseDate = existingExp;
+            }
+        }
+        const newExpiry = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        const existingSub = await pool.query('SELECT user_id FROM subscriptions WHERE user_id = $1', [req.user.id]);
+        if (existingSub.rows.length > 0) {
+            await pool.query(
+                'UPDATE subscriptions SET plan_id = $1, status = $2, expiry_date = $3, custom_max_instances = NULL, custom_daily_limit = NULL WHERE user_id = $4',
+                [planId, 'active', newExpiry, req.user.id]
+            );
+        } else {
+            await pool.query(
+                'INSERT INTO subscriptions (user_id, plan_id, status, expiry_date, custom_max_instances, custom_daily_limit) VALUES ($1, $2, $3, $4, NULL, NULL)',
+                [req.user.id, planId, 'active', newExpiry]
+            );
+        }
+
+        console.log(`[Subscription] User ${req.user.username} (${req.user.id}) activated plan ${planId} (${plan.name})`);
+
+        res.json({
+            success: true,
+            planId,
+            expiryDate: newExpiry,
+            planName: plan.name,
+            allowedProviders: plan.allowed_providers,
+            maxInstances: plan.max_instances,
+            customMaxInstances: null
+        });
+    } catch (err) {
+        console.error('[Subscription Activate Error]', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // --- INSTANCE MANAGEMENT ---
 
 app.get('/api/instances', authenticate, async (req, res) => {
     try {
         const isSuper = req.user.role === 'superadmin';
-        const query = isSuper ? 'SELECT * FROM instances' : 'SELECT * FROM instances WHERE user_id = $1';
-        const params = isSuper ? [] : [req.user.id];
+        let query = 'SELECT * FROM instances WHERE user_id = $1';
+        let params = [req.user.id];
+
+        if (isSuper) {
+            query = 'SELECT * FROM instances';
+            params = [];
+        } else if (req.user.role === 'team_member' && req.user.parent_id) {
+            query = 'SELECT * FROM instances WHERE user_id = $1 OR user_id = $2';
+            params = [req.user.id, req.user.parent_id];
+        } else if (req.user.role === 'reseller' || req.user.role === 'admin') {
+            query = 'SELECT DISTINCT i.* FROM instances i LEFT JOIN users u ON i.user_id = u.id WHERE i.user_id = $1 OR u.parent_id = $1';
+            params = [req.user.id];
+        }
 
         const result = await pool.query(query, params);
         
@@ -1697,12 +2201,18 @@ app.get('/api/instances', authenticate, async (req, res) => {
             const live = instancesMap.get(inst.id);
             return {
                 ...inst,
+                instanceKey: inst.instance_key || inst.id,
+                instance_key: inst.instance_key || inst.id,
+                userId: inst.user_id,
                 status: live ? live.status : inst.status,
                 qrCode: live ? live.qr : inst.qr_code,
                 phoneNumber: live ? (live.phone || inst.phone_number) : inst.phone_number,
                 isVisible: inst.is_visible !== false, // Handle DB field
                 webhookUrl: inst.webhook_url,
-                aiEnabled: inst.ai_enabled
+                aiEnabled: inst.ai_enabled,
+                metaPhoneNumberId: inst.meta_phone_number_id,
+                metaWabaId: inst.meta_waba_id,
+                metaAccessToken: inst.meta_access_token
             };
         });
         res.json(merged);
@@ -1770,7 +2280,7 @@ app.post('/api/create', authenticate, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') {
             const userRes = await pool.query(`
-                SELECT u.id, s.plan_id, s.custom_max_instances, p.max_instances 
+                SELECT u.id, s.plan_id, s.custom_max_instances, p.max_instances, p.allowed_providers 
                 FROM users u 
                 LEFT JOIN subscriptions s ON u.id = s.user_id 
                 LEFT JOIN plans p ON s.plan_id = p.id 
@@ -1786,6 +2296,14 @@ app.post('/api/create', authenticate, async (req, res) => {
                 return res.status(403).json({ error: 'No active plan found. Please subscribe to a plan.' });
             }
             
+            const allowedProviders = userData.allowed_providers || 'baileys';
+            if (instProvider === 'meta' && allowedProviders !== 'meta' && allowedProviders !== 'both') {
+                return res.status(403).json({ error: 'Your current plan does not allow Meta Cloud API instances. Please subscribe to a Meta Cloud API plan.' });
+            }
+            if (instProvider === 'baileys' && allowedProviders !== 'baileys' && allowedProviders !== 'both') {
+                return res.status(403).json({ error: 'Your current plan does not allow Baileys instances. Please subscribe to a Baileys plan.' });
+            }
+
             const maxInstances = userData.custom_max_instances !== null ? userData.custom_max_instances : (userData.max_instances || 0);
             
             if (maxInstances !== 0) {
@@ -1800,15 +2318,17 @@ app.post('/api/create', authenticate, async (req, res) => {
 
         if (instProvider === 'meta') {
             await pool.query(
-                'INSERT INTO instances (id, user_id, name, status, provider, meta_access_token, meta_phone_number_id, meta_waba_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+                'INSERT INTO instances (id, instance_key, user_id, name, status, provider, meta_access_token, meta_phone_number_id, meta_waba_id) VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8)',
                 [id, req.user.id, name, 'open', 'meta', metaAccessToken, metaPhoneNumberId, metaWabaId]
             );
             instancesMap.set(id, { status: 'open', phone: metaPhoneNumberId, provider: 'meta', metaAccessToken, metaPhoneNumberId });
-            res.status(201).json({ id, name, status: 'open', provider: 'meta' });
+            io.emit('instances_updated', { instanceId: id, action: 'create' });
+            res.status(201).json({ id, instanceKey: id, instance_key: id, name, status: 'open', provider: 'meta' });
         } else {
-            await pool.query('INSERT INTO instances (id, user_id, name, status, provider) VALUES ($1, $2, $3, $4, $5)', [id, req.user.id, name, 'connecting', 'baileys']);
+            await pool.query('INSERT INTO instances (id, instance_key, user_id, name, status, provider) VALUES ($1, $1, $2, $3, $4, $5)', [id, req.user.id, name, 'connecting', 'baileys']);
             connectToWhatsApp(id);
-            res.status(201).json({ id, name, status: 'connecting', provider: 'baileys' });
+            io.emit('instances_updated', { instanceId: id, action: 'create' });
+            res.status(201).json({ id, instanceKey: id, instance_key: id, name, status: 'connecting', provider: 'baileys' });
         }
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1818,6 +2338,7 @@ app.post('/api/create', authenticate, async (req, res) => {
 app.patch('/api/instance/:id/rename', authenticate, async (req, res) => {
     try {
         await pool.query('UPDATE instances SET name = $1 WHERE id = $2', [req.body.name, req.params.id]);
+        io.emit('instances_updated', { instanceId: req.params.id, action: 'rename' });
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1832,6 +2353,7 @@ app.patch('/api/instance/:id/visibility', authenticate, async (req, res) => {
         await pool.query('UPDATE instances SET is_visible = $1 WHERE id = $2', [req.body.isVisible, req.params.id]).catch(e => {
             console.warn("Visibility column might not exist yet. Run migrations.");
         });
+        io.emit('instances_updated', { instanceId: req.params.id, action: 'visibility' });
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1848,6 +2370,7 @@ app.patch('/api/instance/:id/ai', authenticate, async (req, res) => {
             }
         }
         await pool.query('UPDATE instances SET ai_enabled = $1 WHERE id = $2', [req.body.aiEnabled, req.params.id]);
+        io.emit('instances_updated', { instanceId: req.params.id, action: 'ai' });
         res.json({ success: true });
     } catch (e) {
         console.error("SYNC ERROR:", e);
@@ -1867,6 +2390,7 @@ app.patch('/api/instance/:id/webhook', authenticate, async (req, res) => {
         await pool.query('UPDATE instances SET webhook_url = $1 WHERE id = $2', [req.body.webhookUrl, req.params.id]).catch(e => {
             console.warn("Webhook column might not exist yet. Run migrations.");
         });
+        io.emit('instances_updated', { instanceId: req.params.id, action: 'webhook' });
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1882,6 +2406,7 @@ app.post('/api/instance/:id/reboot', authenticate, async (req, res) => {
     } else {
         connectToWhatsApp(id);
     }
+    io.emit('instances_updated', { instanceId: id, action: 'reboot' });
     res.json({ success: true });
 });
 
@@ -1891,6 +2416,7 @@ app.delete('/api/instance/:id', authenticate, async (req, res) => {
     if (instance?.sock) await instance.sock.logout().catch(() => {});
     instancesMap.delete(id);
     await pool.query('DELETE FROM instances WHERE id = $1', [id]);
+    io.emit('instances_updated', { instanceId: id, action: 'delete' });
     res.json({ success: true });
 });
 
@@ -1906,58 +2432,195 @@ app.post('/api/check-number', authenticate, async (req, res) => {
     }
 });
 
-app.post('/api/send', authenticate, async (req, res) => {
-    const { instanceId, number, message, mediaUrl, mediaType, buttons, options } = req.body;
-    if (!outboundQueue) return res.status(503).json({ error: 'Messaging queue offline' });
-    
+async function handleSendApiMessage(req, res) {
+    if (!outboundQueue) return res.status(503).json({ success: false, error: 'Messaging queue offline', message: 'Messaging queue offline' });
+
+    const body = req.body || {};
+    const query = req.query || {};
+
+    const rawInstance = body.instanceId || body.instance_id || body.instanceKey || body.instance_key || body.instance || body.id || body.instaId || body.insta_id || query.instanceId || query.instance_id || query.instanceKey || query.instance_key || query.instance || query.id || query.instaId || query.insta_id || req.authInstanceId;
+    const number = body.number || body.to || body.phone || body.recipient || body.receiver || body.mobile || query.number || query.to || query.phone || query.recipient;
+    const message = body.message || body.text || body.body || body.caption || body.msg || query.message || query.text || query.body;
+    const mediaUrl = body.mediaUrl || body.media_url || body.media || body.url;
+    const mediaType = body.mediaType || body.media_type || body.type;
+    const buttons = body.buttons || body.waButtons || body.wa_buttons;
+    const options = body.options || {};
+
+    const templateName = body.templateName || body.template_name || body.template || options.templateName || options.template_name;
+    let templateLanguage = body.templateLanguage || body.template_language || body.language || options.templateLanguage || options.template_language;
+    if (typeof templateLanguage === 'object' && templateLanguage !== null && templateLanguage.code) {
+        templateLanguage = templateLanguage.code;
+    }
+    const templateVariables = body.templateVariables || body.template_variables || body.variables || body.components || body.parameters || options.templateVariables || options.template_variables || options.components || options.parameters;
+
+    if (!rawInstance) {
+        return res.status(400).json({ success: false, error: 'instanceId or instanceKey parameter is required', message: 'API Hub Error: Missing WhatsApp instanceId, instance_key, or insta_id parameter.' });
+    }
+    if (!number) {
+        return res.status(400).json({ success: false, error: 'Recipient phone number (number / to / phone) is required', message: 'API Hub Error: Missing recipient phone number.' });
+    }
+
+    // Look up instance in database by ID, instance_key, Meta phone ID, or Meta WABA ID
+    let instance;
+    try {
+        const instRes = await pool.query(
+            'SELECT * FROM instances WHERE id = $1 OR instance_key = $1 OR meta_phone_number_id = $1 OR meta_waba_id = $1', 
+            [rawInstance]
+        );
+        if (instRes.rows.length === 0) {
+            return res.status(404).json({ success: false, error: `Instance '${rawInstance}' not found.`, message: `Instance '${rawInstance}' not found in database.` });
+        }
+        instance = instRes.rows[0];
+    } catch (err) {
+        return res.status(500).json({ success: false, error: 'Instance database lookup failed: ' + err.message, message: 'Instance database lookup failed: ' + err.message });
+    }
+
+    // Check ownership / permission
+    if (req.user.role !== 'superadmin' && instance.user_id !== req.user.id) {
+        return res.status(403).json({ success: false, error: 'You do not have permission to use this instance.', message: 'You do not have permission to use this instance.' });
+    }
+
     // Check subscription status
     if (req.user.role !== 'superadmin') {
         const sub = req.user.subscription;
         if (!sub || sub.status !== 'active' || (sub.expiry_date && new Date(sub.expiry_date) < new Date())) {
-            return res.status(403).json({ error: 'Subscription expired or inactive. Please renew your plan to send messages.' });
-        }
-
-        // Check daily message limit
-        try {
-            const limitRes = await pool.query(`
-                SELECT s.messages_sent_today, s.custom_daily_limit, p.daily_limit 
-                FROM subscriptions s 
-                LEFT JOIN plans p ON s.plan_id = p.id 
-                WHERE s.user_id = $1
-            `, [req.user.id]);
-            
-            if (limitRes.rows.length > 0) {
-                const limitData = limitRes.rows[0];
-                const maxDaily = limitData.custom_daily_limit !== null ? limitData.custom_daily_limit : (limitData.daily_limit || 0);
-                
-                if (maxDaily !== 0 && limitData.messages_sent_today >= maxDaily) {
-                    return res.status(429).json({ error: `Daily message limit reached. Your plan allows a maximum of ${maxDaily} messages per day.` });
-                }
-            }
-        } catch (err) {
-            console.error('[API Send] Limit Check Error:', err.message);
+            return res.status(403).json({ success: false, error: 'Subscription expired or inactive. Please renew your plan to send messages.', message: 'Subscription expired or inactive. Please renew your plan to send messages.' });
         }
     }
 
-    // Debug Logging
-    console.log(`[API Send] Processing request for ${number} with ${buttons?.length || 0} buttons.`);
-    
+    // If Meta instance, check wallet balance before queueing
+    if (instance.provider === 'meta') {
+        let costType = 'meta_regular_credit_cost';
+        if (templateName) {
+            costType = 'meta_utility_credit_cost';
+            try {
+                const tplRes = await pool.query('SELECT category FROM meta_templates WHERE name = $1 AND instance_id = $2', [templateName, instance.id]);
+                if (tplRes.rows.length > 0) {
+                    const cat = (tplRes.rows[0].category || '').toUpperCase();
+                    if (cat === 'MARKETING') costType = 'meta_marketing_credit_cost';
+                    else if (cat === 'AUTHENTICATION') costType = 'meta_authentication_credit_cost';
+                    else if (cat === 'UTILITY') costType = 'meta_utility_credit_cost';
+                }
+            } catch (e) {}
+        }
+
+        let cost = 1;
+        try {
+            const settingsRes = await pool.query('SELECT value FROM system_settings WHERE key = $1', [costType]);
+            if (settingsRes.rows.length > 0 && settingsRes.rows[0].value) {
+                cost = parseFloat(settingsRes.rows[0].value) || 1;
+            }
+        } catch (e) {}
+
+        const userBalRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [req.user.id]);
+        const walletBalance = userBalRes.rows.length > 0 ? (parseFloat(userBalRes.rows[0].wallet_balance) || 0) : 0;
+
+        if (walletBalance < cost) {
+            const errMsg = `Insufficient wallet balance. Sending this Meta message requires ₹${cost.toFixed(2)}, but current balance is ₹${walletBalance.toFixed(2)}. Please recharge wallet.`;
+            return res.status(402).json({
+                success: false,
+                error: errMsg,
+                message: errMsg
+            });
+        }
+    }
+
+    const mergedOptions = {
+        ...options,
+        templateName,
+        templateLanguage: templateLanguage || 'en',
+        templateVariables,
+        components: body.components || options.components
+    };
+
     try {
-        await outboundQueue.add('send-message', {
+        const job = await outboundQueue.add('send-message', {
             userId: req.user.id,
-            instanceId,
+            instanceId: instance.id,
             number,
             message,
             mediaUrl,
             mediaType,
             waButtons: buttons,
-            options: options || {}
+            options: mergedOptions
         });
-        res.json({ success: true, message: 'Message queued' });
+        res.json({
+            success: true,
+            status: 'queued',
+            message: 'Message queued successfully',
+            messageId: `msg_${Date.now()}`,
+            id: `msg_${Date.now()}`,
+            jobId: job.id,
+            instanceId: instance.id,
+            instance_key: instance.instance_key || instance.id,
+            provider: instance.provider
+        });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message, message: err.message });
     }
+}
+
+app.post('/api/send', authenticate, handleSendApiMessage);
+app.post('/api/send-message', authenticate, handleSendApiMessage);
+app.post('/api/meta/send', authenticate, handleSendApiMessage);
+
+// --- SEO & CRAWLER ROUTES ---
+app.get('/robots.txt', (req, res) => {
+    res.type('text/plain');
+    res.send(`User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /admin/
+
+Sitemap: https://ifastx.in/sitemap.xml
+Sitemap: https://ifastx.in/wa/sitemap.xml
+`);
 });
+
+app.get('/sitemap.xml', (req, res) => {
+    res.type('application/xml');
+    res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://ifastx.in/</loc>
+    <lastmod>2026-08-13</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://ifastx.in/wa/</loc>
+    <lastmod>2026-08-13</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.95</priority>
+  </url>
+  <url>
+    <loc>https://ifastx.in/wa/#features</loc>
+    <lastmod>2026-08-13</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.85</priority>
+  </url>
+  <url>
+    <loc>https://ifastx.in/wa/#pricing</loc>
+    <lastmod>2026-08-13</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.85</priority>
+  </url>
+  <url>
+    <loc>https://ifastx.in/wa/#developers</loc>
+    <lastmod>2026-08-13</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.85</priority>
+  </url>
+  <url>
+    <loc>https://ifastx.in/wa/#faq</loc>
+    <lastmod>2026-08-13</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+</urlset>`);
+});
+app.post('/api/send-template', authenticate, handleSendApiMessage);
+app.post('/v1/messages', authenticate, handleSendApiMessage);
 
 app.post('/api/send-bulk', authenticate, async (req, res) => {
     const { instanceId, numbers, message, mediaUrl, mediaType, buttons, options } = req.body;
@@ -1977,7 +2640,7 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
         // Check daily message limit
         try {
             const limitRes = await pool.query(`
-                SELECT s.messages_sent_today, s.custom_daily_limit, p.daily_limit 
+                SELECT CASE WHEN s.last_reset_date < CURRENT_DATE THEN 0 ELSE s.messages_sent_today END as messages_sent_today, s.custom_daily_limit, p.daily_limit 
                 FROM subscriptions s 
                 LEFT JOIN plans p ON s.plan_id = p.id 
                 WHERE s.user_id = $1
@@ -1987,9 +2650,7 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
                 const limitData = limitRes.rows[0];
                 const maxDaily = limitData.custom_daily_limit !== null ? limitData.custom_daily_limit : (limitData.daily_limit || 0);
                 
-                if (maxDaily !== 0 && (limitData.messages_sent_today + numbers.length) > maxDaily) {
-                    return res.status(429).json({ error: `Daily message limit reached. Your plan allows a maximum of ${maxDaily} messages per day. You are trying to send ${numbers.length} messages, but you only have ${maxDaily - limitData.messages_sent_today} left.` });
-                }
+                /* Limits are now handled by wallet fallback in worker */
             }
         } catch (err) {
             console.error('[API Send Bulk] Limit Check Error:', err.message);
@@ -2074,6 +2735,7 @@ app.post('/api/media', authenticate, async (req, res) => {
     const { id, name, url, type } = req.body;
     try {
         await pool.query('INSERT INTO media_assets (id, user_id, name, url, type) VALUES ($1, $2, $3, $4, $5)', [id, req.user.id, name, url, type]);
+        io.emit('media_updated', { userId: req.user.id });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -2082,7 +2744,11 @@ app.post('/api/media', authenticate, async (req, res) => {
 
 app.get('/api/media', authenticate, async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM media_assets WHERE user_id = $1', [req.user.id]);
+        const query = req.user.role === 'superadmin' 
+            ? 'SELECT * FROM media_assets ORDER BY created_at DESC' 
+            : 'SELECT * FROM media_assets WHERE user_id = $1 ORDER BY created_at DESC';
+        const params = req.user.role === 'superadmin' ? [] : [req.user.id];
+        const result = await pool.query(query, params);
         // Map database fields to camelCase for the frontend
         const mapped = result.rows.map(row => ({
             id: row.id,
@@ -2090,7 +2756,7 @@ app.get('/api/media', authenticate, async (req, res) => {
             name: row.name,
             url: row.url,
             type: row.type,
-            createdAt: row.created_at
+            createdAt: row.created_at ? new Date(row.created_at).toISOString() : null
         }));
         res.json(mapped);
     } catch (e) {
@@ -2101,6 +2767,7 @@ app.get('/api/media', authenticate, async (req, res) => {
 app.delete('/api/media/:id', authenticate, async (req, res) => {
     try {
         await pool.query('DELETE FROM media_assets WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+        io.emit('media_updated', { userId: req.user.id });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -2113,23 +2780,40 @@ app.get('/api/contacts/groups', authenticate, async (req, res) => {
     try {
         // Fetch groups
         const groupResult = await pool.query('SELECT * FROM contact_groups WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
+        if (groupResult.rows.length === 0) {
+            return res.json([]);
+        }
+
         const groups = groupResult.rows.map(g => ({
             id: g.id,
             name: g.name,
             userId: g.user_id,
-            createdAt: g.created_at ? new Date(g.created_at).toISOString() : null, // Convert to ISO string to fix Invalid Date
+            createdAt: g.created_at ? new Date(g.created_at).toISOString() : null,
             contacts: []
         }));
 
-        for (let i = 0; i < groups.length; i++) {
-            const contactResult = await pool.query('SELECT * FROM contacts WHERE group_id = $1', [groups[i].id]);
-            groups[i].contacts = (contactResult.rows || []).map(c => ({
+        const groupIds = groups.map(g => g.id);
+
+        // Fetch all contacts in a single batch query instead of N+1 sequential loop
+        const contactResult = await pool.query(
+            'SELECT id, group_id, number, original, status_exists FROM contacts WHERE group_id = ANY($1::text[])',
+            [groupIds]
+        );
+
+        const contactsByGroup = {};
+        for (const c of contactResult.rows || []) {
+            if (!contactsByGroup[c.group_id]) contactsByGroup[c.group_id] = [];
+            contactsByGroup[c.group_id].push({
                 id: c.id,
                 number: c.number,
                 original: c.original,
                 isVerified: true,
                 exists: c.status_exists
-            }));
+            });
+        }
+
+        for (const g of groups) {
+            g.contacts = contactsByGroup[g.id] || [];
         }
 
         res.json(groups);
@@ -2181,6 +2865,7 @@ app.post('/api/contacts/groups', authenticate, async (req, res) => {
         }
         
         await client.query('COMMIT');
+        io.emit('contacts_updated', { userId: req.user.id });
         
         // 3. Return full persisted object with correct field mapping
         res.json({ 
@@ -2209,6 +2894,7 @@ app.delete('/api/contacts/groups/:id', authenticate, async (req, res) => {
         if (result.rowCount === 0) {
             return res.status(404).json({ error: 'Group not found or unauthorized' });
         }
+        io.emit('contacts_updated', { userId: req.user.id });
         res.json({ success: true });
     } catch (e) {
         console.error('[DELETE /api/contacts/groups] Error:', e.message);
@@ -2246,9 +2932,10 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         
         const templates = json.data || [];
         for (const t of templates) {
+            const compositeId = `${req.params.instanceId}_${t.id || (t.name + '_' + t.language)}`;
             await pool.query(
-                'INSERT INTO meta_templates (id, instance_id, name, language, status, category, components) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (instance_id, name, language) DO UPDATE SET status = EXCLUDED.status, components = EXCLUDED.components',
-                [t.id, req.params.instanceId, t.name, t.language, t.status, t.category, JSON.stringify(t.components)]
+                'INSERT INTO meta_templates (id, instance_id, name, language, status, category, components) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (instance_id, name, language) DO UPDATE SET status = EXCLUDED.status, category = EXCLUDED.category, components = EXCLUDED.components',
+                [compositeId, req.params.instanceId, t.name, t.language, t.status, t.category, JSON.stringify(t.components)]
             );
         }
         
@@ -2258,6 +2945,176 @@ app.get('/api/meta/templates/sync/:instanceId', authenticate, async (req, res) =
         res.status(500).json({ error: e.message });
     }
 });
+
+async function getMetaMediaObjectServer(linkUrl, instance, mType = 'image') {
+    const DEFAULT_IMAGE = 'https://dummyimage.com/600x400/25d366/ffffff.png';
+    const DEFAULT_DOC = 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf';
+    const DEFAULT_VIDEO = 'https://www.w3schools.com/html/mov_bbb.mp4';
+
+    const getFallback = (t) => {
+        const clean = (t || 'image').toLowerCase();
+        if (clean === 'document' || clean === 'pdf') return DEFAULT_DOC;
+        if (clean === 'video') return DEFAULT_VIDEO;
+        return DEFAULT_IMAGE;
+    };
+
+    if (!linkUrl || linkUrl.includes('ifastx.in/sample.jpg')) return { link: getFallback(mType) };
+
+    if (typeof linkUrl === 'object' && linkUrl !== null) {
+        if (linkUrl.id) return { id: linkUrl.id };
+        if (linkUrl.link) linkUrl = linkUrl.link;
+    }
+
+    if (typeof linkUrl !== 'string') return { link: getFallback(mType) };
+
+    try {
+        let buffer = null;
+        let mimeType = 'image/jpeg';
+
+        if (linkUrl.startsWith('data:')) {
+            const mimeMatch = linkUrl.match(/^data:(.*?);base64,/);
+            if (mimeMatch) mimeType = mimeMatch[1];
+            const base64Data = linkUrl.split(',')[1];
+            buffer = Buffer.from(base64Data, 'base64');
+        } else if (linkUrl.startsWith('http')) {
+            const headers = {};
+            const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
+            if (linkUrl.includes('fbsbx.com') || linkUrl.includes('fbcdn.net') || linkUrl.includes('facebook.com') || linkUrl.includes('graph.facebook.com')) {
+                if (token) {
+                    headers['Authorization'] = `Bearer ${token}`;
+                }
+            }
+            console.log(`[Server Meta Media] Fetching source media: ${linkUrl.substring(0, 90)}...`);
+            const fetchRes = await fetch(linkUrl, { headers });
+            if (!fetchRes.ok) {
+                console.error(`[Server Meta Media] Fetch failed with HTTP status ${fetchRes.status}`);
+                throw new Error(`Media download status ${fetchRes.status}`);
+            }
+            mimeType = fetchRes.headers.get('content-type') || mimeType;
+            const arrayBuf = await fetchRes.arrayBuffer();
+            buffer = Buffer.from(arrayBuf);
+        }
+
+        const phoneId = instance.metaPhoneNumberId || instance.meta_phone_number_id || instance.phone;
+        const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
+
+        if (buffer && phoneId && token) {
+            const cleanType = (mType || 'image').toLowerCase();
+            if (cleanType === 'image' && !mimeType.startsWith('image/')) mimeType = 'image/jpeg';
+            if (cleanType === 'video' && !mimeType.startsWith('video/')) mimeType = 'video/mp4';
+            if (cleanType === 'document' && !mimeType.includes('pdf')) mimeType = 'application/pdf';
+
+            let ext = mimeType.split('/')[1] || 'jpg';
+            if (ext.includes(';')) ext = ext.split(';')[0];
+
+            const form = new FormData();
+            form.append('messaging_product', 'whatsapp');
+            form.append('type', mimeType);
+            const blob = new Blob([buffer], { type: mimeType });
+            form.append('file', blob, `upload_${Date.now()}.${ext}`);
+
+            console.log(`[Server Meta Media] Uploading media to WhatsApp API for phoneId ${phoneId}...`);
+            const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${phoneId}/media`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
+                body: form
+            });
+            const uploadData = await uploadRes.json();
+            if (uploadRes.ok && uploadData.id) {
+                console.log(`[Server Meta Media] Generated Meta Media ID: ${uploadData.id}`);
+                return { id: uploadData.id };
+            } else {
+                console.error(`[Server Meta Media] WhatsApp Media API upload error:`, uploadData);
+            }
+        }
+    } catch (err) {
+        console.error(`[Server Meta Media] Error during media upload:`, err.message);
+    }
+
+    return { link: linkUrl };
+}
+
+async function processMetaTemplateComponents(components, accessToken, appId) {
+    if (!Array.isArray(components)) return components;
+    
+    for (let comp of components) {
+        if (comp && comp.type === 'HEADER' && comp.format && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(comp.format)) {
+            if (comp.example && (comp.example.header_handle || comp.example.header_url)) {
+                const urlArr = comp.example.header_handle || comp.example.header_url;
+                if (urlArr && urlArr.length > 0) {
+                    const sampleUrl = urlArr[0];
+                    if (typeof sampleUrl === 'string' && sampleUrl.startsWith('http')) {
+                        try {
+                            console.log("[Meta Template] Downloading example media from:", sampleUrl);
+                            const mediaRes = await fetch(sampleUrl);
+                            if (!mediaRes.ok) throw new Error(`Media fetch returned status ${mediaRes.status}`);
+                            const mediaBuffer = await mediaRes.arrayBuffer();
+                            const fileLength = mediaBuffer.byteLength;
+                            let mimeType = mediaRes.headers.get('content-type') || 'image/jpeg';
+                            if (comp.format === 'IMAGE' && !mimeType.startsWith('image/')) mimeType = 'image/jpeg';
+                            if (comp.format === 'VIDEO' && !mimeType.startsWith('video/')) mimeType = 'video/mp4';
+                            if (comp.format === 'DOCUMENT' && !mimeType.includes('pdf')) mimeType = 'application/pdf';
+                            
+                            let targetApp = appId;
+                            if (!targetApp) {
+                                try {
+                                    const appRes = await fetch(`https://graph.facebook.com/v26.0/app`, {
+                                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                                    });
+                                    const appData = await appRes.json();
+                                    targetApp = appData.id;
+                                } catch (err) {}
+                            }
+                            
+                            const sessionEndpoint = targetApp ? 
+                                `https://graph.facebook.com/v26.0/${targetApp}/uploads?file_length=${fileLength}&file_type=${encodeURIComponent(mimeType)}` :
+                                `https://graph.facebook.com/v26.0/app/uploads?file_length=${fileLength}&file_type=${encodeURIComponent(mimeType)}`;
+
+                            console.log("[Meta Template] Starting upload session:", sessionEndpoint);
+                            const sessionRes = await fetch(sessionEndpoint, {
+                                method: 'POST',
+                                headers: { 'Authorization': `Bearer ${accessToken}` }
+                            });
+                            const sessionData = await sessionRes.json();
+                            
+                            if (sessionData.id) {
+                                const sessionId = sessionData.id;
+                                console.log("[Meta Template] Session ID created:", sessionId);
+                                const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${sessionId}`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Authorization': `OAuth ${accessToken}`,
+                                        'file_offset': '0'
+                                    },
+                                    body: Buffer.from(mediaBuffer)
+                                });
+                                const uploadData = await uploadRes.json();
+                                console.log("[Meta Template] Upload handle result:", uploadData);
+                                if (uploadData.h) {
+                                    comp.example = { header_handle: [uploadData.h] };
+                                } else {
+                                    delete comp.example.header_url;
+                                    console.error("[Meta Template] Failed to get handle from session:", uploadData);
+                                }
+                            } else {
+                                delete comp.example.header_url;
+                                console.error("[Meta Template] Failed to create upload session:", sessionData);
+                            }
+                        } catch (e) {
+                            delete comp.example.header_url;
+                            console.error("[Meta Template] Error processing example media:", e.message);
+                        }
+                    } else if (Array.isArray(comp.example.header_handle)) {
+                        comp.example = { header_handle: comp.example.header_handle };
+                    }
+                }
+            }
+        }
+    }
+    return components;
+}
 
 app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res) => {
     try {
@@ -2270,71 +3127,14 @@ app.post('/api/meta/templates/create/:instanceId', authenticate, async (req, res
             return res.status(400).json({ error: 'Not a valid Meta instance with WABA ID' });
         }
         
-        // Intercept components to handle media uploads for examples
-        for (let comp of components) {
-            if (comp.type === 'HEADER' && comp.format && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(comp.format)) {
-                if (comp.example && (comp.example.header_handle || comp.example.header_url)) {
-                    const urlArr = comp.example.header_handle || comp.example.header_url;
-                    if (urlArr && urlArr.length > 0) {
-                        const sampleUrl = urlArr[0];
-                        if (sampleUrl && sampleUrl.startsWith('http')) {
-                            try {
-                                console.log("[Meta Template] Downloading example media from:", sampleUrl);
-                                const debugRes = await fetch(`https://graph.facebook.com/v26.0/debug_token?input_token=${inst.meta_access_token}&access_token=${inst.meta_access_token}`);
-                                const debugData = await debugRes.json();
-                                const appId = debugData.data?.app_id;
-                                
-                                if (appId) {
-                                    const mediaRes = await fetch(sampleUrl);
-                                    const mediaBuffer = await mediaRes.arrayBuffer();
-                                    const fileLength = mediaBuffer.byteLength;
-                                    const mimeType = mediaRes.headers.get('content-type') || 'image/jpeg';
-                                    
-                                    console.log("[Meta Template] Starting upload session for App ID:", appId);
-                                    const sessionRes = await fetch(`https://graph.facebook.com/v26.0/${appId}/uploads?file_length=${fileLength}&file_type=${mimeType}`, {
-                                        method: 'POST',
-                                        headers: { 'Authorization': `Bearer ${inst.meta_access_token}` }
-                                    });
-                                    const sessionData = await sessionRes.json();
-                                    const sessionId = sessionData.id;
-                                    
-                                    if (sessionId) {
-                                        console.log("[Meta Template] Uploading data to session:", sessionId);
-                                        const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${sessionId}`, {
-                                            method: 'POST',
-                                            headers: {
-                                                'Authorization': `Bearer ${inst.meta_access_token}`,
-                                                'file_offset': '0'
-                                            },
-                                            body: Buffer.from(mediaBuffer)
-                                        });
-                                        const uploadData = await uploadRes.json();
-                                        if (uploadData.h) {
-                                            console.log("[Meta Template] Got upload handle:", uploadData.h);
-                                            comp.example.header_handle = [uploadData.h];
-                                            delete comp.example.header_url;
-                                        }
-                                    } else {
-                                        console.error("[Meta Template] Failed to get session ID:", sessionData);
-                                    }
-                                } else {
-                                    console.error("[Meta Template] Failed to get App ID from token:", debugData);
-                                }
-                            } catch (e) {
-                                console.error("[Meta Template] Error uploading media example:", e.message);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Process components for handles
+        const processedComponents = await processMetaTemplateComponents(components, inst.meta_access_token, inst.meta_app_id);
 
         const payload = {
             name: name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
             language: language || 'en',
             category: category || 'MARKETING',
-            
-            components: components
+            components: processedComponents
         };
 
         const response = await fetch(`https://graph.facebook.com/v26.0/${inst.meta_waba_id}/message_templates`, {
@@ -2483,11 +3283,544 @@ app.post('/api/meta/templates/edit/:instanceId/:templateId', authenticate, async
     }
 });
 
-app.get('/api/meta/templates/:instanceId', authenticate, async (req, res) => {
+async function handleFetchAndGetTemplates(req, res) {
     try {
-        const result = await pool.query('SELECT * FROM meta_templates WHERE instance_id = $1 ORDER BY created_at DESC', [req.params.instanceId]);
-        res.json(result.rows);
+        const body = req.body || {};
+        const query = req.query || {};
+        const params = req.params || {};
+
+        const rawInstance = params.instanceId || params.id || params.instance_key ||
+            query.instanceId || query.instance_id || query.wa_instance_id || query.instanceKey || query.instance_key || query.instaId || query.insta_id || query.instance ||
+            body.instanceId || body.instance_id || body.wa_instance_id || body.instanceKey || body.instance_key || body.instaId || body.insta_id || body.instance ||
+            req.authInstanceId;
+
+        let instance = null;
+
+        if (rawInstance) {
+            const instRes = await pool.query(
+                'SELECT * FROM instances WHERE id = $1 OR instance_key = $1 OR meta_phone_number_id = $1 OR meta_waba_id = $1',
+                [rawInstance]
+            );
+            if (instRes.rows.length > 0) {
+                instance = instRes.rows[0];
+            }
+        }
+
+        if (!instance && req.user) {
+            const userInstRes = await pool.query(
+                "SELECT * FROM instances WHERE user_id = $1 AND provider = 'meta' ORDER BY created_at DESC LIMIT 1",
+                [req.user.id]
+            );
+            if (userInstRes.rows.length > 0) {
+                instance = userInstRes.rows[0];
+            } else {
+                const anyInstRes = await pool.query(
+                    "SELECT * FROM instances WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+                    [req.user.id]
+                );
+                if (anyInstRes.rows.length > 0) {
+                    instance = anyInstRes.rows[0];
+                }
+            }
+        }
+
+        let liveTemplates = [];
+        let fetchedFromMeta = false;
+
+        if (instance && instance.meta_waba_id && instance.meta_access_token) {
+            try {
+                const metaUrl = `https://graph.facebook.com/v26.0/${instance.meta_waba_id}/message_templates?limit=100`;
+                console.log(`[META TEMPLATE FETCH] Fetching templates for WABA ID ${instance.meta_waba_id}...`);
+                const fetchRes = await fetch(metaUrl, {
+                    headers: { 'Authorization': `Bearer ${instance.meta_access_token}` }
+                });
+                const metaJson = await fetchRes.json();
+
+                if (fetchRes.ok && metaJson.data) {
+                    liveTemplates = metaJson.data;
+                    fetchedFromMeta = true;
+
+                    for (const t of liveTemplates) {
+                        const compositeId = `${instance.id}_${t.id || (t.name + '_' + t.language)}`;
+                        await pool.query(
+                            'INSERT INTO meta_templates (id, instance_id, name, language, status, category, components) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (instance_id, name, language) DO UPDATE SET status = EXCLUDED.status, category = EXCLUDED.category, components = EXCLUDED.components',
+                            [compositeId, instance.id, t.name, t.language, t.status, t.category, JSON.stringify(t.components)]
+                        );
+                    }
+                } else {
+                    console.warn(`[META TEMPLATE FETCH WARNING] Meta API response:`, metaJson.error?.message || metaJson);
+                }
+            } catch (metaErr) {
+                console.error(`[META TEMPLATE FETCH ERROR]`, metaErr.message);
+            }
+        }
+
+        let dbTemplates = [];
+        if (instance) {
+            const dbRes = await pool.query('SELECT * FROM meta_templates WHERE instance_id = $1 ORDER BY created_at DESC', [instance.id]);
+            dbTemplates = dbRes.rows;
+        } else if (req.user) {
+            const dbRes = await pool.query(
+                'SELECT t.* FROM meta_templates t JOIN instances i ON t.instance_id = i.id WHERE i.user_id = $1 ORDER BY t.created_at DESC',
+                [req.user.id]
+            );
+            dbTemplates = dbRes.rows;
+        }
+
+        const templateMap = new Map();
+
+        for (const dt of dbTemplates) {
+            let comps = [];
+            try {
+                comps = typeof dt.components === 'string' ? JSON.parse(dt.components) : (dt.components || []);
+            } catch (e) {
+                comps = dt.components || [];
+            }
+            templateMap.set(dt.name, {
+                id: dt.id,
+                name: dt.name,
+                language: dt.language || 'en',
+                status: dt.status || 'APPROVED',
+                category: dt.category || 'UTILITY',
+                components: comps
+            });
+        }
+
+        for (const lt of liveTemplates) {
+            templateMap.set(lt.name, {
+                id: lt.id,
+                name: lt.name,
+                language: lt.language || 'en',
+                status: lt.status || 'APPROVED',
+                category: lt.category || 'UTILITY',
+                components: lt.components || []
+            });
+        }
+
+        const defaultIspTemplates = [
+            {
+                name: "payment_reminder",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Payment Reminder" },
+                    { type: "BODY", text: "Dear {{1}}, your ISP subscription for account {{2}} is due on {{3}}. Amount due: ₹{{4}}. Please recharge to avoid disconnection." },
+                    { type: "FOOTER", text: "Thank you for choosing our service." }
+                ]
+            },
+            {
+                name: "invoice_alert",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Invoice Generated" },
+                    { type: "BODY", text: "Hello {{1}}, invoice #{{2}} of amount ₹{{3}} has been generated for your account {{4}}. Due date: {{5}}." },
+                    { type: "FOOTER", text: "ISP Billing Services" }
+                ]
+            },
+            {
+                name: "recharge_successful",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Recharge Successful" },
+                    { type: "BODY", text: "Dear {{1}}, your account {{2}} has been successfully recharged with plan {{3}} valid until {{4}}. Transaction ID: {{5}}." },
+                    { type: "FOOTER", text: "Enjoy high-speed internet!" }
+                ]
+            },
+            {
+                name: "account_expiry_notice",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Service Expiry Alert" },
+                    { type: "BODY", text: "Hi {{1}}, your internet plan for ID {{2}} expires today. Renew now to stay connected: {{3}}." },
+                    { type: "FOOTER", text: "Customer Care" }
+                ]
+            },
+            {
+                name: "ticket_created",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Support Ticket Registered" },
+                    { type: "BODY", text: "Dear {{1}}, support ticket #{{2}} regarding '{{3}}' has been registered. Our technician will resolve it shortly." },
+                    { type: "FOOTER", text: "Helpdesk Support" }
+                ]
+            },
+            {
+                name: "customer_order_placed",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Order Placed" },
+                    { type: "BODY", text: "Hi {{1}}, your order #{{2}} has been successfully placed! We will notify you once it has been dispatched." },
+                    { type: "FOOTER", text: "iFastX Order Services" }
+                ]
+            },
+            {
+                name: "customer_shipment_dispatched",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Shipment Dispatched" },
+                    { type: "BODY", text: "Hi {{1}}, your shipment for order #{{2}} has been dispatched via {{3}}. Tracking Number: {{4}}." },
+                    { type: "FOOTER", text: "iFastX Delivery Updates" }
+                ]
+            },
+            {
+                name: "customer_delivery_update",
+                language: "en",
+                status: "APPROVED",
+                category: "UTILITY",
+                components: [
+                    { type: "HEADER", format: "TEXT", text: "Delivery Update" },
+                    { type: "BODY", text: "Hello {{1}}, your package for order #{{2}} is out for delivery today. Please ensure someone is available at the delivery address." },
+                    { type: "FOOTER", text: "iFastX Logistics" }
+                ]
+            }
+        ];
+
+        for (const defaultTpl of defaultIspTemplates) {
+            if (!templateMap.has(defaultTpl.name)) {
+                templateMap.set(defaultTpl.name, {
+                    id: `tpl_isp_${defaultTpl.name}`,
+                    ...defaultTpl
+                });
+            }
+        }
+
+        const formattedTemplates = Array.from(templateMap.values()).map(tpl => {
+            let bodyText = "";
+            let vars = [];
+            if (Array.isArray(tpl.components)) {
+                const bodyComp = tpl.components.find(c => c.type === 'BODY');
+                if (bodyComp && bodyComp.text) {
+                    bodyText = bodyComp.text;
+                    const matches = bodyText.match(/\{\{\d+\}\}/g);
+                    if (matches) {
+                        vars = Array.from(new Set(matches));
+                    }
+                }
+            }
+            return {
+                ...tpl,
+                body: bodyText,
+                variables: vars,
+                vars: vars
+            };
+        });
+
+        if ((req.path.includes('/api/meta/templates') || req.query.format === 'array') && req.query.format !== 'object') {
+            return res.json(formattedTemplates);
+        }
+
+        return res.json({
+            success: true,
+            status: "success",
+            count: formattedTemplates.length,
+            total: formattedTemplates.length,
+            data: formattedTemplates,
+            templates: formattedTemplates,
+            instanceId: instance ? instance.id : null,
+            instance_key: instance ? (instance.instance_key || instance.id) : null,
+            wa_instance_id: instance ? (instance.instance_key || instance.id) : null,
+            fetchedFromMeta
+        });
+    } catch (err) {
+        console.error("GET TEMPLATES ERROR:", err);
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+            message: 'Failed to fetch Meta templates: ' + err.message
+        });
+    }
+}
+
+app.get('/api/templates', authenticate, handleFetchAndGetTemplates);
+app.post('/api/templates', authenticate, handleFetchAndGetTemplates);
+app.get('/api/templates/:instanceId', authenticate, handleFetchAndGetTemplates);
+app.post('/api/templates/:instanceId', authenticate, handleFetchAndGetTemplates);
+app.get('/api/meta/templates', authenticate, handleFetchAndGetTemplates);
+app.post('/api/meta/templates', authenticate, handleFetchAndGetTemplates);
+app.get('/api/meta/templates/:instanceId', authenticate, handleFetchAndGetTemplates);
+app.get('/api/v1/templates', authenticate, handleFetchAndGetTemplates);
+
+app.get('/api/meta/details/:instanceId', authenticate, async (req, res) => {
+    try {
+        const { instanceId } = req.params;
+        const instRes = await pool.query('SELECT * FROM instances WHERE id = $1', [instanceId]);
+        if (instRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Instance not found' });
+        }
+        const inst = instRes.rows[0];
+
+        // Total messages sent from this instance
+        const countRes = await pool.query(
+            'SELECT COUNT(*) as count FROM chat_messages WHERE instance_id = $1 AND from_me = true', 
+            [instanceId]
+        );
+        const totalSent = parseInt(countRes.rows[0]?.count || 0, 10);
+
+        let metaDetails = {
+            instanceId,
+            name: inst.name,
+            provider: inst.provider,
+            totalSent,
+            qualityRating: 'PENDING',
+            qualityRatingLabel: 'Pending / Rating N/A',
+            messagingLimitTier: 'TIER_2000',
+            messagingLimitLabel: '2,000 Msgs / 24 hrs',
+            verifiedName: inst.name || 'Meta WhatsApp Account',
+            accountStatus: 'PENDING',
+            codeVerificationStatus: 'PENDING',
+            connectionStatus: inst.status || 'open',
+            apiError: null
+        };
+
+        if (inst.provider === 'meta') {
+            if (inst.meta_phone_number_id && inst.meta_access_token) {
+                try {
+                    const token = inst.meta_access_token;
+                    // Use Meta Graph API v20.0
+                    const pnUrl = `https://graph.facebook.com/v20.0/${inst.meta_phone_number_id}?fields=quality_rating,quality_score,messaging_limit_tier,verified_name,code_verification_status,status,display_phone_number,name_status&access_token=${encodeURIComponent(token)}`;
+                    
+                    const pnRes = await fetch(pnUrl);
+                    const pnData = await pnRes.json();
+                    
+                    if (pnData.error) {
+                        console.error('[Meta Phone Number API Error]', pnData.error);
+                        metaDetails.apiError = pnData.error.message || 'Meta API Authorization Error';
+                    } else {
+                        const rawQr = pnData.quality_rating || (pnData.quality_score ? pnData.quality_score.score : null);
+                        if (rawQr) {
+                            const qr = String(rawQr).toUpperCase();
+                            if (qr.includes('GREEN') || qr.includes('HIGH')) {
+                                metaDetails.qualityRating = 'GREEN';
+                                metaDetails.qualityRatingLabel = 'High Quality';
+                            } else if (qr.includes('YELLOW') || qr.includes('MEDIUM')) {
+                                metaDetails.qualityRating = 'YELLOW';
+                                metaDetails.qualityRatingLabel = 'Medium Quality';
+                            } else if (qr.includes('RED') || qr.includes('LOW')) {
+                                metaDetails.qualityRating = 'RED';
+                                metaDetails.qualityRatingLabel = 'Low Quality';
+                            } else if (qr.includes('PENDING') || qr.includes('UNKNOWN') || qr.includes('NA') || qr.includes('NONE')) {
+                                metaDetails.qualityRating = 'PENDING';
+                                metaDetails.qualityRatingLabel = 'Pending / Rating N/A';
+                            } else {
+                                metaDetails.qualityRating = qr;
+                                metaDetails.qualityRatingLabel = qr;
+                            }
+                        }
+
+                        if (pnData.messaging_limit_tier) {
+                            const tier = String(pnData.messaging_limit_tier).toUpperCase();
+                            metaDetails.messagingLimitTier = tier;
+                            if (tier.includes('2K') || tier.includes('2000') || tier.includes('2_K')) {
+                                metaDetails.messagingLimitLabel = '2,000 Msgs / 24 hrs';
+                            } else if (tier.includes('100K') || tier.includes('100_K')) {
+                                metaDetails.messagingLimitLabel = '100,000 Msgs / 24 hrs';
+                            } else if (tier.includes('10K') || tier.includes('10_K')) {
+                                metaDetails.messagingLimitLabel = '10,000 Msgs / 24 hrs';
+                            } else if (tier.includes('1K') || tier.includes('1_K') || tier.includes('1000')) {
+                                metaDetails.messagingLimitLabel = '1,000 Msgs / 24 hrs';
+                            } else if (tier.includes('250')) {
+                                metaDetails.messagingLimitLabel = '250 Msgs / 24 hrs';
+                            } else if (tier.includes('50') && !tier.includes('250')) {
+                                metaDetails.messagingLimitLabel = '50 Msgs / 24 hrs';
+                            } else if (tier.includes('UNLIMITED')) {
+                                metaDetails.messagingLimitLabel = 'Unlimited Msgs / 24 hrs';
+                            } else {
+                                metaDetails.messagingLimitLabel = '2,000 Msgs / 24 hrs';
+                            }
+                        }
+
+                        if (pnData.verified_name) {
+                            metaDetails.verifiedName = pnData.verified_name;
+                        }
+                        if (pnData.code_verification_status) {
+                            metaDetails.codeVerificationStatus = pnData.code_verification_status;
+                        }
+                        if (pnData.status) {
+                            metaDetails.connectionStatus = pnData.status;
+                            const st = String(pnData.status).toUpperCase();
+                            if (st === 'PENDING' || st === 'IN_REVIEW' || st === 'PENDING_REVIEW') {
+                                metaDetails.accountStatus = 'PENDING';
+                            } else if (st === 'CONNECTED' || st === 'APPROVED' || st === 'VERIFIED') {
+                                metaDetails.accountStatus = 'APPROVED';
+                            } else if (st === 'REJECTED' || st === 'RESTRICTED' || st === 'DECLINED') {
+                                metaDetails.accountStatus = 'REJECTED';
+                            }
+                        }
+                        if (pnData.name_status) {
+                            const ns = String(pnData.name_status).toUpperCase();
+                            if (ns === 'DECLINED' || ns === 'REJECTED') {
+                                metaDetails.accountStatus = 'REJECTED';
+                            } else if (ns === 'APPROVED' && metaDetails.accountStatus !== 'REJECTED') {
+                                metaDetails.accountStatus = 'APPROVED';
+                            } else if (ns === 'PENDING_REVIEW' && metaDetails.accountStatus !== 'REJECTED') {
+                                metaDetails.accountStatus = 'PENDING';
+                            }
+                        }
+                    }
+
+                    if (inst.meta_waba_id) {
+                        const wabaUrl = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}?fields=account_review_status,status,name&access_token=${encodeURIComponent(token)}`;
+                        const wabaRes = await fetch(wabaUrl);
+                        const wabaData = await wabaRes.json();
+                        const rawReview = wabaData?.account_review_status || wabaData?.status;
+                        if (!wabaData.error && rawReview) {
+                            const st = String(rawReview).toUpperCase();
+                            if (st.includes('APPROVED') || st.includes('VERIFIED') || st.includes('ENABLED') || st.includes('ACTIVE')) {
+                                if (metaDetails.accountStatus !== 'REJECTED') metaDetails.accountStatus = 'APPROVED';
+                            } else if (st.includes('PENDING') || st.includes('REVIEW')) {
+                                if (metaDetails.accountStatus !== 'REJECTED') metaDetails.accountStatus = 'PENDING';
+                            } else if (st.includes('REJECTED') || st.includes('DISABLED') || st.includes('DECLINED')) {
+                                metaDetails.accountStatus = 'REJECTED';
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error('[Meta Details Fetch Exception]', err.message);
+                    metaDetails.apiError = err.message;
+                }
+            } else {
+                metaDetails.apiError = 'Missing Access Token or Phone Number ID';
+            }
+        }
+
+        res.json({ success: true, details: metaDetails });
     } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- SUPERADMIN META BILLING & INSIGHTS API ---
+app.get('/api/superadmin/meta-insights', authenticate, async (req, res) => {
+    if (req.user.role !== 'superadmin') {
+        return res.status(403).json({ error: 'Access denied. Superadmin only.' });
+    }
+
+    try {
+        const metaInstancesRes = await pool.query("SELECT * FROM instances WHERE provider = 'meta'");
+        const metaInstances = metaInstancesRes.rows;
+
+        // Fetch wallet transaction totals
+        const walletStatsRes = await pool.query(`
+            SELECT 
+                COALESCE(SUM(amount), 0) as total_charged,
+                COUNT(*) as total_transactions
+            FROM wallet_transactions 
+            WHERE type = 'debit'
+        `);
+
+        // Fetch category message breakdown from message_logs
+        const logStatsRes = await pool.query(`
+            SELECT 
+                COUNT(*) FILTER (WHERE ml.status != 'failed') as total_sent,
+                COUNT(*) FILTER (WHERE ml.status = 'failed') as total_failed
+            FROM message_logs ml
+            JOIN instances i ON ml.instance_id = i.id
+            WHERE i.provider = 'meta'
+        `);
+
+        // Fetch rate settings
+        const settingsRes = await pool.query("SELECT key, value FROM system_settings WHERE key LIKE 'meta_%'");
+        const rates = {};
+        settingsRes.rows.forEach(r => rates[r.key] = parseFloat(r.value) || 0);
+
+        const instanceBreakdown = [];
+
+        for (const inst of metaInstances) {
+            let metaGraphAnalytics = null;
+            let metaError = null;
+
+            if (inst.meta_waba_id && inst.meta_access_token) {
+                try {
+                    const endTs = Math.floor(Date.now() / 1000);
+                    const startTs = endTs - (30 * 24 * 60 * 60); // past 30 days
+                    const graphUrl = `https://graph.facebook.com/v20.0/${inst.meta_waba_id}/conversation_analytics?granularity=DAILY&start=${startTs}&end=${endTs}&dimensions=CONVERSATION_CATEGORY,CONVERSATION_TYPE&access_token=${encodeURIComponent(inst.meta_access_token)}`;
+                    const gRes = await fetch(graphUrl);
+                    const gJson = await gRes.json();
+
+                    if (gJson && !gJson.error && gJson.data) {
+                        metaGraphAnalytics = gJson.data;
+                    } else if (gJson.error) {
+                        metaError = gJson.error.message;
+                    }
+                } catch (e) {
+                    metaError = e.message;
+                }
+            }
+
+            // DB usage for this instance
+            const instLogRes = await pool.query(`
+                SELECT 
+                    COUNT(*) FILTER (WHERE status != 'failed') as sent,
+                    COUNT(*) FILTER (WHERE status = 'failed') as failed
+                FROM message_logs WHERE instance_id = $1
+            `, [inst.id]);
+
+            const instWalletRes = await pool.query(`
+                SELECT COALESCE(SUM(amount), 0) as wallet_debit
+                FROM wallet_transactions 
+                WHERE user_id = $1 AND type = 'debit'
+            `, [inst.user_id]);
+
+            const sentCount = parseInt(instLogRes.rows[0]?.sent || 0, 10);
+            const revenue = parseFloat(instWalletRes.rows[0]?.wallet_debit || 0);
+            // Estimated wholesale cost (~ ₹0.50 avg Meta charge)
+            const wholesaleCost = sentCount * 0.50;
+
+            instanceBreakdown.push({
+                id: inst.id,
+                name: inst.name,
+                wabaId: inst.meta_waba_id || 'N/A',
+                phoneNumberId: inst.meta_phone_number_id || 'N/A',
+                userId: inst.user_id,
+                totalSent: sentCount,
+                totalFailed: parseInt(instLogRes.rows[0]?.failed || 0, 10),
+                platformRevenueCollected: revenue,
+                estimatedMetaCost: wholesaleCost,
+                estimatedMargin: revenue - wholesaleCost,
+                metaGraphAnalytics,
+                metaError
+            });
+        }
+
+        const totalPlatformRevenue = parseFloat(walletStatsRes.rows[0]?.total_charged || 0);
+        const totalSent = parseInt(logStatsRes.rows[0]?.total_sent || 0, 10);
+        const totalFailed = parseInt(logStatsRes.rows[0]?.total_failed || 0, 10);
+
+        const estimatedMetaCost = totalSent * 0.50;
+        const estimatedMargin = totalPlatformRevenue - estimatedMetaCost;
+
+        res.json({
+            summary: {
+                totalMetaInstances: metaInstances.length,
+                totalMessagesSent: totalSent,
+                totalMessagesFailed: totalFailed,
+                totalPlatformRevenueCollected: totalPlatformRevenue,
+                estimatedMetaWholesaleCost: Math.round(estimatedMetaCost * 100) / 100,
+                estimatedPlatformGrossProfit: Math.round(estimatedMargin * 100) / 100,
+                platformRates: {
+                    marketing: rates.meta_marketing_credit_cost || 1.0,
+                    utility: rates.meta_utility_credit_cost || 0.5,
+                    authentication: rates.meta_authentication_credit_cost || 0.25,
+                    regular: rates.meta_regular_credit_cost || 0.5
+                }
+            },
+            instances: instanceBreakdown
+        });
+    } catch (e) {
+        console.error('[Superadmin Meta Insights Error]', e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -2505,10 +3838,12 @@ app.put('/api/automations/:id', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
         const { name, parent_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type, options } = req.body;
-        await pool.query(
-            'UPDATE automations SET name=$1, parent_id=$2, keyword=$3, match_type=$4, reply_type=$5, text_content=$6, media_url=$7, template_name=$8, template_language=$9, action_type=$10, options=$11 WHERE id=$12',
+        const updRes = await pool.query(
+            'UPDATE automations SET name=$1, parent_id=$2, keyword=$3, match_type=$4, reply_type=$5, text_content=$6, media_url=$7, template_name=$8, template_language=$9, action_type=$10, options=$11 WHERE id=$12 RETURNING instance_id',
             [name || '', parent_id || null, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type || 'message', options ? JSON.stringify(options) : '[]', id]
         );
+        const instId = updRes.rows[0]?.instance_id;
+        io.emit('automations_updated', { instanceId: instId });
         res.sendStatus(200);
     } catch (e) {
         console.error(e);
@@ -2522,6 +3857,7 @@ app.post('/api/automations/:instanceId', authenticate, async (req, res) => {
             'INSERT INTO automations (instance_id, name, parent_id, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type, options) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
             [req.params.instanceId, name || '', parent_id || null, keyword, match_type, reply_type, text_content, media_url, template_name, template_language, action_type || 'message', options ? JSON.stringify(options) : '[]']
         );
+        io.emit('automations_updated', { instanceId: req.params.instanceId });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -2530,6 +3866,9 @@ app.post('/api/automations/:instanceId', authenticate, async (req, res) => {
 
 app.delete('/api/automations/:id', authenticate, async (req, res) => {
     try {
+        const instRes = await pool.query('SELECT instance_id FROM automations WHERE id = $1', [req.params.id]);
+        const instId = instRes.rows[0]?.instance_id;
+
         await pool.query(`
             WITH RECURSIVE nodes_to_delete AS (
                 SELECT id FROM automations WHERE id = $1
@@ -2539,6 +3878,7 @@ app.delete('/api/automations/:id', authenticate, async (req, res) => {
             )
             DELETE FROM automations WHERE id IN (SELECT id FROM nodes_to_delete);
         `, [req.params.id]);
+        io.emit('automations_updated', { instanceId: instId });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -2705,50 +4045,74 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
 app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
     try {
         const { instanceId } = req.params;
-        const result = await pool.query(`
-            SELECT remote_jid, MAX(timestamp) as last_time
-            FROM chat_messages
-            WHERE instance_id = $1
-            GROUP BY remote_jid
-            ORDER BY last_time DESC
-        `, [instanceId]);
-        
-        const sessions = [];
-        for (const row of result.rows) {
-            const lastMsg = await pool.query(`
-                SELECT * FROM chat_messages 
-                WHERE instance_id = $1 AND remote_jid = $2 
-                ORDER BY timestamp DESC LIMIT 1
-            `, [instanceId, row.remote_jid]);
-            
-            const unreadRes = await pool.query(`
-                SELECT COUNT(*) FROM chat_messages 
-                WHERE instance_id = $1 AND remote_jid = $2 AND from_me = false AND status != 'read'
-            `, [instanceId, row.remote_jid]);
-            const unreadCount = parseInt(unreadRes.rows[0].count, 10);
-            
-            const labels = await pool.query(`
-                SELECT l.id, l.name, l.color 
-                FROM chat_labels l
-                JOIN chat_session_labels sl ON l.id = sl.label_id
-                WHERE sl.instance_id = $1 AND sl.remote_jid = $2
-            `, [instanceId, row.remote_jid]);
 
-            sessions.push({
-                unreadCount,
-                remoteJid: row.remote_jid,
-                lastMessage: lastMsg.rows[0] ? {
-                    id: lastMsg.rows[0].id,
-                    instanceId: lastMsg.rows[0].instance_id,
-                    remoteJid: lastMsg.rows[0].remote_jid,
-                    fromMe: lastMsg.rows[0].from_me,
-                    text: lastMsg.rows[0].text,
-                    timestamp: lastMsg.rows[0].timestamp
-                } : null,
-                unreadCount: 0, // Simplified
-                labels: labels.rows
-            });
+        // 1. Fetch latest distinct messages with contact names in a single fast query
+        const sessionsRes = await pool.query(`
+            SELECT DISTINCT ON (m.remote_jid)
+                m.id,
+                m.instance_id,
+                m.remote_jid,
+                m.from_me,
+                m.text,
+                m.media_url,
+                m.media_type,
+                m.status,
+                m.timestamp,
+                COALESCE(cc.group_name, cc.push_name) AS contact_name,
+                cc.push_name
+            FROM chat_messages m
+            LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND cc.jid = m.remote_jid
+            WHERE m.instance_id = $1
+            ORDER BY m.remote_jid, m.timestamp DESC
+        `, [instanceId]);
+
+        if (sessionsRes.rows.length === 0) {
+            return res.json([]);
         }
+
+        // 2. Fetch unread counts in a single group query
+        const unreadRes = await pool.query(`
+            SELECT remote_jid, COUNT(*) as count
+            FROM chat_messages
+            WHERE instance_id = $1 AND from_me = false AND status != 'read'
+            GROUP BY remote_jid
+        `, [instanceId]);
+        const unreadMap = new Map();
+        for (const r of unreadRes.rows) {
+            unreadMap.set(r.remote_jid, parseInt(r.count, 10) || 0);
+        }
+
+        // 3. Fetch labels in a single query
+        const labelsRes = await pool.query(`
+            SELECT sl.remote_jid, l.id, l.name, l.color
+            FROM chat_session_labels sl
+            JOIN chat_labels l ON l.id = sl.label_id
+            WHERE sl.instance_id = $1
+        `, [instanceId]);
+        const labelsMap = new Map();
+        for (const l of labelsRes.rows) {
+            if (!labelsMap.has(l.remote_jid)) labelsMap.set(l.remote_jid, []);
+            labelsMap.get(l.remote_jid).push({ id: l.id, name: l.name, color: l.color });
+        }
+
+        const sessions = sessionsRes.rows.map(row => ({
+            remoteJid: row.remote_jid,
+            contactName: row.contact_name || row.push_name || null,
+            unreadCount: unreadMap.get(row.remote_jid) || 0,
+            lastMessage: {
+                id: row.id,
+                instanceId: row.instance_id,
+                remoteJid: row.remote_jid,
+                fromMe: row.from_me,
+                text: row.text,
+                status: row.status || 'sent',
+                timestamp: row.timestamp
+            },
+            labels: labelsMap.get(row.remote_jid) || []
+        }));
+
+        sessions.sort((a, b) => new Date(b.lastMessage.timestamp).getTime() - new Date(a.lastMessage.timestamp).getTime());
+
         res.json(sessions);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -2762,15 +4126,34 @@ app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
         if (instRes.rows.length === 0) return res.status(404).send('Instance not found');
         const token = instRes.rows[0].meta_access_token;
         
+        if (mediaId.startsWith('http://') || mediaId.startsWith('https://')) {
+            const mediaRes = await fetch(mediaId, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            });
+            res.setHeader('Content-Type', mediaRes.headers.get('content-type') || 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+            const arrayBuf = await mediaRes.arrayBuffer();
+            return res.send(Buffer.from(arrayBuf));
+        }
+
         const metadataRes = await fetch(`https://graph.facebook.com/v26.0/${mediaId}`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         const metadata = await metadataRes.json();
         
-        if (!metadata.url) return res.status(404).send('Media URL not found');
+        if (!metadata.url) {
+            console.error('[Meta Media Metadata Error]', metadata);
+            return res.status(404).send('Media URL not found');
+        }
         
         const mediaRes = await fetch(metadata.url, {
-            headers: { 'Authorization': `Bearer ${token}` }
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
         });
         
         res.setHeader('Content-Type', metadata.mime_type || 'application/octet-stream');
@@ -2787,18 +4170,96 @@ app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
 app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, res) => {
     try {
         const { instanceId, remoteJid } = req.params;
+        const cleanNumber = remoteJid.replace(/\D/g, '');
+        const candidateJids = [remoteJid];
+        if (cleanNumber) {
+            candidateJids.push(cleanNumber, `${cleanNumber}@s.whatsapp.net`, `${cleanNumber}@c.us`);
+        }
+
         const result = await pool.query(`
             SELECT * FROM chat_messages
-            WHERE instance_id = $1 AND remote_jid = $2
+            WHERE instance_id = $1 AND remote_jid = ANY($2)
             ORDER BY timestamp ASC
-            LIMIT 100
-        `, [instanceId, remoteJid]);
+            LIMIT 300
+        `, [instanceId, candidateJids]);
         
+        // Pre-fetch template definitions for this instance to resolve template content
+        const templateContentMap = new Map();
+        try {
+            const tplRes = await pool.query(`
+                SELECT name, components FROM meta_templates WHERE instance_id = $1
+            `, [instanceId]);
+            tplRes.rows.forEach(r => {
+                try {
+                    const comps = typeof r.components === 'string' ? JSON.parse(r.components) : (r.components || []);
+                    const bodyComp = comps.find(c => c.type === 'BODY');
+                    const headerComp = comps.find(c => c.type === 'HEADER');
+                    const footerComp = comps.find(c => c.type === 'FOOTER');
+                    const btnComp = comps.find(c => c.type === 'BUTTONS');
+                    templateContentMap.set(r.name.toLowerCase().trim(), {
+                        name: r.name,
+                        header: headerComp ? (headerComp.text || headerComp.format) : null,
+                        body: bodyComp?.text || null,
+                        footer: footerComp?.text || null,
+                        buttons: btnComp?.buttons || []
+                    });
+                } catch(e) {}
+            });
+        } catch(e) {}
+
+        const fallbackTemplates = {
+            'customer_order_placed': {
+                name: 'customer_order_placed',
+                header: 'Order Placed',
+                body: 'Hi, your order has been successfully placed! We will notify you once it has been dispatched.',
+                footer: 'iFastX Order Services'
+            },
+            'customer_shipment_dispatched': {
+                name: 'customer_shipment_dispatched',
+                header: 'Shipment Dispatched',
+                body: 'Hi, your shipment has been dispatched via courier partner. Track your package for live updates.',
+                footer: 'iFastX Delivery Updates'
+            },
+            'customer_delivery_update': {
+                name: 'customer_delivery_update',
+                header: 'Delivery Update',
+                body: 'Hello, your package is out for delivery today. Please ensure someone is available at the address.',
+                footer: 'iFastX Logistics'
+            },
+            'payment_reminder': {
+                name: 'payment_reminder',
+                header: 'Payment Reminder',
+                body: 'Dear customer, your subscription payment is due. Please recharge to avoid disconnection.',
+                footer: 'ISP Billing Services'
+            }
+        };
+
         const mapped = result.rows.map(row => {
             let mediaUrl = row.media_url;
             if (mediaUrl && !mediaUrl.startsWith('http') && !mediaUrl.startsWith('/')) {
                 mediaUrl = `/api/meta/media/${row.instance_id}/${mediaUrl}`;
             }
+            let mediaType = row.media_type;
+            if (!mediaType && mediaUrl) {
+                if (mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || mediaUrl.includes('image')) {
+                    mediaType = 'image';
+                } else if (mediaUrl.match(/\.(mp4|webm|mov)/i) || mediaUrl.includes('video')) {
+                    mediaType = 'video';
+                }
+            }
+
+            let templateDetails = null;
+            if (row.text) {
+                const tplMatch = row.text.match(/^\[Template:\s*([a-zA-Z0-9_\-]+)\]/i);
+                if (tplMatch) {
+                    const tName = tplMatch[1].toLowerCase().trim();
+                    templateDetails = templateContentMap.get(tName) || fallbackTemplates[tName] || {
+                        name: tplMatch[1],
+                        body: null
+                    };
+                }
+            }
+
             return {
                 id: row.id,
                 instanceId: row.instance_id,
@@ -2806,8 +4267,9 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
                 fromMe: row.from_me,
                 text: row.text,
                 mediaUrl: mediaUrl,
-                mediaType: row.media_type,
-                status: row.status,
+                mediaType: mediaType,
+                templateDetails,
+                status: row.status || 'sent',
                 timestamp: row.timestamp,
                 quotedMsgId: row.quoted_msg_id,
                 quotedMsgJson: row.quoted_msg_json ? JSON.parse(row.quoted_msg_json) : undefined
@@ -2870,40 +4332,8 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             if (media) {
                 const metaType = (type === 'video' || type === 'document') ? type : 'image';
                 msgData.type = metaType;
-                
-                let metaMediaId = null;
-                if (media.startsWith('data:')) {
-                    const mimeMatch = media.match(/^data:(.*?);base64,/);
-                    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
-                    const base64Data = media.split(',')[1];
-                    const buffer = Buffer.from(base64Data, 'base64');
-                    
-                    const form = new FormData();
-                    form.append('messaging_product', 'whatsapp');
-                    const blob = new Blob([buffer], { type: mimeType });
-                    
-                    // Extract extension
-                    let ext = mimeType.split('/')[1] || 'bin';
-                    if (ext.includes(';')) ext = ext.split(';')[0];
-                    form.append('file', blob, 'upload.' + ext);
-                    
-                    const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${instance.metaPhoneNumberId}/media`, {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${instance.metaAccessToken}`
-                        },
-                        body: form
-                    });
-                    
-                    const uploadJson = await uploadRes.json();
-                    if (uploadRes.ok && uploadJson.id) {
-                        metaMediaId = uploadJson.id;
-                    } else {
-                        throw new Error(uploadJson.error?.message || 'Failed to upload media to Meta');
-                    }
-                }
-                
-                msgData[metaType] = metaMediaId ? { id: metaMediaId } : { link: media };
+                const mediaObj = await getMetaMediaObjectServer(media, instance, metaType);
+                msgData[metaType] = mediaObj;
                 if (message) msgData[metaType].caption = message;
                 delete msgData.text;
             }
@@ -2939,7 +4369,10 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             } else {
                 sentMsg = await instance.sock.sendMessage(remoteJid, { text: message, ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {} });
             }
-            msgId = sentMsg.key.id;
+            if (sentMsg && sentMsg.key && sentMsg.message) {
+                saveMessage(sentMsg.key, sentMsg.message);
+            }
+            msgId = sentMsg ? sentMsg.key.id : `msg_${Date.now()}`;
         }
         
         let displayMediaUrl = media;
@@ -3005,24 +4438,41 @@ app.post('/api/team', authenticate, async (req, res) => {
     const { username, email, password, role, permissions } = req.body;
     const id = `user_${Date.now()}`;
     
-    // Only allow creating team members
-    if (role !== 'team_member' && role !== 'admin') {
-         return res.status(400).json({ error: 'Invalid role for team member' });
-    }
+    // Default target role to team_member (or admin if specified)
+    const targetRole = (role === 'admin') ? 'admin' : 'team_member';
 
     try {
         await pool.query(
             'INSERT INTO users (id, username, email, password, role, parent_id, api_key, permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-            [id, username, email, password, role, req.user.id, `key_${Date.now()}`, permissions]
+            [id, username, email, password, targetRole, req.user.id, `key_${Date.now()}`, permissions]
         );
-        // Also create a default subscription for them (linked to parent plan logic usually, but for now simple)
-        await pool.query(
-            'INSERT INTO subscriptions (user_id, plan_id, status, expiry_date) VALUES ($1, $2, $3, $4)',
-            [id, 'p_team', 'active', '2030-01-01']
-        );
+
+        // Safely determine valid plan_id (parent's plan or first available plan in database)
+        let planId = 'p_basic';
+        try {
+            const parentSub = await pool.query('SELECT plan_id FROM subscriptions WHERE user_id = $1', [req.user.id]);
+            if (parentSub.rows.length > 0 && parentSub.rows[0].plan_id) {
+                planId = parentSub.rows[0].plan_id;
+            } else {
+                const fallbackPlan = await pool.query('SELECT id FROM plans LIMIT 1');
+                if (fallbackPlan.rows.length > 0) planId = fallbackPlan.rows[0].id;
+            }
+
+            // Ensure planId exists in plans table before inserting subscription
+            const validPlan = await pool.query('SELECT id FROM plans WHERE id = $1', [planId]);
+            if (validPlan.rows.length > 0) {
+                await pool.query(
+                    'INSERT INTO subscriptions (user_id, plan_id, status, expiry_date) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO NOTHING',
+                    [id, planId, 'active', '2030-01-01']
+                );
+            }
+        } catch (subErr) {
+            console.warn('[Backend] Team member subscription insertion notice:', subErr.message);
+        }
 
         res.json({ success: true, id });
     } catch (e) {
+        console.error('[Backend] Create team member failed:', e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -3062,6 +4512,31 @@ app.delete('/api/team/:id', authenticate, async (req, res) => {
 async function startup() {
     try {
         await pool.query(`
+            CREATE TABLE IF NOT EXISTS plans (
+                id VARCHAR(50) PRIMARY KEY,
+                name VARCHAR(50),
+                daily_limit INT DEFAULT 0,
+                max_instances INT DEFAULT 1,
+                price DECIMAL(10,2) DEFAULT 0.00,
+                description TEXT,
+                icon VARCHAR(50),
+                allowed_providers VARCHAR(20) DEFAULT 'baileys',
+                meta_setup_fee DECIMAL(10,2) DEFAULT 0.00
+            );
+            ALTER TABLE plans ADD COLUMN IF NOT EXISTS allowed_providers VARCHAR(20) DEFAULT 'baileys';
+            ALTER TABLE plans ADD COLUMN IF NOT EXISTS meta_setup_fee DECIMAL(10,2) DEFAULT 0.00;
+            UPDATE plans SET allowed_providers = 'baileys' WHERE allowed_providers IS NULL;
+
+            INSERT INTO plans (id, name, daily_limit, max_instances, price, description, icon, allowed_providers, meta_setup_fee) 
+            VALUES 
+            ('p_basic', 'Basic (Baileys)', 500, 2, 1499.00, 'Ideal for small businesses using WhatsApp Web.', 'Package', 'baileys', 0.00),
+            ('p_pro', 'Pro (Baileys)', 5000, 10, 4999.00, 'Advanced tools for scaling communication and bulk engagement.', 'Rocket', 'baileys', 0.00),
+            ('p_enterprise', 'Enterprise (Hybrid)', 0, 100, 24999.00, 'Unlimited possibilities for both Baileys and Meta Cloud API.', 'Crown', 'both', 2999.00),
+            ('p_meta_starter', 'Meta Cloud Starter', 10000, 5, 2999.00, 'Official Meta Cloud API plan. One-time setup + recurring platform charge. Template msgs billed from Wallet.', 'Globe', 'meta', 1999.00)
+            ON CONFLICT (id) DO NOTHING;
+
+            DELETE FROM plans WHERE id = 'p_team';
+
             CREATE TABLE IF NOT EXISTS chat_labels (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -3090,7 +4565,13 @@ async function startup() {
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS quoted_msg_json TEXT;
             ALTER TABLE instances ADD COLUMN IF NOT EXISTS qr_code TEXT;
             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_max_instances INT;
+            ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_reset_date DATE DEFAULT CURRENT_DATE;
+            ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS messages_sent_today INT DEFAULT 0;
+            ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS messages_sent_this_month INT DEFAULT 0;
+            ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS messages_sent_this_year INT DEFAULT 0;
             ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_daily_limit INT;
+            ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS meta_setup_waived BOOLEAN DEFAULT FALSE;
+            ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS custom_meta_setup_fee INT;
             CREATE TABLE IF NOT EXISTS meta_templates (
                 id VARCHAR(100) PRIMARY KEY,
                 instance_id VARCHAR(50),
@@ -3157,7 +4638,7 @@ async function startup() {
         }
 
 
-        setupWorker(instancesMap);
+        setupWorker(instancesMap, saveMessage, io);
     } catch (e) {
         console.warn("[iFastX] Startup Session Restore Notice:", e.message);
     }

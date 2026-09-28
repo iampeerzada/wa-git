@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
-import { User, UserRole, Plan } from '../types';
-import { UserPlus, Trash2, Key, Calendar, Shield, Users, Mail, Smartphone, Lock, Package, Clock, Copy, RotateCcw, CheckCircle2, RefreshCw, Edit2, X } from 'lucide-react';
+import { User, UserRole, Plan, Permission } from '../types';
+import { UserPlus, Trash2, Key, Calendar, Shield, Users, Mail, Smartphone, Lock, Package, Clock, Copy, RotateCcw, CheckCircle2, RefreshCw, Edit2, X, Globe } from 'lucide-react';
 
 interface UserManagementProps {
   users: User[];
@@ -21,6 +21,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
   const [isProcessing, setIsProcessing] = useState<string | null>(null);
 
   const [formData, setFormData] = useState({ 
+    fullName: '',
     username: '', 
     email: '', 
     mobile: '', 
@@ -28,9 +29,10 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
     role: UserRole.ADMIN,
     planId: 'p_basic',
     expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-  });
+  , permissions: [] as Permission[] });
 
   const [editFormData, setEditFormData] = useState({
+    fullName: '',
     username: '',
     email: '',
     mobile: '',
@@ -39,7 +41,10 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
     planId: '',
     expiryDate: '',
     customMaxInstances: '',
-    customDailyLimit: ''
+    customDailyLimit: '',
+    metaSetupWaived: false,
+    customMetaSetupFee: '',
+    permissions: [] as Permission[]
   });
 
   const handleCopyKey = (userId: string, key: string) => {
@@ -154,11 +159,13 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
     setIsProcessing('creating');
     const newUserObj = {
       id: `u_${Date.now()}`,
+      fullName: formData.fullName || formData.username,
       username: formData.username,
       email: formData.email,
       mobile: formData.mobile,
       password: formData.password,
       role: formData.role,
+      permissions: formData.permissions,
       parentId: currentUser.id,
       apiKey: `sk_live_${Math.random().toString(36).substring(2, 10)}`,
       subscription: {
@@ -185,13 +192,15 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
         setUsers(prev => [...prev, createdUser]);
         setIsAdding(false);
         setFormData({ 
+          fullName: '',
           username: '', 
           email: '', 
           mobile: '', 
           password: '', 
           role: UserRole.ADMIN, 
           planId: 'p_basic',
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          permissions: []
         });
       } else {
         const err = await res.json();
@@ -230,15 +239,19 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
   const openEditModal = (user: User) => {
     setEditingUser(user);
     setEditFormData({
+      fullName: user.fullName || '',
       username: user.username,
       email: user.email || '',
       mobile: user.mobile || '',
       password: '', // Leave blank unless changing
       role: user.role,
+      permissions: user.permissions || [],
       planId: user.subscription?.planId || '',
       expiryDate: user.subscription?.expiryDate ? new Date(user.subscription.expiryDate).toISOString().split('T')[0] : '',
       customMaxInstances: user.subscription?.customMaxInstances !== undefined && user.subscription?.customMaxInstances !== null ? String(user.subscription.customMaxInstances) : '',
-      customDailyLimit: user.subscription?.customDailyLimit !== undefined && user.subscription?.customDailyLimit !== null ? String(user.subscription.customDailyLimit) : ''
+      customDailyLimit: user.subscription?.customDailyLimit !== undefined && user.subscription?.customDailyLimit !== null ? String(user.subscription.customDailyLimit) : '',
+      metaSetupWaived: Boolean(user.subscription?.metaSetupWaived),
+      customMetaSetupFee: user.subscription?.customMetaSetupFee !== undefined && user.subscription?.customMetaSetupFee !== null ? String(user.subscription.customMetaSetupFee) : ''
     });
   };
 
@@ -247,14 +260,18 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
     setIsProcessing('editing');
 
     const updatePayload: any = {
+      fullName: editFormData.fullName,
       username: editFormData.username,
       email: editFormData.email,
       mobile: editFormData.mobile,
       role: editFormData.role,
+      permissions: editFormData.permissions,
       planId: editFormData.planId,
       expiryDate: editFormData.expiryDate ? new Date(editFormData.expiryDate).toISOString() : null,
       customMaxInstances: editFormData.customMaxInstances === '' ? null : parseInt(editFormData.customMaxInstances),
-      customDailyLimit: editFormData.customDailyLimit === '' ? null : parseInt(editFormData.customDailyLimit)
+      customDailyLimit: editFormData.customDailyLimit === '' ? null : parseInt(editFormData.customDailyLimit),
+      metaSetupWaived: editFormData.metaSetupWaived,
+      customMetaSetupFee: editFormData.customMetaSetupFee === '' ? null : parseInt(editFormData.customMetaSetupFee)
     };
 
     if (editFormData.password) {
@@ -278,6 +295,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
           if (u.id === editingUser.id) {
             return {
               ...u,
+              fullName: updatePayload.fullName,
               username: updatePayload.username,
               email: updatePayload.email,
               mobile: updatePayload.mobile,
@@ -288,7 +306,9 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
                 expiryDate: updatePayload.expiryDate,
                 status: (updatePayload.expiryDate === null || new Date(updatePayload.expiryDate) > new Date()) ? 'active' : u.subscription?.status,
                 customMaxInstances: updatePayload.customMaxInstances,
-                customDailyLimit: updatePayload.customDailyLimit
+                customDailyLimit: updatePayload.customDailyLimit,
+                metaSetupWaived: updatePayload.metaSetupWaived,
+                customMetaSetupFee: updatePayload.customMetaSetupFee
               }
             };
           }
@@ -308,128 +328,170 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
         <div>
-          <h2 className="text-lg md:text-xl font-bold text-white flex items-center gap-3">
-            <Users className="text-[#25D366]" />
-            {currentUser.role === UserRole.RESELLER ? 'My Sub-Admins' : 'Global User Directory'}
+          <h2 className="text-base sm:text-lg md:text-xl font-bold text-white flex items-center gap-2">
+            <Users className="w-5 h-5 text-[#25D366] shrink-0" />
+            <span>{currentUser.role === UserRole.RESELLER ? 'My Sub-Admins' : 'Global User Directory'}</span>
           </h2>
-          <p className="text-xs text-gray-500 mt-1 uppercase tracking-widest font-black">
+          <p className="text-[10px] sm:text-xs text-gray-500 mt-1 uppercase tracking-widest font-black">
             Total Management: {users.length} Account(s)
           </p>
         </div>
         <button 
           onClick={() => setIsAdding(true)}
-          className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-green-500/10"
+          className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all shadow-lg shadow-green-500/10 cursor-pointer shrink-0 w-full sm:w-auto"
         >
-          <UserPlus size={18} />
-          Create New User
+          <UserPlus size={16} />
+          <span>Create New User</span>
         </button>
       </div>
 
       {isAdding && (
-        <div className="bg-[#111b21] rounded-2xl border border-[#25D366]/30 p-8 shadow-2xl animate-in fade-in slide-in-from-top-4 duration-300">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="bg-[#111b21] rounded-2xl border border-[#25D366]/30 p-3.5 sm:p-5 shadow-2xl animate-in fade-in slide-in-from-top-4 duration-300 mb-6">
+          <div className="flex items-center justify-between pb-3 mb-3 border-b border-gray-800">
+            <h3 className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+              <UserPlus size={16} className="text-[#25D366]" />
+              <span>Create New User Account</span>
+            </h3>
+            <button 
+              onClick={() => setIsAdding(false)} 
+              className="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-gray-800 cursor-pointer transition-colors"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-3.5">
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Username</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Full Name</label>
+              <div className="relative">
+                <input 
+                  type="text"
+                  value={formData.fullName}
+                  onChange={(e) => setFormData(p => ({ ...p, fullName: e.target.value }))}
+                  placeholder="e.g. John Doe"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none transition-all"
+                />
+                <UserPlus className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Username</label>
               <div className="relative">
                 <input 
                   type="text"
                   value={formData.username}
                   onChange={(e) => setFormData(p => ({ ...p, username: e.target.value }))}
                   placeholder="e.g. john_doe"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white focus:ring-2 ring-[#25D366]/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none transition-all"
                 />
-                <Smartphone className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Smartphone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Email Address</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Email Address</label>
               <div className="relative">
                 <input 
                   type="email"
                   value={formData.email}
                   onChange={(e) => setFormData(p => ({ ...p, email: e.target.value }))}
                   placeholder="john@example.com"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white focus:ring-2 ring-[#25D366]/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none transition-all"
                 />
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Mail className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Mobile Number</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Mobile Number</label>
               <div className="relative">
                 <input 
                   type="text"
                   value={formData.mobile}
                   onChange={(e) => setFormData(p => ({ ...p, mobile: e.target.value }))}
                   placeholder="e.g. 919876543210"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white focus:ring-2 ring-[#25D366]/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none transition-all"
                 />
-                <Smartphone className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Smartphone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Password</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Password</label>
               <div className="relative">
                 <input 
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData(p => ({ ...p, password: e.target.value }))}
                   placeholder="••••••••"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white focus:ring-2 ring-[#25D366]/20 focus:border-[#25D366] outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none transition-all"
                 />
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Lock className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Assign Role</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Assign Role</label>
               <div className="relative">
                 <select 
                   value={formData.role}
                   onChange={(e) => setFormData(p => ({ ...p, role: e.target.value as UserRole }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white outline-none appearance-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white outline-none cursor-pointer"
                 >
                   {currentUser.role === UserRole.SUPERADMIN && <option value={UserRole.RESELLER}>Reseller</option>}
                   <option value={UserRole.ADMIN}>Admin</option>
+                  <option value={UserRole.TEAM_MEMBER}>Worker / Team Member</option>
                 </select>
-                <Shield className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Shield className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Assign Plan</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Assign Plan</label>
               <div className="relative">
                 <select 
                   value={formData.planId}
                   onChange={(e) => setFormData(p => ({ ...p, planId: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white outline-none appearance-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white outline-none cursor-pointer"
                 >
                   {plans.map(p => (
                     <option key={p.id} value={p.id}>{p.name} (${p.price})</option>
                   ))}
                 </select>
-                <Package className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Package className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Expiry Date</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Expiry Date</label>
               <div className="relative">
                 <input 
                   type="date"
                   value={formData.expiryDate}
                   onChange={(e) => setFormData(p => ({ ...p, expiryDate: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-white focus:ring-2 ring-[#25D366]/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl pl-8 pr-3 py-1.5 sm:py-2 text-xs text-white focus:border-[#25D366] focus:ring-1 focus:ring-[#25D366] outline-none transition-all"
                 />
-                <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <Clock className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
               </div>
             </div>
+          
+            {currentUser.role === UserRole.SUPERADMIN && (
+              <div className="col-span-full pt-1">
+                  <label className="block text-[10px] sm:text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Access Control</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <label className={`flex items-center gap-2.5 p-2 rounded-xl border cursor-pointer transition-all ${formData.permissions.includes(Permission.MANAGE_VISIBILITY) ? 'bg-blue-500/10 border-blue-500/50 text-white' : 'bg-[#202c33] border-gray-700 text-gray-400'}`}>
+                          <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center ${formData.permissions.includes(Permission.MANAGE_VISIBILITY) ? 'bg-blue-500 border-blue-500' : 'border-gray-600'}`}>
+                              {formData.permissions.includes(Permission.MANAGE_VISIBILITY) && <CheckCircle2 size={10} className="text-white" />}
+                          </div>
+                          <input type="checkbox" className="hidden" checked={formData.permissions.includes(Permission.MANAGE_VISIBILITY)} onChange={() => setFormData(p => ({ ...p, permissions: p.permissions.includes(Permission.MANAGE_VISIBILITY) ? p.permissions.filter(perm => perm !== Permission.MANAGE_VISIBILITY) : [...p.permissions, Permission.MANAGE_VISIBILITY] }))} />
+                          <span className="text-xs font-medium">Manage Visibility</span>
+                      </label>
+                  </div>
+              </div>
+            )}
           </div>
-          <div className="flex justify-end gap-3 mt-8">
-            <button onClick={() => setIsAdding(false)} className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
+          <div className="flex justify-end gap-2 mt-4 pt-3 border-t border-gray-800">
+            <button onClick={() => setIsAdding(false)} className="px-3.5 py-1.5 text-gray-400 hover:text-white font-bold text-xs rounded-xl hover:bg-gray-800/60 transition-all cursor-pointer">Cancel</button>
             <button 
               onClick={handleAddUser} 
               disabled={isProcessing === 'creating'}
-              className="bg-[#25D366] text-[#0b141a] px-8 py-2.5 rounded-xl font-black uppercase tracking-widest shadow-lg shadow-green-500/10 transition-all active:scale-95 disabled:opacity-50"
+              className="bg-[#25D366] hover:bg-[#20bd5a] text-[#0b141a] px-4 py-1.5 rounded-xl font-bold text-xs uppercase tracking-wider shadow-md shadow-green-500/10 transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
             >
               {isProcessing === 'creating' ? 'Processing...' : 'Provision Account'}
             </button>
@@ -437,127 +499,126 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+        {users.filter(u => u.id !== currentUser.id).length === 0 && (
+          <div className="col-span-full flex flex-col items-center justify-center p-8 sm:p-12 bg-[#111b21] rounded-2xl border border-gray-800 border-dashed">
+             <Users size={36} className="text-gray-600 mb-3" />
+             <h3 className="text-base font-bold text-white mb-1">No Users Found</h3>
+             <p className="text-xs text-gray-400">There are no other users registered on the platform yet.</p>
+          </div>
+        )}
         {users.filter(u => u.id !== currentUser.id).map(user => {
           const plan = plans.find(p => p.id === user.subscription?.planId);
           return (
-            <div key={user.id} className="bg-[#111b21] border border-gray-800 rounded-2xl p-6 hover:border-gray-700 transition-all flex flex-col group shadow-xl relative overflow-hidden">
+            <div key={user.id} className="bg-[#111b21] border border-gray-800/80 rounded-xl p-3.5 sm:p-4 hover:border-gray-700 transition-all flex flex-col group shadow-lg relative overflow-hidden">
               {isProcessing === user.id && (
-                <div className="absolute inset-0 bg-[#0b141a]/60 backdrop-blur-sm z-20 flex flex-col items-center justify-center space-y-3">
-                   <RefreshCw className="animate-spin text-[#25D366]" size={32} />
-                   <p className="text-xs font-black uppercase tracking-widest text-[#25D366]">Updating Account Credentials...</p>
+                <div className="absolute inset-0 bg-[#0b141a]/80 backdrop-blur-sm z-20 flex flex-col items-center justify-center space-y-2">
+                   <RefreshCw className="animate-spin text-[#25D366]" size={24} />
+                   <p className="text-[10px] font-bold uppercase tracking-wider text-[#25D366]">Updating Account...</p>
                 </div>
               )}
 
-              <div className="flex justify-between items-start mb-4">
-                  <div className="flex items-center gap-3">
-                      <div className={`w-14 h-14 rounded-xl flex items-center justify-center ${
+              <div className="flex justify-between items-start mb-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
                           user.role === UserRole.RESELLER ? 'bg-purple-500/10 text-purple-400' : 'bg-blue-500/10 text-blue-400'
                       }`}>
-                          <Shield size={28} />
+                          <Shield size={18} />
                       </div>
-                      <div>
-                          <h4 className="font-bold text-white group-hover:text-[#25D366] transition-colors text-lg">{user.username}</h4>
-                          <div className="flex flex-wrap items-center gap-3 mt-1">
-                              <span className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
-                                  <Mail size={10} /> {user.email || 'No email'}
-                              </span>
-                              {user.mobile && (
-                                <span className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
-                                    <Smartphone size={10} /> {user.mobile}
-                                </span>
-                              )}
-                          </div>
+                      <div className="min-w-0">
+                          <h4 className="font-bold text-white group-hover:text-[#25D366] transition-colors text-xs sm:text-sm truncate">{user.fullName || user.username}</h4>
+                          <p className="text-[10px] text-[#25D366] font-mono font-medium truncate">@{user.username}</p>
                       </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => openEditModal(user)} className="p-2 text-gray-600 hover:text-blue-500 transition-colors bg-[#0b141a] rounded-lg border border-gray-800"><Edit2 size={16} /></button>
-                    <button onClick={() => handleDeleteUser(user.id)} className="p-2 text-gray-600 hover:text-red-500 transition-colors bg-[#0b141a] rounded-lg border border-gray-800"><Trash2 size={16} /></button>
+                  <div className="flex items-center gap-1 shrink-0 ml-1">
+                    <button onClick={() => openEditModal(user)} className="p-1.5 text-gray-400 hover:text-blue-400 transition-colors bg-[#0b141a] rounded-lg border border-gray-800/80 cursor-pointer" title="Edit"><Edit2 size={13} /></button>
+                    <button onClick={() => handleDeleteUser(user.id)} className="p-1.5 text-gray-400 hover:text-red-400 transition-colors bg-[#0b141a] rounded-lg border border-gray-800/80 cursor-pointer" title="Delete"><Trash2 size={13} /></button>
                   </div>
               </div>
+
+              <div className="flex flex-wrap items-center gap-2 mb-2 text-[10px] text-gray-400 font-mono">
+                  <span className="flex items-center gap-1 truncate max-w-full">
+                      <Mail size={10} className="shrink-0 text-gray-500" /> <span className="truncate">{user.email || 'No email'}</span>
+                  </span>
+                  {user.mobile && (
+                    <span className="flex items-center gap-1 shrink-0">
+                        <Smartphone size={10} className="shrink-0 text-gray-500" /> <span>{user.mobile}</span>
+                    </span>
+                  )}
+              </div>
               
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
-                  <div className="p-3 bg-black/20 rounded-xl border border-gray-800 space-y-2">
-                      <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-tighter">
-                          <span className="text-gray-500">Subscription Status</span>
-                          <span className={user.subscription && new Date(user.subscription.expiryDate) < new Date() ? "text-red-500" : "text-[#25D366]"}>
+              <div className="grid grid-cols-2 gap-2 my-2">
+                  <div className="p-2 bg-black/20 rounded-lg border border-gray-800/60 space-y-0.5">
+                      <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider">
+                          <span className="text-gray-500">Plan</span>
+                          <span className={user.subscription && new Date(user.subscription.expiryDate) < new Date() ? "text-red-400" : "text-[#25D366]"}>
                             {user.subscription && new Date(user.subscription.expiryDate) < new Date() ? "EXPIRED" : "ACTIVE"}
                           </span>
                       </div>
-                      <div className="flex items-center justify-between">
-                          <span className="text-white text-sm font-bold">
-                            {plan?.name || 'Basic'}
-                            {(user.subscription?.customMaxInstances != null || user.subscription?.customDailyLimit != null) && 
-                              <span className="text-[10px] text-blue-400 ml-2 font-normal">(Custom Limits)</span>
-                            }
-                          </span>
-                          <Package size={14} className="text-gray-600" />
+                      <div className="text-white text-xs font-bold truncate">
+                        {plan?.name || 'Basic'}
                       </div>
                   </div>
-                  <div className="p-3 bg-black/20 rounded-xl border border-gray-800 space-y-2">
-                      <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-tighter">
-                          <span className="text-gray-500">Validity Expiry</span>
-                          <Clock size={12} className="text-gray-600" />
+                  <div className="p-2 bg-black/20 rounded-lg border border-gray-800/60 space-y-0.5">
+                      <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider">
+                          <span className="text-gray-500">Expires</span>
+                          <Clock size={10} className="text-gray-600" />
                       </div>
-                      <div className="text-white text-sm font-bold">
+                      <div className="text-white text-xs font-bold truncate">
                         {user.subscription ? new Date(user.subscription.expiryDate).toLocaleDateString() : 'Trial'}
                       </div>
                   </div>
               </div>
 
-              <div className="mt-4 pt-4 border-t border-gray-800 space-y-3">
+              {user.subscription?.metaSetupWaived && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 px-2 py-1 rounded-lg text-[10px] text-emerald-400 font-bold flex items-center justify-between my-1">
+                  <span className="flex items-center gap-1"><Globe size={11} /> Meta Setup Fee</span>
+                  <span className="uppercase text-[9px] bg-emerald-500/20 px-1.5 py-0.5 rounded">Waived / Overridden</span>
+                </div>
+              )}
+
+              <div className="mt-2 pt-2 border-t border-gray-800/80 space-y-2 text-xs">
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <Key size={14} className="text-gray-600" />
-                      <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest">API Integration Key</span>
-                    </div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[9px] text-gray-500 font-bold uppercase tracking-wider flex items-center gap-1">
+                      <Key size={11} className="text-gray-500" /> API Key
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2 bg-black/20 p-2 rounded-xl border border-gray-800">
-                    <code className="text-[10px] text-gray-400 font-mono truncate flex-1 px-1">
+                  <div className="flex items-center gap-1 bg-black/30 px-2 py-1 rounded-lg border border-gray-800/60">
+                    <code className="text-[10px] text-gray-300 font-mono truncate flex-1">
                       {user.apiKey}
                     </code>
-                    <div className="flex items-center gap-1 border-l border-gray-800 pl-1">
-                      <button 
-                        onClick={() => handleCopyKey(user.id, user.apiKey)}
-                        className="p-1.5 text-gray-500 hover:text-[#25D366] transition-all active:scale-90"
-                        title="Copy API Key"
-                      >
-                        {copiedUserId === user.id ? <CheckCircle2 size={14} className="text-[#25D366]" /> : <Copy size={14} />}
-                      </button>
-                      <button 
-                        onClick={() => handleRegenerateKey(user.id)}
-                        className="p-1.5 text-gray-500 hover:text-yellow-500 transition-all active:scale-90"
-                        title="Rotate / Regenerate API Key"
-                      >
-                        <RotateCcw size={14} />
-                      </button>
-                    </div>
+                    <button 
+                      onClick={() => handleCopyKey(user.id, user.apiKey)}
+                      className="p-1 text-gray-400 hover:text-[#25D366] transition-all cursor-pointer"
+                      title="Copy Key"
+                    >
+                      {copiedUserId === user.id ? <CheckCircle2 size={12} className="text-[#25D366]" /> : <Copy size={12} />}
+                    </button>
+                    <button 
+                      onClick={() => handleRegenerateKey(user.id)}
+                      className="p-1 text-gray-400 hover:text-amber-400 transition-all cursor-pointer"
+                      title="Rotate Key"
+                    >
+                      <RotateCcw size={12} />
+                    </button>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <Lock size={14} className="text-gray-600" />
-                      <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest">Account Credentials</span>
+                  <div className="flex items-center justify-between bg-black/30 px-2 py-1 rounded-lg border border-gray-800/60">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <Lock size={11} className="text-gray-500 shrink-0" />
+                      <span className="text-[10px] text-gray-400 font-mono truncate">PWD: ••••••••</span>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2 bg-black/20 p-2 rounded-xl border border-gray-800">
-                    <div className="flex-1 px-1 flex items-center gap-2">
-                        <span className="text-[10px] text-gray-400 font-mono">PWD: ••••••••</span>
-                        <span className="text-[9px] text-gray-600 italic">(Secured)</span>
-                    </div>
-                    <div className="flex items-center gap-1 border-l border-gray-800 pl-1">
-                      <button 
-                        onClick={() => handleRegeneratePassword(user)}
-                        className="p-1.5 text-gray-500 hover:text-orange-500 transition-all active:scale-90 flex items-center gap-1.5"
-                        title="Reset & Send Password to Email"
-                      >
-                        <RefreshCw size={14} />
-                        <span className="text-[9px] font-black uppercase">Reset PWD</span>
-                      </button>
-                    </div>
+                    <button 
+                      onClick={() => handleRegeneratePassword(user)}
+                      className="p-1 text-gray-400 hover:text-amber-400 transition-all flex items-center gap-1 text-[9px] font-bold uppercase shrink-0 cursor-pointer"
+                      title="Reset & Send Password to Email"
+                    >
+                      <RefreshCw size={11} />
+                      <span>Reset</span>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -567,73 +628,84 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
       </div>
 
       {editingUser && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#111b21] rounded-2xl border border-gray-800 p-6 w-full max-w-3xl shadow-2xl overflow-y-auto max-h-[90vh]">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-lg md:text-xl font-bold text-white flex items-center gap-2">
-                <Edit2 className="text-blue-500" />
-                Edit User: {editingUser.username}
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-[#111b21] rounded-2xl border border-gray-800 p-4 sm:p-5 w-full max-w-2xl shadow-2xl overflow-y-auto max-h-[90vh]">
+            <div className="flex justify-between items-center mb-3 pb-2 border-b border-gray-800">
+              <h3 className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                <Edit2 size={15} className="text-blue-500" />
+                <span>Edit User: {editingUser.username}</span>
               </h3>
-              <button onClick={() => setEditingUser(null)} className="text-gray-500 hover:text-white">
-                <X size={24} />
+              <button onClick={() => setEditingUser(null)} className="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-gray-800 cursor-pointer">
+                <X size={16} />
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3 text-xs">
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Username</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Full Name</label>
+                <input 
+                  type="text"
+                  value={editFormData.fullName}
+                  onChange={(e) => setEditFormData(p => ({ ...p, fullName: e.target.value }))}
+                  placeholder="e.g. John Doe"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Username</label>
                 <input 
                   type="text"
                   value={editFormData.username}
                   onChange={(e) => setEditFormData(p => ({ ...p, username: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Email</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Email</label>
                 <input 
                   type="email"
                   value={editFormData.email}
                   onChange={(e) => setEditFormData(p => ({ ...p, email: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Mobile</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Mobile</label>
                 <input 
                   type="text"
                   value={editFormData.mobile}
                   onChange={(e) => setEditFormData(p => ({ ...p, mobile: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">New Password (Optional)</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">New Password (Optional)</label>
                 <input 
                   type="password"
                   value={editFormData.password}
                   onChange={(e) => setEditFormData(p => ({ ...p, password: e.target.value }))}
                   placeholder="Leave blank to keep current"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Role</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Role</label>
                 <select 
                   value={editFormData.role}
                   onChange={(e) => setEditFormData(p => ({ ...p, role: e.target.value as UserRole }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white outline-none cursor-pointer"
                 >
                   {currentUser.role === UserRole.SUPERADMIN && <option value={UserRole.RESELLER}>Reseller</option>}
                   <option value={UserRole.ADMIN}>Admin</option>
+                  <option value={UserRole.TEAM_MEMBER}>Worker / Team Member</option>
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Plan</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Plan</label>
                 <select 
                   value={editFormData.planId}
                   onChange={(e) => setEditFormData(p => ({ ...p, planId: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white outline-none cursor-pointer"
                 >
                   {plans.map(p => (
                     <option key={p.id} value={p.id}>{p.name} (${p.price})</option>
@@ -641,42 +713,104 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Expiry Date</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Expiry Date</label>
                 <input 
                   type="date"
                   value={editFormData.expiryDate}
                   onChange={(e) => setEditFormData(p => ({ ...p, expiryDate: e.target.value }))}
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Custom Instance Limit (Optional)</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Custom Instance Limit</label>
                 <input 
                   type="number"
                   value={editFormData.customMaxInstances}
                   onChange={(e) => setEditFormData(p => ({ ...p, customMaxInstances: e.target.value }))}
                   placeholder="Overrides plan limit"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Custom Daily Msg Limit (Optional)</label>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Custom Daily Msg Limit</label>
                 <input 
                   type="number"
                   value={editFormData.customDailyLimit}
                   onChange={(e) => setEditFormData(p => ({ ...p, customDailyLimit: e.target.value }))}
                   placeholder="Overrides plan limit"
-                  className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-3 text-white focus:ring-2 ring-blue-500/50 outline-none"
+                  className="w-full bg-[#202c33] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:border-blue-500 outline-none"
                 />
               </div>
             </div>
 
-            <div className="flex justify-end gap-3 mt-8 pt-6 border-t border-gray-800">
-              <button onClick={() => setEditingUser(null)} className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
+            {currentUser.role === UserRole.SUPERADMIN && (
+              <div className="col-span-full bg-blue-500/10 border border-blue-500/30 p-3 rounded-xl space-y-2 mt-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-blue-300 flex items-center gap-1.5">
+                    <Globe size={14} className="text-blue-400 shrink-0" /> SuperAdmin Meta Setup Cost & Instance Plan Overwrite
+                  </span>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      const metaPlan = plans.find(p => p.allowedProviders === 'meta' || p.allowedProviders === 'both');
+                      setEditFormData(p => ({
+                        ...p,
+                        planId: metaPlan ? metaPlan.id : p.planId,
+                        metaSetupWaived: true,
+                        customMetaSetupFee: '0',
+                        customMaxInstances: p.customMaxInstances || '5',
+                        expiryDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+                      }));
+                    }}
+                    className="text-[10px] bg-blue-500 hover:bg-blue-600 text-white font-bold px-2.5 py-1 rounded-lg transition-all shadow cursor-pointer self-start sm:self-auto"
+                  >
+                    Activate Meta Plan Overwrite (Waive Setup)
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs pt-1">
+                  <label className={`flex items-center gap-2 p-2 rounded-xl border cursor-pointer transition-all ${editFormData.metaSetupWaived ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300' : 'bg-[#202c33] border-gray-700 text-gray-300'}`}>
+                    <input 
+                      type="checkbox" 
+                      className="rounded accent-emerald-500"
+                      checked={editFormData.metaSetupWaived} 
+                      onChange={e => setEditFormData(p => ({ ...p, metaSetupWaived: e.target.checked }))} 
+                    />
+                    <span className="text-xs font-bold">Waive / Mark Paid Meta One-Time Setup Fee</span>
+                  </label>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Custom Meta Setup Fee (₹ Override)</label>
+                    <input 
+                      type="number" 
+                      value={editFormData.customMetaSetupFee} 
+                      onChange={e => setEditFormData(p => ({ ...p, customMetaSetupFee: e.target.value }))} 
+                      placeholder="e.g. 0 to make free, or 499" 
+                      className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-2.5 py-1.5 text-xs text-white outline-none focus:border-blue-500" 
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentUser.role === UserRole.SUPERADMIN && (
+              <div className="col-span-full pt-3">
+                  <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Access Control</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <label className={`flex items-center gap-2 p-2 rounded-xl border cursor-pointer transition-all ${editFormData.permissions.includes(Permission.MANAGE_VISIBILITY) ? 'bg-blue-500/10 border-blue-500/50 text-white' : 'bg-[#202c33] border-gray-700 text-gray-400'}`}>
+                          <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center ${editFormData.permissions.includes(Permission.MANAGE_VISIBILITY) ? 'bg-blue-500 border-blue-500' : 'border-gray-600'}`}>
+                              {editFormData.permissions.includes(Permission.MANAGE_VISIBILITY) && <CheckCircle2 size={10} className="text-white" />}
+                          </div>
+                          <input type="checkbox" className="hidden" checked={editFormData.permissions.includes(Permission.MANAGE_VISIBILITY)} onChange={() => setEditFormData(p => ({ ...p, permissions: p.permissions.includes(Permission.MANAGE_VISIBILITY) ? p.permissions.filter(perm => perm !== Permission.MANAGE_VISIBILITY) : [...p.permissions, Permission.MANAGE_VISIBILITY] }))} />
+                          <span className="text-xs font-medium">Manage Visibility</span>
+                      </label>
+                  </div>
+              </div>
+            )}
+            <div className="col-span-full flex justify-end gap-2 mt-4 pt-3 border-t border-gray-800">
+              <button onClick={() => setEditingUser(null)} className="px-3.5 py-1.5 text-gray-400 hover:text-white font-bold text-xs rounded-xl hover:bg-gray-800 transition-all cursor-pointer">Cancel</button>
               <button 
                 onClick={handleSaveEdit} 
                 disabled={isProcessing === 'editing'}
-                className="bg-blue-500 hover:bg-blue-600 text-white px-8 py-2.5 rounded-xl font-black uppercase tracking-widest shadow-lg shadow-blue-500/20 transition-all active:scale-95 disabled:opacity-50"
+                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded-xl font-bold text-xs uppercase tracking-wider shadow-md shadow-blue-500/20 transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
               >
                 {isProcessing === 'editing' ? 'Saving...' : 'Save Changes'}
               </button>

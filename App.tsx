@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { io } from 'socket.io-client';
-import { Plus, RefreshCw, Menu, Bell, AlertCircle } from 'lucide-react';
+import { Plus, RefreshCw, Menu, Bell, AlertCircle, User as UserIcon, CreditCard, History, LogOut } from 'lucide-react';
 import { InstanceStatus, WhatsAppInstance, MessageTemplate, ContactGroup, User, UserRole, Plan, PlanInterval, Subscription, MediaAsset, Permission } from './types';
 import Dashboard from './components/Dashboard';
 import CodeSnippets from './components/CodeSnippets';
@@ -16,11 +16,13 @@ import MessageTemplates from './components/MessageTemplates';
 import ContactManager from './components/ContactManager';
 import ApiDocumentation from './components/ApiDocumentation';
 import UserManagement from './components/UserManagement';
+import VisibilityManager from './components/VisibilityManager';
 import BillingManager from './components/BillingManager';
 import MediaLibrary from './components/MediaLibrary';
 import AutoResponderManager from './components/AutoResponderManager';
 import ChatInterface from './components/ChatInterface';
 import TeamManager from './components/TeamManager';
+import MetaInsightsBilling from './components/MetaInsightsBilling';
 import { ProfileView } from './components/ProfileView';
 import LoginPage from './components/LoginPage';
 import ProvisionInstanceModal from './components/ProvisionInstanceModal';
@@ -83,17 +85,26 @@ const App: React.FC = () => {
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [contactGroups, setContactGroups] = useState<ContactGroup[]>([]);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'code' | 'logs' | 'bulk' | 'templates' | 'contacts' | 'api-docs' | 'users' | 'billing' | 'media-library' | 'auto-responder' | 'chat' | 'team'>(() => {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'code' | 'logs' | 'bulk' | 'templates' | 'contacts' | 'api-docs' | 'users' | 'billing' | 'media-library' | 'auto-responder' | 'chat' | 'team' | 'visibility' | 'meta-insights' | 'meta-templates' | 'meta-automations' | 'wallet'>(() => {
     return (localStorage.getItem('wa_active_tab') as any) || 'dashboard';
   });
+  const [bulkInitialMode, setBulkInitialMode] = useState<'sender' | 'history'>('sender');
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   useEffect(() => {
+    // Restrict worker / team members from accessing admin/reseller tabs
+    if (currentUser?.role === UserRole.TEAM_MEMBER) {
+      const restrictedTabs = ['users', 'billing', 'visibility', 'team', 'wallet', 'code', 'logs'];
+      if (restrictedTabs.includes(activeTab)) {
+        setActiveTab('dashboard');
+        return;
+      }
+    }
     localStorage.setItem('wa_active_tab', activeTab);
-  }, [activeTab]);
+  }, [activeTab, currentUser?.role]);
 
   useEffect(() => {
     localStorage.setItem('wa_hidden_modules', JSON.stringify(hiddenModules));
@@ -111,14 +122,16 @@ const App: React.FC = () => {
               name: p.name,
               price: parseFloat(p.price),
               interval: p.interval || PlanInterval.MONTHLY,
-              dailyLimit: p.daily_limit || 0,
-              monthlyLimit: (p.daily_limit || 0) * 30,
-              yearlyLimit: (p.daily_limit || 0) * 365,
-              maxInstances: p.max_instances || 1,
-              rateLimitPerMin: p.rate_limit_per_min || 20,
+              dailyLimit: p.daily_limit !== undefined ? p.daily_limit : (p.dailyLimit || 0),
+              monthlyLimit: ((p.daily_limit !== undefined ? p.daily_limit : (p.dailyLimit || 0))) * 30,
+              yearlyLimit: ((p.daily_limit !== undefined ? p.daily_limit : (p.dailyLimit || 0))) * 365,
+              maxInstances: p.max_instances !== undefined ? p.max_instances : (p.maxInstances || 1),
+              rateLimitPerMin: p.rate_limit_per_min || p.rateLimitPerMin || 20,
               features: p.features || ['Standard Support', 'API Access'],
               description: p.description,
-              icon: p.icon
+              icon: p.icon,
+              allowedProviders: p.allowedProviders || p.allowed_providers || 'baileys',
+              metaSetupFee: parseFloat(p.metaSetupFee !== undefined ? p.metaSetupFee : (p.meta_setup_fee || 0))
           })));
         }
       } catch (err) {
@@ -130,7 +143,7 @@ const App: React.FC = () => {
 
   // 2. Fetch Users from Backend
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !currentUser?.id) return;
     if (currentUser.id === 'u_demo_user') return; // Skip fetch for demo user
     const fetchUsers = async () => {
       try {
@@ -175,71 +188,75 @@ const App: React.FC = () => {
     // Also poll users every 10 seconds to keep list fresh
     const interval = setInterval(fetchUsers, 10000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, currentUser.id, refreshTrigger]);
+  }, [isAuthenticated, currentUser?.id, refreshTrigger]);
 
   // 3. Polling Instances & Shared Resources
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !currentUser?.id) return;
     if (currentUser.id === 'u_demo_user') return; // Skip fetch for demo user
 
     const fetchAllData = async () => {
+      if (!currentUser) return;
       const headers = { 
         'X-User-ID': currentUser.id, 
         'X-Role': currentUser.role,
         'X-API-Key': currentUser.apiKey
       };
 
-      try {
-        // Fetch Instances (Critical for Gateway Status)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        const instRes = await fetch(`${API_BASE}/api/instances?_t=${Date.now()}`, { headers, signal: controller.signal });
-        clearTimeout(timeoutId);
-        
-        if (instRes.ok) {
-          setInstances(await instRes.json());
-          setIsBackendConnected(true);
-        } else {
-          // If not ok, could be a 500, but let's wait for actual throw or prolonged failure to show disconnect
-          console.warn("Instances fetch returned non-ok status", instRes.status);
+      const fetchInstances = async () => {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
+          const instRes = await fetch(`${API_BASE}/api/instances?_t=${Date.now()}`, { headers, signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (instRes.ok) {
+            setInstances(await instRes.json());
+            setIsBackendConnected(true);
+          }
+        } catch (err) {
+          console.warn("Backend connection failing:", err);
+          setIsBackendConnected(false);
         }
-      } catch (err) {
-        console.warn("Backend connection failing:", err);
-        // Only set disconnected if we catch an actual network error
-        setIsBackendConnected(false);
-      }
+      };
 
-      // Fetch Secondary Data Independently
+      const fetchMedia = async () => {
+        try {
+          const mediaRes = await fetch(`${API_BASE}/api/media?_t=${Date.now()}`, { headers });
+          if (mediaRes.ok) setMediaAssets(await mediaRes.json());
+        } catch (e) {}
+      };
+
+      const fetchContacts = async () => {
+        try {
+          const contactsRes = await fetch(`${API_BASE}/api/contacts/groups?_t=${Date.now()}`, { headers });
+          if (contactsRes.ok) setContactGroups(await contactsRes.json());
+        } catch (e) {}
+      };
+
+      const fetchHiddenModules = async () => {
+        try {
+          const hiddenRes = await fetch(`${API_BASE}/api/settings/hidden-modules?_t=${Date.now()}`, { headers });
+          if (hiddenRes.ok) setHiddenModules(await hiddenRes.json());
+        } catch (e) {}
+      };
+
       try {
-        const mediaRes = await fetch(`${API_BASE}/api/media?_t=${Date.now()}`, { headers });
-        if (mediaRes.ok) setMediaAssets(await mediaRes.json());
+        if (currentUser?.id) {
+          const savedTemplates = localStorage.getItem(`wa_tpls_${currentUser.id}`);
+          if (savedTemplates) setTemplates(JSON.parse(savedTemplates));
+        }
       } catch (e) {}
 
-      try {
-        const contactsRes = await fetch(`${API_BASE}/api/contacts/groups?_t=${Date.now()}`, { headers });
-        if (contactsRes.ok) setContactGroups(await contactsRes.json());
-      } catch (e) {}
-
-      try {
-        const hiddenRes = await fetch(`${API_BASE}/api/settings/hidden-modules?_t=${Date.now()}`, { headers });
-        if (hiddenRes.ok) {
-            const data = await hiddenRes.json();
-            setHiddenModules(data);
-        }
-      } catch (e) {}
-
-      try {
-        const savedTemplates = localStorage.getItem(`wa_tpls_${currentUser.id}`);
-        if (savedTemplates) {
-          const loaded = JSON.parse(savedTemplates);
-          setTemplates(loaded);
-        }
-      } catch (e) {
-        localStorage.removeItem(`wa_tpls_${currentUser.id}`);
-      }
+      // Parallelize fetches for instant load
+      await Promise.allSettled([
+        fetchInstances(),
+        fetchMedia(),
+        fetchContacts(),
+        fetchHiddenModules()
+      ]);
     };
 
-        const interval = setInterval(fetchAllData, 30000);
+    const interval = setInterval(fetchAllData, 15000);
     fetchAllData();
     
     // Add real-time Socket.IO listeners
@@ -251,6 +268,26 @@ const App: React.FC = () => {
     
     socket.on('disconnect', () => {
         setIsBackendConnected(false);
+    });
+
+    socket.on('instances_updated', () => {
+        fetchAllData();
+    });
+
+    socket.on('media_updated', () => {
+        fetchAllData();
+    });
+
+    socket.on('contacts_updated', () => {
+        fetchAllData();
+    });
+
+    socket.on('plans_updated', () => {
+        setRefreshTrigger(p => p + 1);
+    });
+
+    socket.on('users_updated', () => {
+        setRefreshTrigger(p => p + 1);
     });
 
     socket.on('qr', (data) => {
@@ -266,8 +303,8 @@ const App: React.FC = () => {
     });
 
     socket.on('wallet_update', (data) => {
-        if (data.userId === currentUser.id) {
-            setCurrentUser(prev => ({ ...prev, walletBalance: data.balance }));
+        if (currentUser && data.userId === currentUser.id) {
+            setCurrentUser(prev => prev ? ({ ...prev, walletBalance: data.balance }) : prev);
         }
     });
 
@@ -275,14 +312,31 @@ const App: React.FC = () => {
         clearInterval(interval);
         socket.disconnect();
     };
-  }, [currentUser.id, currentUser.role, currentUser.apiKey, isAuthenticated, refreshTrigger]);
+  }, [currentUser?.id, currentUser?.role, currentUser?.apiKey, isAuthenticated, refreshTrigger]);
+
+  // Auto-refresh fresh server data whenever user navigates between pages or refocuses tab
+  useEffect(() => {
+    if (isAuthenticated && currentUser?.id && currentUser.id !== 'u_demo_user') {
+      setRefreshTrigger(p => p + 1);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      if (isAuthenticated && currentUser?.id && currentUser.id !== 'u_demo_user') {
+        setRefreshTrigger(p => p + 1);
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [isAuthenticated, currentUser?.id]);
 
   // Sync templates to local storage
   useEffect(() => {
-    if (templates.length > 0) {
+    if (currentUser?.id && templates.length > 0) {
       localStorage.setItem(`wa_tpls_${currentUser.id}`, JSON.stringify(templates));
     }
-  }, [templates, currentUser.id]);
+  }, [templates, currentUser?.id]);
 
   const handleLogin = async (username: string, password: string) => {
     setAuthError(null);
@@ -401,41 +455,62 @@ const App: React.FC = () => {
   };
 
   const handleLogout = () => {
-    setIsAuthenticated(false);
-    setShowLandingPage(true);
     localStorage.removeItem('wa_auth_session');
     localStorage.removeItem('wa_current_user_id');
     localStorage.removeItem('wa_original_user');
+    localStorage.removeItem('wa_token');
+    setIsAuthenticated(false);
+    setShowLandingPage(true);
+    setAuthenticatedUser(null);
   };
 
   const visibleInstances = useMemo(() => {
+    if (!currentUser || !currentUser.role) return [];
     return instances.filter(inst => {
+      const instUserId = inst.userId || (inst as any).user_id;
+      // Hide instances marked as hidden for non-superadmins
       if (currentUser.role !== UserRole.SUPERADMIN && inst.isVisible === false) return false;
       
-      const owner = users.find(u => u.id === inst.userId) || (inst.userId === currentUser.id ? currentUser : null);
-      if (currentUser.role === UserRole.SUPERADMIN || (owner && owner.role === UserRole.SUPERADMIN)) {
-        return true; 
+      // Strict role-based isolation:
+      if (currentUser.role === UserRole.SUPERADMIN) {
+        return true;
       }
-      if (!owner) return true;
-      const isExpired = owner.subscription && new Date(owner.subscription.expiryDate) < new Date();
-      if (isExpired || owner.subscription?.status !== 'active') {
-        return true; 
+      
+      if (currentUser.role === UserRole.TEAM_MEMBER) {
+        // Worker / team member MUST ONLY see instances belonging to their parent admin or created by them
+        const isMineOrParents = instUserId === currentUser.id || (currentUser.parentId && instUserId === currentUser.parentId);
+        if (!isMineOrParents) return false;
+      } else if (currentUser.role === UserRole.ADMIN) {
+        // Admin sees their own instances or sub-user/team instances
+        const isMine = instUserId === currentUser.id;
+        const owner = users.find(u => u.id === instUserId);
+        const isSubUser = owner && owner.parentId === currentUser.id;
+        if (!isMine && !isSubUser) return false;
+      } else if (currentUser.role === UserRole.RESELLER) {
+        // Reseller sees their own instances and sub-admin instances
+        const owner = users.find(u => u.id === instUserId);
+        const isMineOrSub = instUserId === currentUser.id || (owner && owner.parentId === currentUser.id);
+        if (!isMineOrSub) return false;
       }
+
       return true;
     }).map(inst => {
-        const owner = users.find(u => u.id === inst.userId) || (inst.userId === currentUser.id ? currentUser : null);
+        const instUserId = inst.userId || (inst as any).user_id;
+        const owner = users.find(u => u.id === instUserId) || (instUserId === currentUser.id ? currentUser : null);
         const isExpired = owner && owner.subscription && new Date(owner.subscription.expiryDate) < new Date();
         if (isExpired || (owner && owner.subscription?.status !== 'active')) {
-            return { ...inst, status: InstanceStatus.SUSPENDED };
+            return { ...inst, userId: instUserId, status: InstanceStatus.SUSPENDED };
         }
-        return inst;
+        return { ...inst, userId: instUserId };
     }).sort((a, b) => a.id.localeCompare(b.id)); // Sort by ID to prevent shuffling
   }, [instances, users, currentUser]);
 
   const visibleUsers = useMemo(() => {
+    if (!currentUser || !currentUser.role) return [];
     if (currentUser.role === UserRole.SUPERADMIN) return users;
-    if (currentUser.role === UserRole.RESELLER) return users.filter(u => u.parentId === currentUser.id);
-    return [];
+    if (currentUser.role === UserRole.RESELLER) return users.filter(u => u.parentId === currentUser.id || u.id === currentUser.id);
+    if (currentUser.role === UserRole.ADMIN) return users.filter(u => u.parentId === currentUser.id);
+    return []; // TEAM_MEMBER / Worker cannot view users list
   }, [users, currentUser]);
 
   const handleCreateInstance = () => {
@@ -615,6 +690,25 @@ const App: React.FC = () => {
     return <LoginPage onLogin={handleLogin} onSignup={handleSignup} error={authError} onBackToHome={() => setShowLandingPage(true)} />;
   }
 
+  const activePlan = plans.find(p => p.id === currentUser?.subscription?.planId)
+    || plans.find(p => p.name.toLowerCase() === (currentUser?.subscription?.planId || '').toLowerCase())
+    || plans[0];
+  const userCustomMax = currentUser?.subscription?.customMaxInstances;
+  const effectiveMaxInstances = (userCustomMax !== undefined && userCustomMax !== null)
+    ? userCustomMax
+    : (activePlan ? activePlan.maxInstances : 10);
+
+  const currentUserInstancesCount = currentUser
+    ? instances.filter(i => (i.userId || (i as any).user_id) === currentUser.id).length
+    : 0;
+
+  const isPlanLimitReached = Boolean(
+    currentUser &&
+    currentUser.role !== UserRole.SUPERADMIN &&
+    effectiveMaxInstances !== 0 &&
+    currentUserInstancesCount >= effectiveMaxInstances
+  );
+
   return (
     <>
       {currentUser && (
@@ -622,9 +716,15 @@ const App: React.FC = () => {
           isOpen={isProvisionModalOpen} 
           onClose={() => setIsProvisionModalOpen(false)} 
           onSubmit={submitProvisionInstance}
-          planLimitReached={currentUser.role !== UserRole.SUPERADMIN && !!plans.find(p => p.id === currentUser.subscription?.planId) && plans.find(p => p.id === currentUser.subscription?.planId)!.maxInstances !== 0 && instances.filter(i => i.userId === currentUser.id).length >= plans.find(p => p.id === currentUser.subscription?.planId)!.maxInstances}
-          planMax={plans.find(p => p.id === currentUser.subscription?.planId)?.maxInstances || 0}
-          planName={plans.find(p => p.id === currentUser.subscription?.planId)?.name || ''}
+          planLimitReached={isPlanLimitReached}
+          planMax={effectiveMaxInstances}
+          planName={activePlan?.name || 'Current Plan'}
+          currentPlan={activePlan || null}
+          isSuperAdmin={currentUser.role === UserRole.SUPERADMIN}
+          onNavigateToBilling={() => {
+            setIsProvisionModalOpen(false);
+            setActiveTab('billing');
+          }}
         />
       )}
     <div className="flex h-[100dvh] bg-[#0b141a] text-gray-200 overflow-hidden">
@@ -638,8 +738,7 @@ const App: React.FC = () => {
       
       {/* Sidebar - responsive */}
       <div className={`fixed inset-y-0 left-0 z-50 h-full transform transition-transform duration-300 lg:relative lg:translate-x-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <Sidebar 
-          activeTab={activeTab} 
+        <Sidebar isMeta={instances.some(i => i.provider === "meta")} activeTab={activeTab} 
           onTabChange={(tab) => { setActiveTab(tab); setIsSidebarOpen(false); }} 
           currentUser={currentUser} authenticatedUser={authenticatedUser || currentUser} 
           allUsers={users}
@@ -650,16 +749,16 @@ const App: React.FC = () => {
       </div>
       
       <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
-        <header className="h-16 shrink-0 border-b border-gray-800 flex items-center justify-between px-4 lg:px-8 bg-[#111b21]">
-          <div className="flex items-center gap-3 lg:gap-4">
+        <header className="h-14 sm:h-16 shrink-0 border-b border-gray-800 flex items-center justify-between px-2.5 sm:px-4 lg:px-8 bg-[#111b21] gap-1.5 sm:gap-4">
+          <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
             <button 
-              className="lg:hidden p-1 text-gray-400 hover:text-white"
+              className="lg:hidden p-1 text-gray-400 hover:text-white shrink-0"
               onClick={() => setIsSidebarOpen(true)}
             >
-              <Menu size={24} />
+              <Menu size={22} />
             </button>
-                        <h1 className="text-lg md:text-xl font-bold text-white capitalize">{activeTab.replace('-', ' ')}</h1>
-            <span className={`hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold border ${
+            <h1 className="text-xs sm:text-base md:text-lg font-bold text-white capitalize leading-none tracking-tight truncate max-w-[85px] xs:max-w-[130px] sm:max-w-none">{activeTab.replace('-', ' ')}</h1>
+            <span className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border shrink-0 ${
                 currentUser.role === UserRole.SUPERADMIN ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20' :
                 currentUser.role === UserRole.RESELLER ? 'bg-blue-500/10 text-blue-500 border-blue-500/20' :
                 'bg-green-500/10 text-green-500 border-green-500/20'
@@ -667,34 +766,59 @@ const App: React.FC = () => {
               {currentUser.role.toUpperCase()}
             </span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             <button 
                 onClick={() => handleCreateInstance()}
-                className="hidden sm:flex items-center gap-2 bg-[#25D366]/10 text-[#25D366] hover:bg-[#25D366]/20 px-3 py-1.5 rounded-lg text-sm font-bold border border-[#25D366]/20 transition-all"
+                title="Add New WhatsApp Instance"
+                className="hidden sm:flex items-center gap-2 bg-[#25D366]/15 text-[#25D366] hover:bg-[#25D366]/25 px-3 py-1.5 rounded-lg text-sm font-bold border border-[#25D366]/30 transition-all cursor-pointer shrink-0 shadow-sm active:scale-95"
             >
-                <Plus size={16} /> Add Instance
+                <Plus size={15} className="shrink-0 stroke-[2.5]" />
+                <span>Add Instance</span>
             </button>
             <HeaderWallet currentUser={currentUser} apiBase={API_BASE} />
             <div className="relative group">
-              <button className="hidden sm:block p-2 text-gray-400 hover:text-white transition-colors relative">
+              <button className="block p-1.5 sm:p-2 text-gray-400 hover:text-white transition-colors relative" title="Notifications">
                 <Bell size={20} />
-                <span className="absolute top-1 right-1 w-2 h-2 bg-[#25D366] rounded-full"></span>
+                {((currentUser.subscription?.undeliveredToday || 0) > 0 || (!currentUser.walletBalance || currentUser.walletBalance < 10)) ? (
+                  <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse border border-[#111b21]"></span>
+                ) : (
+                  <span className="absolute top-1 right-1 w-2 h-2 bg-[#25D366] rounded-full"></span>
+                )}
               </button>
-              <div className="absolute right-0 mt-2 w-64 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
-                  <div className="p-3 border-b border-gray-700 font-bold text-white text-sm">Notifications</div>
+              <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-2rem)] bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all overflow-hidden">
+                  <div className="p-3 border-b border-gray-700 font-bold text-white text-sm flex justify-between items-center bg-black/20">
+                      <span className="flex items-center gap-1.5"><Bell size={16} className="text-[#25D366]" /> Notifications</span>
+                      <span className="text-[10px] font-mono text-gray-400 uppercase bg-gray-800 px-2 py-0.5 rounded">Today</span>
+                  </div>
                   <div className="p-3 space-y-3">
-                      <div className="flex justify-between text-xs">
+                      <div className="flex justify-between items-center text-xs">
                           <span className="text-gray-400">Daily Messages Sent:</span>
-                          <span className="text-white font-bold">{currentUser.subscription?.messagesSentToday || 0}</span>
+                          <span className="text-emerald-400 font-bold font-mono">{currentUser.subscription?.messagesSentToday || 0}</span>
                       </div>
-                      <div className="flex justify-between text-xs">
-                          <span className="text-gray-400">Undelivered:</span>
-                          <span className="text-red-400 font-bold">0</span>
+                      <div className="flex justify-between items-center text-xs">
+                          <span className="text-gray-400">Undelivered (Today):</span>
+                          <span className={`font-bold font-mono ${(currentUser.subscription?.undeliveredToday || 0) > 0 ? 'text-red-400' : 'text-gray-300'}`}>
+                            {currentUser.subscription?.undeliveredToday || 0}
+                          </span>
+                      </div>
+                      <div className="flex justify-between items-center text-xs">
+                          <span className="text-gray-400">Total Undelivered:</span>
+                          <span className={`font-bold font-mono ${(currentUser.subscription?.undeliveredTotal || 0) > 0 ? 'text-red-400' : 'text-gray-300'}`}>
+                            {currentUser.subscription?.undeliveredTotal || 0}
+                          </span>
                       </div>
                       {(!currentUser.walletBalance || currentUser.walletBalance < 10) && (
-                          <div className="text-xs text-orange-400 font-bold bg-orange-400/10 p-2 rounded flex items-center gap-2">
-                             <AlertCircle size={14} /> Low Wallet Balance!
+                          <div className="text-xs text-orange-400 font-bold bg-orange-400/10 p-2.5 rounded-lg border border-orange-400/20 flex items-center gap-2">
+                             <AlertCircle size={14} className="shrink-0" /> Low Wallet Balance!
                           </div>
+                      )}
+                      {((currentUser.subscription?.undeliveredToday || 0) > 0 || (currentUser.subscription?.undeliveredTotal || 0) > 0) && (
+                          <button 
+                            onClick={() => { setBulkInitialMode('history'); setActiveTab('bulk'); }}
+                            className="w-full text-center text-xs text-[#25D366] hover:underline font-bold pt-1 block"
+                          >
+                            View Failed Campaign Logs →
+                          </button>
                       )}
                   </div>
               </div>
@@ -703,22 +827,21 @@ const App: React.FC = () => {
                 <button className="w-8 h-8 rounded-full bg-gradient-to-r from-[#25D366] to-teal-500 flex items-center justify-center text-sm font-bold text-white shadow-lg hover:scale-105 transition-transform">
                   {currentUser.username.charAt(0).toUpperCase()}
                 </button>
-                <div className="absolute right-0 mt-2 w-48 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all overflow-hidden">
+                <div className="absolute right-0 mt-2 w-52 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all overflow-hidden">
                     <div className="p-3 border-b border-gray-700 font-bold text-white text-sm bg-black/20 text-center">
                         {currentUser.username}
                     </div>
-                    <button onClick={() => setActiveTab('profile')} className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-[#2a3942] hover:text-white transition-colors">
-                        My Profile
+                    <button onClick={() => setActiveTab('profile')} className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-[#2a3942] hover:text-white transition-colors flex items-center gap-2">
+                        <UserIcon size={16} className="text-gray-400" /> My Profile
                     </button>
-                    <button onClick={() => {
-                        localStorage.removeItem('wa_current_user_id');
-                        localStorage.removeItem('wa_original_user');
-                        localStorage.removeItem('wa_auth_session');
-                        setIsAuthenticated(false);
-                        setAuthenticatedUser(null);
-                        setCurrentUser(null as any);
-                    }} className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-red-400/10 transition-colors font-bold border-t border-gray-700">
-                        Log Out
+                    <button onClick={() => { setBulkInitialMode('history'); setActiveTab('bulk'); }} className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-[#2a3942] hover:text-white transition-colors flex items-center gap-2">
+                        <History size={16} className="text-[#25D366]" /> Campaign Logs
+                    </button>
+                    <button onClick={() => setActiveTab('billing')} className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-[#2a3942] hover:text-white transition-colors flex items-center gap-2">
+                        <CreditCard size={16} className="text-blue-400" /> Billing & Plans
+                    </button>
+                    <button onClick={handleLogout} className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-red-400/10 transition-colors font-bold border-t border-gray-700 flex items-center gap-2">
+                        <LogOut size={16} /> Log Out
                     </button>
                 </div>
             </div>
@@ -726,7 +849,15 @@ const App: React.FC = () => {
         </header>
 
         <div className={`flex-1 min-h-0 ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain'}`}>
-          {activeTab === 'profile' && <ProfileView currentUser={currentUser} plans={plans} />}
+          {activeTab === 'profile' && (
+            <ProfileView 
+              currentUser={currentUser} 
+              plans={plans} 
+              instances={visibleInstances} 
+              apiBase={API_BASE}
+              onUpdateUser={(updated) => setCurrentUser(prev => ({ ...prev, ...updated }))}
+            />
+          )}
           {activeTab === 'dashboard' && (
             <Dashboard 
               instances={visibleInstances} 
@@ -737,6 +868,7 @@ const App: React.FC = () => {
               onSimulateConnect={() => {}}
               onUpdateWebhook={handleUpdateWebhook}
               onToggleAi={handleToggleAi}
+              onCreateInstance={handleCreateInstance}
               isMockMode={!isBackendConnected}
               currentUser={currentUser}
               onToggleVisibility={handleToggleVisibility}
@@ -746,10 +878,11 @@ const App: React.FC = () => {
             />
           )}
           {activeTab === 'wallet' && <WalletManager apiBase={API_BASE} currentUser={currentUser} users={users} />}
+          {activeTab === 'meta-insights' && <MetaInsightsBilling currentUser={currentUser} instances={instances} apiBase={API_BASE} />}
           {activeTab === 'users' && <UserManagement users={visibleUsers} currentUser={currentUser} setUsers={setUsers} plans={plans} apiBase={API_BASE} />}
-          {activeTab === 'billing' && <BillingManager currentUser={currentUser} plans={plans} setPlans={setPlans} users={users} setUsers={setUsers} instances={visibleInstances} apiBase={API_BASE} />}
+          {activeTab === 'billing' && <BillingManager currentUser={currentUser} plans={plans} setPlans={setPlans} users={users} setUsers={setUsers} instances={visibleInstances} apiBase={API_BASE} onUpdateUser={(updated) => setCurrentUser(prev => ({ ...prev, ...updated }))} />}
           {activeTab === 'api-docs' && <ApiDocumentation instances={instances} currentUser={currentUser} apiBase={API_BASE} />}
-          {activeTab === 'bulk' && <BulkSender instances={visibleInstances} apiBase={API_BASE} templates={templates} contactGroups={contactGroups} currentUser={currentUser} plans={plans} mediaAssets={mediaAssets} hiddenModules={hiddenModules} />}
+          {activeTab === 'bulk' && <BulkSender instances={visibleInstances} apiBase={API_BASE} templates={templates} contactGroups={contactGroups} currentUser={currentUser} plans={plans} mediaAssets={mediaAssets} hiddenModules={hiddenModules} initialViewMode={bulkInitialMode} />}
           {activeTab === 'templates' && <MessageTemplates templates={templates} setTemplates={setTemplates} mediaAssets={mediaAssets} />}
           {activeTab === 'meta-templates' && <Templates instances={instances} currentUser={currentUser} apiBase={API_BASE} mediaAssets={mediaAssets} />}
           {activeTab === 'meta-automations' && <MetaAutomations instances={instances} currentUser={currentUser} apiBase={API_BASE} mediaAssets={mediaAssets} />}
@@ -758,6 +891,7 @@ const App: React.FC = () => {
           {activeTab === 'auto-responder' && <AutoResponderManager instances={visibleInstances} currentUser={currentUser} mediaAssets={mediaAssets} apiBase={API_BASE} />}
           {activeTab === 'chat' && <ChatInterface instances={visibleInstances} currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'team' && <TeamManager currentUser={currentUser} apiBase={API_BASE} />}
+          {activeTab === 'visibility' && <VisibilityManager currentUser={currentUser} hiddenModules={hiddenModules} setHiddenModules={setHiddenModules} apiBase={API_BASE} />}
           {activeTab === 'code' && <CodeSnippets />}
           {activeTab === 'logs' && (
             <div className="bg-black/40 p-6 rounded-xl border border-gray-800 font-mono text-sm h-full overflow-y-auto space-y-1">

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { MediaAsset, User } from '../types';
 import { ImageIcon, Video, FileText, Plus, Trash2, Search, Link as LinkIcon, ExternalLink, Upload, Loader2 } from 'lucide-react';
 
@@ -145,41 +145,43 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
     }
   };
 
-  const filteredAssets = mediaAssets.filter(a => 
-    (currentUser.role === 'superadmin' || a.userId === currentUser.id) &&
-    (a.name.toLowerCase().includes(searchQuery.toLowerCase()) || a.url.toLowerCase().includes(searchQuery.toLowerCase()))
-  );
+  const filteredAssets = useMemo(() => {
+    return (mediaAssets || []).filter(a => 
+      (currentUser.role === 'superadmin' || a.userId === currentUser.id) &&
+      (a.name.toLowerCase().includes(searchQuery.toLowerCase()) || a.url.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+  }, [mediaAssets, currentUser.role, currentUser.id, searchQuery]);
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6 pb-12">
-      <div className="flex justify-between items-center">
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
+    <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6 pb-12 p-3 sm:p-6">
+      <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
           <input 
             type="text"
-            placeholder="Search your media library..."
+            placeholder="Search media library..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-[#111b21] border border-gray-800 rounded-xl pl-10 pr-4 py-2.5 text-sm focus:ring-2 ring-[#25D366]/50 outline-none transition-all"
+            className="w-full bg-[#111b21] border border-gray-800 rounded-xl pl-9 pr-3.5 py-2 text-xs sm:text-sm focus:ring-1 ring-[#25D366]/50 outline-none transition-all text-white placeholder-gray-500"
           />
         </div>
         <button 
           onClick={() => setIsAdding(true)}
-          className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-green-500/10"
+          className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-green-500/10 cursor-pointer shrink-0"
         >
-          <Plus size={18} />
-          Add Media
+          <Plus size={16} />
+          <span>Add Media</span>
         </button>
       </div>
 
       {isAdding && (
-        <div className="bg-[#111b21] rounded-2xl border border-[#25D366]/30 p-8 shadow-2xl animate-in fade-in slide-in-from-top-4">
-          <h3 className="text-lg font-bold text-white mb-6 flex items-center gap-3">
-            <LinkIcon size={20} className="text-[#25D366]" />
+        <div className="bg-[#111b21] rounded-2xl border border-[#25D366]/30 p-4 sm:p-6 shadow-2xl animate-in fade-in slide-in-from-top-4 space-y-4">
+          <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+            <LinkIcon size={18} className="text-[#25D366]" />
             Register or Upload Media Asset
           </h3>
           
-          <div className="mb-8 p-6 bg-[#0b141a] rounded-2xl border border-dashed border-gray-700 flex flex-col items-center justify-center space-y-4">
+          <div className="p-4 sm:p-6 bg-[#0b141a] rounded-xl border border-dashed border-gray-700 flex flex-col items-center justify-center space-y-3">
              <input 
                 type="file" 
                 ref={fileInputRef} 
@@ -187,38 +189,38 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
                 className="hidden" 
                 accept="image/*,video/*,application/pdf"
              />
-             <div className="w-12 h-12 bg-[#25D366]/10 rounded-full flex items-center justify-center text-[#25D366]">
-                {isUploading ? <Loader2 className="animate-spin" size={24} /> : <Upload size={24} />}
+             <div className="w-10 h-10 bg-[#25D366]/10 rounded-full flex items-center justify-center text-[#25D366]">
+                {isUploading ? <Loader2 className="animate-spin" size={20} /> : <Upload size={20} />}
              </div>
              <div className="text-center">
                 <button 
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isUploading}
-                  className="text-[#25D366] font-bold hover:underline"
+                  className="text-[#25D366] text-xs sm:text-sm font-bold hover:underline cursor-pointer"
                 >
-                  {isUploading ? 'Processing large file...' : 'Choose a file to upload'}
+                  {isUploading ? 'Processing file...' : 'Choose a file to upload'}
                 </button>
-                <p className="text-[10px] text-gray-500 uppercase mt-1">Images, Videos, or PDFs up to 100MB</p>
+                <p className="text-[10px] text-gray-500 uppercase mt-0.5">Images, Videos, or PDFs up to 100MB</p>
              </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Asset Name</label>
+              <label className="block text-[11px] sm:text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Asset Name</label>
               <input 
                 type="text"
                 value={formData.name}
                 onChange={(e) => setFormData(p => ({ ...p, name: e.target.value }))}
-                placeholder="e.g. Product Catalog Image"
-                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-2.5 text-white outline-none focus:ring-1 ring-[#25D366]/30"
+                placeholder="e.g. Product Catalog"
+                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none focus:ring-1 ring-[#25D366]/30"
               />
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Media Type</label>
+              <label className="block text-[11px] sm:text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Media Type</label>
               <select 
                 value={formData.type}
                 onChange={(e) => setFormData(p => ({ ...p, type: e.target.value as any }))}
-                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-2.5 text-white outline-none"
+                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none"
               >
                 <option value="image">Image</option>
                 <option value="video">Video</option>
@@ -226,22 +228,22 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
               </select>
             </div>
             <div>
-              <label className="block text-xs font-black text-gray-500 uppercase tracking-widest mb-2">Direct URL (or result of upload)</label>
+              <label className="block text-[11px] sm:text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Direct URL</label>
               <input 
                 type="text"
                 value={formData.url}
                 onChange={(e) => setFormData(p => ({ ...p, url: e.target.value }))}
                 placeholder="https://example.com/file.jpg"
-                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-4 py-2.5 text-white outline-none focus:ring-1 ring-[#25D366]/30"
+                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none focus:ring-1 ring-[#25D366]/30"
               />
             </div>
           </div>
-          <div className="flex justify-end gap-3 mt-8">
-            <button onClick={() => { setIsAdding(false); setFormData({name:'', url:'', type:'image'}); }} className="px-4 py-2 md:px-6 md:py-2.5 text-gray-400 hover:text-white font-bold transition-all">Cancel</button>
+          <div className="flex justify-end gap-2.5 pt-2">
+            <button onClick={() => { setIsAdding(false); setFormData({name:'', url:'', type:'image'}); }} className="px-4 py-2 text-gray-400 hover:text-white font-bold text-xs sm:text-sm transition-all cursor-pointer">Cancel</button>
             <button 
               onClick={handleAddAsset} 
               disabled={isUploading}
-              className="bg-[#25D366] text-[#0b141a] px-8 py-2.5 rounded-xl font-black uppercase tracking-widest shadow-lg shadow-green-500/10 transition-all active:scale-95 disabled:opacity-50"
+              className="bg-[#25D366] text-[#0b141a] px-5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md shadow-green-500/10 transition-all cursor-pointer disabled:opacity-50"
             >
               Save to Library
             </button>
@@ -249,48 +251,50 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4">
         {filteredAssets.length === 0 ? (
-          <div className="col-span-full py-20 text-center bg-[#111b21] rounded-2xl border border-dashed border-gray-800">
-            <ImageIcon size={48} className="mx-auto text-gray-700 mb-4" />
-            <p className="text-gray-500 font-medium">Your media library is empty.</p>
+          <div className="col-span-full py-12 text-center bg-[#111b21] rounded-2xl border border-dashed border-gray-800">
+            <ImageIcon size={36} className="mx-auto text-gray-600 mb-2" />
+            <p className="text-xs sm:text-sm text-gray-400 font-medium">Your media library is empty.</p>
           </div>
         ) : (
           filteredAssets.map(asset => (
-            <div key={asset.id} className="bg-[#111b21] rounded-2xl border border-gray-800 overflow-hidden hover:border-gray-600 transition-all flex flex-col group shadow-xl h-full">
-              <div className="aspect-video bg-black/40 relative overflow-hidden flex items-center justify-center border-b border-gray-800">
+            <div key={asset.id} className="bg-[#111b21] rounded-xl sm:rounded-2xl border border-gray-800/80 overflow-hidden hover:border-gray-600 transition-all flex flex-col group shadow-md h-full">
+              <div className="aspect-video bg-black/40 relative overflow-hidden flex items-center justify-center border-b border-gray-800/80">
                 {asset.type === 'image' ? (
-                  <img src={asset.url} alt={asset.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                  <img src={asset.url} alt={asset.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
                 ) : asset.type === 'video' ? (
-                  <Video size={48} className="text-blue-500/30" />
+                  <Video size={32} className="text-blue-500/50" />
                 ) : (
-                  <FileText size={48} className="text-gray-500/30" />
+                  <FileText size={32} className="text-gray-400/50" />
                 )}
-                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4">
-                  <a href={asset.url} target="_blank" rel="noopener noreferrer" className="p-3 bg-white/10 hover:bg-white/20 rounded-full text-white backdrop-blur-md transition-all">
-                    <ExternalLink size={20} />
+                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                  <a href={asset.url} target="_blank" rel="noopener noreferrer" className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white backdrop-blur-md transition-all" title="View Full">
+                    <ExternalLink size={14} />
                   </a>
-                  <button onClick={() => handleDeleteAsset(asset.id)} className="p-3 bg-red-500/20 hover:bg-red-500/40 rounded-full text-red-500 backdrop-blur-md transition-all">
-                    <Trash2 size={20} />
+                  <button onClick={() => handleDeleteAsset(asset.id)} className="p-2 bg-red-500/20 hover:bg-red-500/40 rounded-full text-red-500 backdrop-blur-md transition-all cursor-pointer" title="Delete">
+                    <Trash2 size={14} />
                   </button>
                 </div>
               </div>
-              <div className="p-4 space-y-2">
-                <div className="flex items-center gap-2">
-                   {asset.type === 'image' ? <ImageIcon size={14} className="text-[#25D366]" /> : asset.type === 'video' ? <Video size={14} className="text-blue-400" /> : <FileText size={14} className="text-yellow-400" />}
-                   <h4 className="font-bold text-white text-sm truncate">{asset.name}</h4>
+              <div className="p-2.5 sm:p-3 space-y-1.5 flex-1 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center gap-1.5 mb-1">
+                     {asset.type === 'image' ? <ImageIcon size={12} className="text-[#25D366] shrink-0" /> : asset.type === 'video' ? <Video size={12} className="text-blue-400 shrink-0" /> : <FileText size={12} className="text-yellow-400 shrink-0" />}
+                     <h4 className="font-bold text-white text-xs truncate" title={asset.name}>{asset.name}</h4>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold tracking-wider text-gray-500">
+                     <span>{asset.type}</span>
+                     <span className="font-mono text-[9px]">{asset.createdAt ? (() => {
+                       const dateStr = String(asset.createdAt).trim();
+                       const isoDate = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T');
+                       const utcDateStr = isoDate.endsWith('Z') ? isoDate : isoDate + 'Z';
+                       return new Date(utcDateStr).toLocaleDateString();
+                     })() : 'N/A'}</span>
+                  </div>
                 </div>
-                <div className="flex items-center justify-between text-[10px] uppercase font-black tracking-widest text-gray-500">
-                   <span>{asset.type}</span>
-                   <span className="font-mono">{asset.createdAt ? (() => {
-                     const dateStr = String(asset.createdAt).trim();
-                     const isoDate = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T');
-                     const utcDateStr = isoDate.endsWith('Z') ? isoDate : isoDate + 'Z';
-                     return new Date(utcDateStr).toLocaleDateString();
-                   })() : 'N/A'}</span>
-                </div>
-                <div className="pt-2">
-                  <code className="block text-[10px] text-gray-600 truncate bg-black/20 p-1.5 rounded-lg border border-gray-800/50">
+                <div className="pt-1">
+                  <code className="block text-[9px] sm:text-[10px] text-gray-400 truncate bg-black/30 p-1 sm:p-1.5 rounded-md border border-gray-800/60 font-mono" title={asset.url}>
                     {asset.url}
                   </code>
                 </div>

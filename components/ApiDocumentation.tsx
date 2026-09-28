@@ -26,111 +26,92 @@ const ApiDocumentation: React.FC<ApiDocumentationProps> = ({ instances, currentU
   };
 
   const downloadFullDoc = () => {
-    const docContent = `# iFastX WA Gateway API Documentation v2.0
+    const docContent = `# iFastX WA Gateway API Documentation v3.4
 
 ## Production Base URL
 \`${apiBase}\`
 
 ## Authentication
-All API requests must include your private API Key.
+All API requests must include your private API Key or Instance Key.
 
 ### Header Authentication (Recommended)
 \`X-API-Key: ${currentUser.apiKey}\`
+or
+\`X-Instance-Key: ${selectedInstanceId}\`
 
 ### Query Parameter Authentication
-\`?access_token=${currentUser.apiKey}\`
+\`?access_token=${currentUser.apiKey}\` or \`?instance_key=${selectedInstanceId}\`
 
-## 1. Instance Management
+## 1. Meta API Cloud Integration Setup (v3.4)
+
+To send messages using Meta Cloud API instances via external software, CRMs, or custom applications:
+
+### Creating a Meta Instance via API
+**POST** \`/api/instances/meta\`
+**Body:**
+\`\`\`json
+{
+  "name": "Meta_Cloud_Instance_1",
+  "metaAccessToken": "EAAxxx...",
+  "metaPhoneNumberId": "100654321098765",
+  "metaWabaId": "200987654321098"
+}
+\`\`\`
+
+### Parameter Alias Guide for Third-Party CRMs & Software
+Our API v3.4 automatically accepts all standard third-party parameter names:
+- **Instance Identifier**: \`instance_key\`, \`instanceId\`, \`instance_id\`, \`insta_id\`, \`instaId\`, \`id\`, or \`meta_phone_number_id\`
+- **Recipient Number**: \`number\`, \`phone\`, \`to\`, \`recipient\`, \`mobile\`
+- **Message Content**: \`message\`, \`text\`, \`body\`, \`caption\`, \`msg\`
+- **API Key**: \`X-API-Key\` header, \`X-Instance-Key\` header, or \`access_token\` / \`api_key\` parameter
+
+### POST /api/send (Meta Text Message)
+**Body:**
+\`\`\`json
+{
+  "instance_key": "${selectedInstanceId}",
+  "number": "919876543210",
+  "message": "Hello from Meta Cloud API Gateway v3.4!"
+}
+\`\`\`
+
+### POST /api/send-template (Meta HSM Approved Template)
+**Body:**
+\`\`\`json
+{
+  "instance_key": "${selectedInstanceId}",
+  "number": "919876543210",
+  "templateName": "order_confirmation",
+  "templateLanguage": "en",
+  "templateVariables": ["John", "ORD-99823"]
+}
+\`\`\`
+
+## 2. Instance Management
 
 ### GET /api/instances
-Retrieve a list of all your active and pending WhatsApp instances.
+Retrieve a list of all active Baileys & Meta instances.
 
 ### POST /api/create
-Provision a new WhatsApp instance.
-**Body:**
-\`\`\`json
-{ "name": "Marketing_Channel_1" }
-\`\`\`
+Provision a new Baileys WhatsApp instance.
 
 ### DELETE /api/instance/{instanceId}
-Permanently delete an instance and wipe session data.
+Permanently delete an instance.
 
-## 2. Unified Messaging
+## 3. Webhooks & Callbacks
 
-### POST /api/send (Standard Text)
-**Body:**
-\`\`\`json
-{
-  "instanceId": "${selectedInstanceId}",
-  "number": "919876543210",
-  "message": "Hello world! This is a secure REST API message."
-}
-\`\`\`
-
-### POST /api/send (Media Message)
-**Body:**
-\`\`\`json
-{
-  "instanceId": "${selectedInstanceId}",
-  "number": "919876543210",
-  "message": "Look at this presentation!",
-  "mediaUrl": "https://example.com/assets/report.pdf",
-  "mediaType": "document"
-}
-\`\`\`
-
-### POST /api/send (Interactive Buttons)
-**Body:**
-\`\`\`json
-{
-  "instanceId": "${selectedInstanceId}",
-  "number": "919876543210",
-  "message": "Choose your next action:",
-  "buttons": [
-    { "type": "url", "displayText": "Visit Website", "url": "https://ifastx.in" },
-    { "type": "call", "displayText": "Support Team", "phoneNumber": "910000000000" },
-    { "type": "reply", "displayText": "Schedule Demo", "id": "demo_req_01" }
-  ],
-  "options": { "header": "Enterprise Solutions", "footer": "Verified Gateway", "simulateTyping": true }
-}
-\`\`\`
-
-## 3. CRM & Contacts
-
-### GET /api/contacts/groups
-List all contact groups associated with your profile.
-
-### POST /api/check-number
-Verify if a number exists on WhatsApp before sending.
-**Body:**
-\`\`\`json
-{ "instanceId": "${selectedInstanceId}", "number": "919876543210" }
-\`\`\`
-
-## 4. Webhooks
-
-### Inbound Message Payload
-\`\`\`json
-{
-  "event": "message.received",
-  "instanceId": "${selectedInstanceId}",
-  "data": {
-    "from": "919876543210@s.whatsapp.net",
-    "pushName": "John Smith",
-    "text": "How much for the yearly plan?",
-    "timestamp": ${Math.floor(Date.now() / 1000)}
-  }
-}
-\`\`\`
+### Meta Webhook URL
+\`${apiBase}/api/meta/webhook\`
+Verify Token: \`ifastx_meta_verify_2024\`
 
 ---
-© 2025 iFastX Technologies Pvt Ltd. All rights reserved.`;
+© 2026 iFastX Technologies Pvt Ltd. All rights reserved.`;
 
     const blob = new Blob([docContent], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'iFastX_API_Documentation_v2.md';
+    a.download = 'iFastX_API_Documentation_v3.4.md';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -345,28 +326,90 @@ Verify if a number exists on WhatsApp before sending.
     },
     {
       id: 'meta-api',
-      title: 'Meta API Integration',
+      title: 'Meta Cloud API Guide (v3.4)',
       icon: <Layers size={20} className="text-pink-400" />,
       content: (
-        <div className="space-y-6">
-          <p className="text-gray-400 text-sm">
-            For Meta instances, you can configure your own Meta App webhook to connect your applications directly to our gateway.
-          </p>
-          <div className="space-y-4">
-            <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl">
-              <h4 className="text-xs font-black text-white uppercase mb-4 flex items-center gap-2">
-                <Globe size={14} className="text-pink-400" />
-                Meta Webhook URL
-              </h4>
-              <p className="text-xs text-gray-400 mb-3">Set this URL in your Meta App Dashboard under Webhooks (WhatsApp Business Account):</p>
-              <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-gray-800">
-                <code className="text-pink-400 text-[11px] font-mono truncate">{apiBase}/api/meta/webhook</code>
-                <button onClick={() => handleCopy(`${apiBase}/api/meta/webhook`, 'meta-webhook')} className="text-gray-500 hover:text-white transition-colors shrink-0">
-                  {copied === 'meta-webhook' ? <Check size={14} className="text-pink-400" /> : <Copy size={14} />}
-                </button>
+        <div className="space-y-8">
+          <div className="p-4 bg-pink-500/10 border border-pink-500/20 rounded-2xl">
+            <h3 className="text-sm font-black text-pink-400 uppercase tracking-wide mb-1">Meta Instance Setup & Third-Party CRM Integration</h3>
+            <p className="text-xs text-gray-300 leading-relaxed">
+              Connect your Meta WhatsApp Business Cloud API account directly. In v3.4, you can pass your <code className="text-pink-400">instance_key</code>, <code className="text-pink-400">insta_id</code>, or <code className="text-pink-400">meta_phone_number_id</code> interchangeably with any external CRM or messaging software.
+            </p>
+          </div>
+
+          {/* Parameter Mapping Guide */}
+          <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl space-y-3">
+            <h4 className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-2">
+              <Zap size={14} className="text-pink-400" />
+              CRM & Third-Party Parameter Compatibility Matrix
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="bg-black/40 p-3 rounded-xl border border-gray-800">
+                <span className="text-[10px] text-gray-500 font-bold block uppercase">Instance Field</span>
+                <code className="text-pink-400 font-mono text-[11px]">instance_key, instanceId, insta_id, instance</code>
               </div>
-              <p className="text-[10px] text-gray-500 mt-3">Verify Token: <strong>ifastx_meta_verify_2024</strong> (or any value)</p>
+              <div className="bg-black/40 p-3 rounded-xl border border-gray-800">
+                <span className="text-[10px] text-gray-500 font-bold block uppercase">Phone Number Field</span>
+                <code className="text-[#25D366] font-mono text-[11px]">number, phone, to, recipient, mobile</code>
+              </div>
+              <div className="bg-black/40 p-3 rounded-xl border border-gray-800">
+                <span className="text-[10px] text-gray-500 font-bold block uppercase">Text Field</span>
+                <code className="text-blue-400 font-mono text-[11px]">message, text, body, caption, msg</code>
+              </div>
             </div>
+          </div>
+
+          <EndpointInfo 
+            method="GET" 
+            path="/api/templates" 
+            description="Automated Meta Template Fetching API (WHATSAPP_GET_TEMPLATES for RADIUS CRM)"
+            body={null}
+            apiBase={apiBase}
+            apiKey={currentUser.apiKey}
+          />
+
+          <EndpointInfo 
+            method="POST" 
+            path="/api/send" 
+            description="Send Meta Cloud API Message (Accepts instance_key / insta_id)"
+            body={{
+              instance_key: displayInstanceId,
+              number: "919876543210",
+              message: "Hello from Meta API Instance v3.4!"
+            }}
+            apiBase={apiBase}
+            apiKey={currentUser.apiKey}
+          />
+
+          <EndpointInfo 
+            method="POST" 
+            path="/api/send-template" 
+            description="Send Meta Approved HSM Template Message"
+            body={{
+              instance_key: displayInstanceId,
+              number: "919876543210",
+              templateName: "order_status_update",
+              templateLanguage: "en",
+              templateVariables: ["Order #1234", "Shipped"]
+            }}
+            apiBase={apiBase}
+            apiKey={currentUser.apiKey}
+          />
+
+          {/* Webhook */}
+          <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl">
+            <h4 className="text-xs font-black text-white uppercase mb-4 flex items-center gap-2">
+              <Globe size={14} className="text-pink-400" />
+              Meta App Webhook Callback URL
+            </h4>
+            <p className="text-xs text-gray-400 mb-3">Configure this in Meta Developer Dashboard under WhatsApp Webhooks:</p>
+            <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-gray-800">
+              <code className="text-pink-400 text-[11px] font-mono truncate">{apiBase}/api/meta/webhook</code>
+              <button onClick={() => handleCopy(`${apiBase}/api/meta/webhook`, 'meta-webhook')} className="text-gray-500 hover:text-white transition-colors shrink-0">
+                {copied === 'meta-webhook' ? <Check size={14} className="text-pink-400" /> : <Copy size={14} />}
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-500 mt-3">Verify Token: <strong>ifastx_meta_verify_2024</strong></p>
           </div>
         </div>
       )
@@ -387,7 +430,7 @@ Verify if a number exists on WhatsApp before sending.
               <Code2 size={24} />
             </div>
             <div>
-              <h1 className="text-xl font-black text-white tracking-tight">API Reference <span className="text-[#25D366]">v2.0</span></h1>
+              <h1 className="text-xl font-black text-white tracking-tight">API Reference <span className="text-[#25D366]">v3.4</span></h1>
               <div className="flex items-center gap-2 mt-1">
                 <span className="w-2 h-2 bg-[#25D366] rounded-full animate-pulse" />
                 <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest">Gateway Production Environment</span>

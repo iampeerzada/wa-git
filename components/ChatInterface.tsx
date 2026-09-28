@@ -1,8 +1,74 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft } from 'lucide-react';
+import { Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye } from 'lucide-react';
 import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel } from '../types';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
+
+const DEFAULT_META_TEMPLATES: Record<string, {
+  name: string;
+  header?: string;
+  body: string;
+  footer?: string;
+  category?: string;
+  buttons?: Array<{ type?: string; text: string; url?: string; phone_number?: string }>;
+}> = {
+  customer_order_placed: {
+    name: 'customer_order_placed',
+    header: 'Order Placed',
+    body: 'Hi, your order has been successfully placed! We will notify you once it has been dispatched.',
+    footer: 'iFastX Order Services',
+    category: 'UTILITY'
+  },
+  customer_shipment_dispatched: {
+    name: 'customer_shipment_dispatched',
+    header: 'Shipment Dispatched',
+    body: 'Hi, your shipment has been dispatched via courier partner. Track your package for live delivery updates.',
+    footer: 'iFastX Delivery Updates',
+    category: 'UTILITY'
+  },
+  customer_delivery_update: {
+    name: 'customer_delivery_update',
+    header: 'Delivery Update',
+    body: 'Hello, your package is out for delivery today. Please ensure someone is available at the delivery address.',
+    footer: 'iFastX Logistics',
+    category: 'UTILITY'
+  },
+  payment_reminder: {
+    name: 'payment_reminder',
+    header: 'Payment Reminder',
+    body: 'Dear customer, your subscription payment is due. Please recharge to avoid disconnection.',
+    footer: 'ISP Billing Services',
+    category: 'UTILITY'
+  },
+  invoice_alert: {
+    name: 'invoice_alert',
+    header: 'Invoice Generated',
+    body: 'Hello, your invoice has been generated for your account. Please review your billing statement.',
+    footer: 'Billing Department',
+    category: 'UTILITY'
+  },
+  recharge_successful: {
+    name: 'recharge_successful',
+    header: 'Recharge Successful',
+    body: 'Dear customer, your account has been successfully recharged with your chosen plan.',
+    footer: 'Enjoy our services!',
+    category: 'UTILITY'
+  },
+  ticket_created: {
+    name: 'ticket_created',
+    header: 'Support Ticket Registered',
+    body: 'Dear customer, your support ticket has been registered. Our technician will resolve it shortly.',
+    footer: 'Helpdesk Support',
+    category: 'UTILITY'
+  },
+  account_expiry_notice: {
+    name: 'account_expiry_notice',
+    header: 'Service Expiry Alert',
+    body: 'Hi, your internet plan expires today. Renew now to stay connected.',
+    footer: 'Customer Care',
+    category: 'UTILITY'
+  }
+};
 
 interface ChatInterfaceProps {
   instances: WhatsAppInstance[];
@@ -26,6 +92,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [presenceStatus, setPresenceStatus] = useState<Record<string, string>>({});
   const [showTemplates, setShowTemplates] = useState(false);
   const [templates, setTemplates] = useState<any[]>([]); // Using any for simplicity, or import MessageTemplate
+  const [metaTemplatesMap, setMetaTemplatesMap] = useState<Record<string, any>>({});
+  const [selectedPreviewTemplate, setSelectedPreviewTemplate] = useState<{
+    name: string;
+    header?: string;
+    body: string;
+    footer?: string;
+    category?: string;
+    buttons?: any[];
+  } | null>(null);
+  const [copiedTemplateText, setCopiedTemplateText] = useState(false);
   
   // Label State
   const [labels, setLabels] = useState<ChatLabel[]>([]);
@@ -39,6 +115,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const socketRef = useRef<Socket | null>(null);
   const selectedInstanceIdRef = useRef(selectedInstanceId);
   const selectedSessionRef = useRef(selectedSession);
+  const currentActiveJidRef = useRef<string | null>(null);
   
   useEffect(() => { selectedInstanceIdRef.current = selectedInstanceId; }, [selectedInstanceId]);
   useEffect(() => { selectedSessionRef.current = selectedSession; }, [selectedSession]);
@@ -46,6 +123,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSelectSession = async (session: ChatSession) => {
+    if (selectedSession?.remoteJid === session.remoteJid) return;
+    currentActiveJidRef.current = session.remoteJid;
+    setMessages([]); // Instantly clear previous contact's chat to prevent ghost cache!
     setSelectedSession(session);
     if (session.unreadCount > 0) {
       try {
@@ -141,9 +221,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       const currentSession = selectedSessionRef.current;
       
       if (msg.instanceId === currentInstanceId) {
+        const matchesCurrent = currentSession && (
+          msg.remoteJid === currentSession.remoteJid ||
+          msg.remoteJid.replace(/\D/g, '') === currentSession.remoteJid.replace(/\D/g, '')
+        );
+
         // Update messages if this is the active chat
-        if (currentSession && msg.remoteJid === currentSession.remoteJid) {
-          setMessages(prev => [...prev, msg]);
+        if (matchesCurrent) {
+          setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
           if (!msg.fromMe) {
             fetch(`${apiBase}/api/chat/messages/${currentInstanceId}/${currentSession.remoteJid}/read`, {
               method: 'POST',
@@ -154,11 +239,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         
         // Update sessions list
         setSessions(prev => {
-          const existing = prev.find(s => s.remoteJid === msg.remoteJid);
+          const existing = prev.find(s => s.remoteJid === msg.remoteJid || s.remoteJid.replace(/\D/g, '') === msg.remoteJid.replace(/\D/g, ''));
           if (existing) {
             return [
-              { ...existing, lastMessage: msg, unreadCount: (currentSession?.remoteJid === msg.remoteJid) ? 0 : (existing.unreadCount || 0) + 1 },
-              ...prev.filter(s => s.remoteJid !== msg.remoteJid)
+              { ...existing, lastMessage: msg, unreadCount: matchesCurrent ? 0 : (existing.unreadCount || 0) + 1 },
+              ...prev.filter(s => s.remoteJid !== existing.remoteJid)
             ];
           } else {
             return [{ remoteJid: msg.remoteJid, lastMessage: msg, unreadCount: 1 }, ...prev];
@@ -167,8 +252,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       }
     });
 
-    socket.on('message_status', (data: { msgId: string, status: 'sent' | 'delivered' | 'read', remoteJid: string }) => {
-        setMessages(prev => prev.map(m => m.id === data.msgId ? { ...m, status: data.status } : m));
+    socket.on('message_status', (data: { id?: string, msgId?: string, status: 'sent' | 'delivered' | 'read' | 'failed', remoteJid?: string }) => {
+        const targetId = data.msgId || data.id;
+        if (targetId) {
+          setMessages(prev => prev.map(m => m.id === targetId ? { ...m, status: data.status } : m));
+          setSessions(prev => prev.map(s => {
+            if (s.lastMessage && s.lastMessage.id === targetId) {
+              return { ...s, lastMessage: { ...s.lastMessage, status: data.status } };
+            }
+            return s;
+          }));
+        }
     });
 
     socket.on('presence_update', (data: { instanceId: string, remoteJid: string, userJid: string, status: string }) => {
@@ -202,6 +296,57 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       if (saved) setTemplates(JSON.parse(saved));
   }, [currentUser.id]);
 
+  // Fetch Meta Cloud Templates for the current instance/user to resolve sent template messages
+  useEffect(() => {
+    if (!selectedInstanceId) return;
+    const fetchMetaTemplates = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstanceId}`, {
+          headers: {
+            'X-User-ID': currentUser.id,
+            'X-API-Key': currentUser.apiKey
+          }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const list = Array.isArray(data) ? data : (data?.templates || data?.data || []);
+          const map: Record<string, any> = {};
+          list.forEach((t: any) => {
+            if (t.name) {
+              const lower = t.name.toLowerCase().trim();
+              let bodyText = t.body || '';
+              let headerText = '';
+              let footerText = '';
+              let buttons: any[] = [];
+
+              if (Array.isArray(t.components)) {
+                t.components.forEach((c: any) => {
+                  if (c.type === 'BODY' && c.text) bodyText = c.text;
+                  if (c.type === 'HEADER' && c.text) headerText = c.text;
+                  if (c.type === 'FOOTER' && c.text) footerText = c.text;
+                  if (c.type === 'BUTTONS' && Array.isArray(c.buttons)) buttons = c.buttons;
+                });
+              }
+              map[lower] = {
+                name: t.name,
+                language: t.language || 'en',
+                header: headerText,
+                body: bodyText,
+                footer: footerText,
+                buttons,
+                category: t.category
+              };
+            }
+          });
+          setMetaTemplatesMap(map);
+        }
+      } catch (err) {
+        // Silently continue
+      }
+    };
+    fetchMetaTemplates();
+  }, [selectedInstanceId, apiBase, currentUser.id, currentUser.apiKey]);
+
   // Fetch sessions
   useEffect(() => {
     if (!selectedInstanceId) return;
@@ -218,10 +363,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           const data = await res.json();
           setSessions(data);
           
-          // Fetch profile info for each session
-          data.forEach((session: ChatSession) => {
-             fetchProfileInfo(session.remoteJid);
+          // Pre-populate profile cache from contact/push names in session data without N+1 HTTP spam
+          const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
+          data.forEach((session: any) => {
+            if (session.contactName || session.pushName) {
+              initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
+            }
           });
+          if (Object.keys(initialProfiles).length > 0) {
+            setProfileCache(prev => ({ ...initialProfiles, ...prev }));
+          }
         }
       } catch (err) {
         console.error('Failed to fetch sessions', err);
@@ -229,7 +380,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     };
 
     fetchSessions();
-  }, [selectedInstanceId, currentUser, apiBase]);
+  }, [selectedInstanceId, currentUser.id, currentUser.apiKey, apiBase]);
 
   const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
 
@@ -245,26 +396,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           });
           if (res.ok) {
               const data = await res.json();
-              setProfileCache(prev => ({ ...prev, [jid]: data }));
+              if (data?.name || data?.imgUrl) {
+                setProfileCache(prev => ({ ...prev, [jid]: data }));
+              }
           }
       } catch (e) {
           // Ignore errors
       }
   };
 
-  // Fetch messages for selected session
+  // Fetch messages for selected session with abort controller & cache-bleed protection
   useEffect(() => {
-    if (!selectedInstanceId || !selectedSession) {
+    if (!selectedInstanceId || !selectedSession?.remoteJid) {
       setMessages([]);
       return;
     }
     
-    fetchProfileInfo(selectedSession.remoteJid);
+    const targetJid = selectedSession.remoteJid;
+    currentActiveJidRef.current = targetJid;
+    setMessages([]); // Instantly flush previous user's chat messages
+
+    fetchProfileInfo(targetJid);
+
+    const abortController = new AbortController();
 
     const fetchMessages = async () => {
       setIsLoading(true);
       try {
-        const res = await fetch(`${apiBase}/api/chat/messages/${selectedInstanceId}/${selectedSession.remoteJid}`, {
+        const res = await fetch(`${apiBase}/api/chat/messages/${selectedInstanceId}/${targetJid}`, {
+          signal: abortController.signal,
           headers: {
             'X-User-ID': currentUser.id,
             'X-API-Key': currentUser.apiKey
@@ -272,17 +432,28 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         });
         if (res.ok) {
           const data = await res.json();
-          setMessages(data);
+          // Ensure we don't display stale response if user switched to another contact
+          if (currentActiveJidRef.current === targetJid) {
+            setMessages(data);
+          }
         }
-      } catch (err) {
-        console.error('Failed to fetch messages', err);
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.error('Failed to fetch messages', err);
+        }
       } finally {
-        setIsLoading(false);
+        if (currentActiveJidRef.current === targetJid) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchMessages();
-  }, [selectedInstanceId, selectedSession, currentUser, apiBase]);
+
+    return () => {
+      abortController.abort();
+    };
+  }, [selectedInstanceId, selectedSession?.remoteJid, currentUser.id, currentUser.apiKey, apiBase]);
 
   const handleEmojiClick = (emojiData: EmojiClickData) => {
     setNewMessage(prev => prev + emojiData.emoji);
@@ -575,8 +746,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-400 truncate mt-0.5">
-                    {session.lastMessage?.text || 'No messages'}
+                  <p className="text-xs text-gray-400 truncate mt-0.5 flex items-center gap-1">
+                    {session.lastMessage?.fromMe && (
+                      session.lastMessage.status === 'read' ? (
+                        <CheckCheck size={13} className="text-[#53bdeb] shrink-0" />
+                      ) : session.lastMessage.status === 'delivered' ? (
+                        <CheckCheck size={13} className="text-gray-300 shrink-0" />
+                      ) : (
+                        <Check size={13} className="text-gray-300 shrink-0" />
+                      )
+                    )}
+                    <span className="truncate">{session.lastMessage?.text || 'No messages'}</span>
                   </p>
                   
                   {/* Labels Display */}
@@ -738,8 +918,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
                           {msg.mediaUrl && (
                               <div className="mb-1">
-                                  {msg.mediaType === 'image' ? (
-                                      <img src={msg.mediaUrl} alt="Media" className="rounded-lg max-w-full max-h-[300px] object-cover" />
+                                  {(msg.mediaType === 'image' || (!msg.mediaType && (msg.mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || msg.mediaUrl.includes('image') || msg.mediaUrl.includes('/media/')))) ? (
+                                      <img 
+                                        src={msg.mediaUrl} 
+                                        alt="Media" 
+                                        className="rounded-lg max-w-full max-h-[320px] object-cover cursor-pointer hover:opacity-95 transition-opacity" 
+                                        onClick={() => window.open(msg.mediaUrl, '_blank')}
+                                      />
                                   ) : (msg.mediaType === 'video' || msg.mediaType === 'gif') ? (
                                       <video 
                                           src={msg.mediaUrl} 
@@ -748,29 +933,127 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                           loop={msg.mediaType === 'gif'} 
                                           muted={msg.mediaType === 'gif'} 
                                           playsInline 
-                                          className="rounded-lg max-w-full max-h-[300px]" 
+                                          className="rounded-lg max-w-full max-h-[320px]" 
                                       />
+                                  ) : msg.mediaType === 'audio' ? (
+                                      <audio src={msg.mediaUrl} controls className="w-full min-w-[200px] my-1" />
                                   ) : (
-                                      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 bg-black/20 p-3 rounded-lg text-blue-400 hover:underline border border-white/5">
+                                      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 bg-black/20 p-2.5 rounded-lg text-blue-400 hover:underline border border-white/5 text-xs">
                                           <Paperclip size={16} />
-                                          <span>View Document</span>
+                                          <span className="truncate">View Document / Attachment</span>
                                       </a>
                                   )}
                               </div>
                           )}
-                          <p className="pr-16 whitespace-pre-wrap leading-relaxed px-1 break-words">{msg.text}</p>
+
+                          {msg.text && !(msg.mediaUrl && (msg.text === '[Image]' || msg.text === '[Video]' || msg.text === '[Document]' || msg.text === '[Audio]' || msg.text === '[Sticker]')) && (
+                            (() => {
+                              const templateMatch = msg.text ? msg.text.match(/^\[Template:\s*([a-zA-Z0-9_\-]+)\]/i) : null;
+                              const templateName = templateMatch ? templateMatch[1] : msg.templateDetails?.name;
+
+                              if (templateName) {
+                                const lowerName = templateName.toLowerCase().trim();
+                                const details = msg.templateDetails || metaTemplatesMap[lowerName] || DEFAULT_META_TEMPLATES[lowerName] || {
+                                  name: templateName,
+                                  body: `[Template: ${templateName}]`
+                                };
+
+                                return (
+                                  <div className="min-w-[240px] max-w-[340px] pt-0.5 pb-4 pr-1 text-left">
+                                    {/* Meta Official Badge Header */}
+                                    <div className="flex items-center justify-between gap-1.5 pb-1.5 mb-1.5 border-b border-white/15">
+                                      <div className="flex items-center gap-1.5">
+                                        <div className="w-4 h-4 rounded-full bg-emerald-400/20 text-emerald-300 flex items-center justify-center">
+                                          <LayoutTemplate size={10} />
+                                        </div>
+                                        <span className="text-[10px] font-bold tracking-wide text-emerald-300 uppercase">
+                                          Official Meta Template
+                                        </span>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setSelectedPreviewTemplate({
+                                            name: templateName,
+                                            header: details.header,
+                                            body: details.body || `[Template: ${templateName}]`,
+                                            footer: details.footer,
+                                            buttons: details.buttons,
+                                            category: details.category
+                                          });
+                                        }}
+                                        className="text-[9px] text-gray-200 hover:text-white bg-black/40 hover:bg-black/60 px-1.5 py-0.5 rounded flex items-center gap-1 transition-colors border border-white/10"
+                                        title="View template details"
+                                      >
+                                        <Eye size={10} />
+                                        <span>View</span>
+                                      </button>
+                                    </div>
+
+                                    {/* Template Name Tag */}
+                                    <div className="text-[10px] font-mono text-emerald-200/90 mb-1 font-semibold">
+                                      #{templateName}
+                                    </div>
+
+                                    {/* Header (if any) */}
+                                    {details.header && (
+                                      <div className="text-xs font-bold text-white mb-1 tracking-tight">
+                                        {details.header}
+                                      </div>
+                                    )}
+
+                                    {/* Body (The actual message sent to customer) */}
+                                    <div className="text-xs leading-relaxed text-gray-100 whitespace-pre-wrap break-words bg-black/25 p-2 rounded-lg border border-white/10 shadow-inner">
+                                      {details.body || `[Template: ${templateName}]`}
+                                    </div>
+
+                                    {/* Footer (if any) */}
+                                    {details.footer && (
+                                      <div className="text-[10px] text-gray-300/80 mt-1.5 italic">
+                                        {details.footer}
+                                      </div>
+                                    )}
+
+                                    {/* Action / Quick Reply Buttons */}
+                                    {details.buttons && details.buttons.length > 0 && (
+                                      <div className="mt-2 pt-1.5 border-t border-white/10 space-y-1">
+                                        {details.buttons.map((btn: any, bIdx: number) => (
+                                          <div 
+                                            key={bIdx} 
+                                            className="w-full text-center py-1 px-2 rounded bg-white/10 text-[11px] font-medium text-emerald-200 border border-white/5 cursor-default"
+                                          >
+                                            {btn.text || btn.url || `Option ${bIdx + 1}`}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              }
+
+                              return (
+                                <p className="pr-16 whitespace-pre-wrap leading-relaxed px-1 break-words">{msg.text}</p>
+                              );
+                            })()
+                          )}
+
                           <div className="absolute bottom-1 right-1.5 flex items-center gap-1">
-                            <span className="text-[9px] text-gray-400 font-medium">
+                            <span className="text-[9px] text-gray-300 font-medium">
                               {formatTime(msg.timestamp)}
                             </span>
                             {msg.fromMe && (
-                              <div className="flex">
+                              <div className="flex items-center">
                                 {msg.status === 'read' ? (
-                                    <CheckCheck size={14} className="text-[#53bdeb]" />
+                                    <CheckCheck size={14} className="text-[#53bdeb]" title="Read" />
                                 ) : msg.status === 'delivered' ? (
-                                    <CheckCheck size={14} className="text-gray-400" />
+                                    <CheckCheck size={14} className="text-gray-300" title="Delivered" />
+                                ) : msg.status === 'sent' ? (
+                                    <Check size={14} className="text-gray-300" title="Sent" />
+                                ) : msg.status === 'failed' ? (
+                                    <span className="text-red-400 text-[10px] font-bold px-0.5" title="Failed to send">!</span>
                                 ) : (
-                                    <Check size={14} className="text-gray-400" />
+                                    <Check size={14} className="text-gray-400/60" title="Sending..." />
                                 )}
                               </div>
                             )}
@@ -807,10 +1090,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               {showTemplates && (
                   <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-lg shadow-xl border border-gray-700 w-64 max-h-60 overflow-y-auto">
                       <div className="p-2 border-b border-gray-700 font-medium text-gray-300 text-xs uppercase tracking-wider">Quick Templates</div>
-                      {templates.length === 0 ? (
+                      {(!Array.isArray(templates) || templates.length === 0) ? (
                           <div className="p-4 text-center text-gray-500 text-sm">No templates found</div>
                       ) : (
-                          templates.map((t: any) => (
+                          (Array.isArray(templates) ? templates : []).map((t: any) => (
                               <button 
                                   key={t.id} 
                                   type="button"
@@ -917,10 +1200,102 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           </div>
         )}
       </div>
+
+      {/* Template Detail Inspector Modal */}
+      {selectedPreviewTemplate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#202c33] border border-gray-700 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-gray-700/80 flex items-center justify-between bg-[#111b21]">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                  <LayoutTemplate size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Official Meta Template Message</h3>
+                  <p className="text-[11px] text-gray-400 font-mono">#{selectedPreviewTemplate.name}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setSelectedPreviewTemplate(null)}
+                className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+              {/* Category / Status Badges */}
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 uppercase">
+                  {selectedPreviewTemplate.category || 'UTILITY'}
+                </span>
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300">
+                  Meta Verified Template
+                </span>
+              </div>
+
+              {/* Message Preview Box */}
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                  Sent Message Content
+                </label>
+                <div className="bg-[#111b21] rounded-xl p-4 border border-gray-700/60 shadow-inner relative group">
+                  {selectedPreviewTemplate.header && (
+                    <div className="text-sm font-bold text-white mb-2 pb-1 border-b border-gray-700/50">
+                      {selectedPreviewTemplate.header}
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">
+                    {selectedPreviewTemplate.body}
+                  </p>
+                  {selectedPreviewTemplate.footer && (
+                    <div className="text-[11px] text-gray-400 mt-2.5 pt-1.5 border-t border-gray-800 italic">
+                      {selectedPreviewTemplate.footer}
+                    </div>
+                  )}
+
+                  {selectedPreviewTemplate.buttons && selectedPreviewTemplate.buttons.length > 0 && (
+                    <div className="mt-3 pt-2 border-t border-gray-800 space-y-1.5">
+                      {selectedPreviewTemplate.buttons.map((btn: any, idx: number) => (
+                        <div key={idx} className="w-full text-center py-1.5 px-3 rounded-lg bg-emerald-900/30 border border-emerald-500/20 text-xs font-medium text-emerald-300">
+                          {btn.text || btn.url || `Option ${idx + 1}`}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(selectedPreviewTemplate.body);
+                      setCopiedTemplateText(true);
+                      setTimeout(() => setCopiedTemplateText(false), 2000);
+                    }}
+                    className="absolute top-3 right-3 p-1.5 bg-[#202c33] hover:bg-gray-700 text-gray-300 hover:text-white rounded-md text-xs flex items-center gap-1 shadow transition-colors border border-gray-700"
+                    title="Copy message content"
+                  >
+                    {copiedTemplateText ? <Check size={13} className="text-[#25D366]" /> : <Copy size={13} />}
+                    <span className="text-[10px]">{copiedTemplateText ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-gray-700/80 bg-[#111b21] flex justify-end">
+              <button
+                onClick={() => setSelectedPreviewTemplate(null)}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-xl text-xs font-medium transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
 export default ChatInterface;
-
-import { MessageSquare } from 'lucide-react';

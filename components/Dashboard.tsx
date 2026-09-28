@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { WhatsAppInstance, InstanceStatus, User, UserRole, Permission } from '../types';
-import { QrCode, Trash2, Send, CheckCircle2, AlertCircle, RefreshCw, MessageSquare, Info, Zap, Smartphone, Edit3, Power, Lock, Eye, EyeOff, LayoutPanelLeft, Globe } from 'lucide-react';
+import { QrCode, Trash2, Send, CheckCircle2, AlertCircle, RefreshCw, MessageSquare, Info, Zap, Smartphone, Edit3, Power, Lock, Eye, EyeOff, LayoutPanelLeft, Globe, BadgeCheck, Plus } from 'lucide-react';
 
 interface DashboardProps {
   instances: WhatsAppInstance[];
@@ -11,6 +11,8 @@ interface DashboardProps {
   onSendTest: (id: string) => void;
   onSimulateConnect: (id: string) => void;
   onUpdateWebhook: (id: string, currentUrl?: string) => void;
+  onToggleAi?: (id: string, current: boolean) => void;
+  onCreateInstance?: () => void;
   isMockMode: boolean;
   currentUser: User;
   onToggleVisibility: (id: string, current: boolean) => void;
@@ -20,7 +22,7 @@ interface DashboardProps {
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ 
-    instances, onDelete, onRename, onReboot, onSendTest, onSimulateConnect, onUpdateWebhook, onToggleAi, isMockMode, 
+    instances, onDelete, onRename, onReboot, onSendTest, onSimulateConnect, onUpdateWebhook, onToggleAi, onCreateInstance, isMockMode, 
     currentUser, onToggleVisibility, hiddenModules, setHiddenModules, apiBase 
 }) => {
   const isSuper = currentUser.role === UserRole.SUPERADMIN;
@@ -56,12 +58,20 @@ const Dashboard: React.FC<DashboardProps> = ({
 
   if (instances.length === 0 && !isSuper) {
     return (
-      <div className="flex flex-col items-center justify-center h-[60vh] text-center">
-        <div className="w-20 h-20 bg-[#202c33] rounded-full flex items-center justify-center mb-4 text-gray-500">
+      <div className="flex flex-col items-center justify-center h-[60vh] text-center px-4">
+        <div className="w-20 h-20 bg-[#202c33] rounded-full flex items-center justify-center mb-4 text-gray-500 shadow-inner">
           <MessageSquare size={40} />
         </div>
         <h2 className="text-lg md:text-xl font-bold text-white mb-2">No API Instances Provisioned</h2>
-        <p className="text-gray-400 max-w-xs">Start your reseller business by creating your first WhatsApp Instance.</p>
+        <p className="text-gray-400 max-w-xs text-xs sm:text-sm mb-5">Start your WhatsApp automation by creating your first instance.</p>
+        {canManage && onCreateInstance && (
+          <button
+            onClick={onCreateInstance}
+            className="flex items-center gap-2 bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-5 py-2.5 rounded-xl text-sm font-black transition-all shadow-lg active:scale-95 cursor-pointer"
+          >
+            <Plus size={18} className="stroke-[3]" /> Add First Instance
+          </button>
+        )}
       </div>
     );
   }
@@ -72,27 +82,26 @@ const Dashboard: React.FC<DashboardProps> = ({
     return `https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=${encodeURIComponent(qr)}&margin=10&color=000000&bgcolor=FFFFFF`;
   };
 
-  const platformModules = [
-    { id: 'dashboard', label: 'Dashboard Tab' },
-    { id: 'chat', label: 'Direct Chat Tab' },
-    { id: 'auto-responder', label: 'Auto Responder Tab' },
-    { id: 'team', label: 'Team Access Tab' },
-    { id: 'users', label: 'Users Tab' },
-    { id: 'billing', label: 'Billing & Plans Tab' },
-    { id: 'media-library', label: 'Media Library Tab' },
-    { id: 'bulk', label: 'Bulk Sender Tab' },
-    { id: 'bulk-templates', label: 'Bulk: Templates' },
-    { id: 'bulk-media', label: 'Bulk: Media' },
-    { id: 'bulk-quick-buttons', label: 'Bulk: Temp Buttons' },
-    { id: 'contacts', label: 'Contacts Tab' },
-    { id: 'templates', label: 'Templates Tab' },
-    { id: 'api-docs', label: 'API Docs Tab' },
-    { id: 'code', label: 'Backend Code Tab' },
-    { id: 'logs', label: 'Logs Tab' }
-  ];
-
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
+      {canManage && onCreateInstance && (
+        <div className="flex items-center justify-between bg-[#111b21] p-3 sm:p-4 rounded-xl border border-gray-800 shadow-md">
+          <div className="min-w-0 pr-2">
+            <h3 className="text-xs sm:text-sm md:text-base font-bold text-white flex items-center gap-2 truncate">
+              <Smartphone size={16} className="text-[#25D366] shrink-0" />
+              WhatsApp Instances <span className="bg-[#202c33] text-gray-300 text-[10px] sm:text-xs px-2 py-0.5 rounded-full font-mono">{instances.length}</span>
+            </h3>
+            <p className="text-[11px] text-gray-400 hidden sm:block mt-0.5">Manage your active gateways and API instances</p>
+          </div>
+          <button
+            onClick={onCreateInstance}
+            className="flex items-center gap-1.5 bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] px-3 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs sm:text-sm font-black transition-all shadow cursor-pointer active:scale-95 shrink-0"
+          >
+            <Plus size={16} className="stroke-[3]" /> <span className="hidden xs:inline">Add Instance</span><span className="xs:hidden">Add</span>
+          </button>
+        </div>
+      )}
+
       {isMockMode && (
         <div className="bg-blue-500/5 border border-blue-500/20 p-5 rounded-2xl flex gap-5 items-center">
           <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center text-blue-400 shrink-0">
@@ -108,32 +117,9 @@ const Dashboard: React.FC<DashboardProps> = ({
         </div>
       )}
 
-      {isSuper && (
-        <div className="bg-[#111b21] p-6 rounded-2xl border border-yellow-500/20 shadow-xl">
-            <div className="flex items-center gap-3 mb-4">
-                <LayoutPanelLeft className="text-yellow-500" size={20} />
-                <h3 className="text-sm font-bold text-white uppercase tracking-widest">Superadmin Hide Function (Module Visibility)</h3>
-            </div>
-            <div className="flex flex-wrap gap-3">
-                {platformModules.map(mod => (
-                    <button 
-                        key={mod.id}
-                        onClick={() => toggleModule(mod.id)}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all border ${
-                            hiddenModules.includes(mod.id) 
-                                ? 'bg-red-500/10 text-red-500 border-red-500/20' 
-                                : 'bg-[#25D366]/10 text-[#25D366] border-[#25D366]/20'
-                        }`}
-                    >
-                        {hiddenModules.includes(mod.id) ? <EyeOff size={14} /> : <Eye size={14} />}
-                        {mod.label} {hiddenModules.includes(mod.id) ? '(HIDDEN)' : '(VISIBLE)'}
-                    </button>
-                ))}
-            </div>
-        </div>
-      )}
+      
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {instances.map((instance) => (
           <div 
             key={instance.id} 
@@ -149,16 +135,28 @@ const Dashboard: React.FC<DashboardProps> = ({
                 </div>
             )}
 
-            <div className="p-6 border-b border-gray-800">
-              <div className="flex justify-between items-start mb-4">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-bold text-white group-hover:text-[#25D366] transition-colors truncate">{instance.name}</h3>
-                    {canManage && <button onClick={() => onRename(instance.id)} className="text-gray-500 hover:text-white transition-all"><Edit3 size={14} /></button>}
+            <div className="p-4 border-b border-gray-800">
+              <div className="flex flex-col gap-3 mb-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h3 className="text-xl font-bold text-white group-hover:text-[#25D366] transition-colors break-words leading-tight">
+                        {instance.name}
+                    </h3>
+                    {canManage && <button onClick={() => onRename(instance.id)} className="text-gray-500 hover:text-white transition-all shrink-0"><Edit3 size={14} /></button>}
                   </div>
-                  <code className="text-[10px] text-gray-500 font-mono uppercase">ID: {instance.id} | TYPE: {instance.provider?.toUpperCase() || "BAILEYS"}</code>
+                  <div className="space-y-1">
+                      <code className="text-[10px] text-gray-500 font-mono uppercase block break-all">ID: {instance.id}</code>
+                      <code className="text-[10px] text-gray-500 font-mono uppercase flex items-center gap-1">
+                          TYPE: {instance.provider?.toUpperCase() || "BAILEYS"}
+                          {instance.provider === 'meta' ? (
+                              <BadgeCheck className="w-3.5 h-3.5 text-blue-500" />
+                          ) : (
+                              <BadgeCheck className="w-3.5 h-3.5 text-[#25D366]" />
+                          )}
+                      </code>
+                  </div>
                 </div>
-                <div className="flex gap-1">
+                <div className="flex flex-wrap gap-1 border-t border-gray-800/50 pt-3 mt-1 justify-end">
                     {isSuper && (
                         <button 
                             onClick={() => onToggleVisibility(instance.id, instance.isVisible !== false)}

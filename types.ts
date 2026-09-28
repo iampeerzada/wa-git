@@ -13,7 +13,8 @@ export enum Permission {
   MANAGE_AUTO_RESPONDER = 'manage_auto_responder',
   MANAGE_TEAM = 'manage_team',
   MANAGE_CONTACTS = 'manage_contacts',
-  MANAGE_TEMPLATES = 'manage_templates'
+  MANAGE_TEMPLATES = 'manage_templates',
+  MANAGE_VISIBILITY = 'manage_visibility'
 }
 
 export enum PlanInterval {
@@ -35,6 +36,8 @@ export interface Plan {
   assignedTo?: string; // New: Optional ID of a reseller if this is a custom plan for them
   description?: string; // New: Plan description
   icon?: string; // New: Lucide icon name string
+  allowedProviders?: 'baileys' | 'meta' | 'both';
+  metaSetupFee?: number;
 }
 
 export interface Subscription {
@@ -45,13 +48,18 @@ export interface Subscription {
   messagesSentToday: number;
   messagesSentThisMonth: number;
   messagesSentThisYear: number; // New: Tracking yearly usage
+  undeliveredToday?: number;
+  undeliveredTotal?: number;
   customMaxInstances?: number;
   customDailyLimit?: number;
+  metaSetupWaived?: boolean;
+  customMetaSetupFee?: number;
 }
 
 export interface User {
   id: string;
   username: string;
+  fullName?: string;
   email?: string;
   mobile?: string;
   password?: string; // Stored for mock auth, hidden in UI
@@ -76,6 +84,7 @@ export enum InstanceStatus {
 
 export interface WhatsAppInstance {
   id: string;
+  instanceKey?: string;
   userId: string; // Tenant Owner ID
   name: string;
   status: InstanceStatus;
@@ -156,11 +165,18 @@ export interface ChatMessage {
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'document' | 'gif';
   timestamp: string;
-  status?: 'sent' | 'delivered' | 'read';
+  status?: 'sent' | 'delivered' | 'read' | 'failed';
   quotedMsgId?: string;
   quotedMsg?: {
     text: string;
     mediaType?: string;
+  };
+  templateDetails?: {
+    name: string;
+    header?: string | null;
+    body?: string | null;
+    footer?: string | null;
+    buttons?: any[];
   };
 }
 
