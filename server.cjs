@@ -730,9 +730,29 @@ async function connectToWhatsApp(instanceId) {
 
             if (msg.message.interactiveResponseMessage?.nativeFlowResponseMessage) {
                 try {
-                    const params = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
-                    text = params.id || text;
-                } catch (e) {}
+                    const rawParams = msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson;
+                    const params = typeof rawParams === 'string' ? JSON.parse(rawParams) : rawParams;
+                    let flowSummary = '📋 [Flow Response Received]\n';
+                    if (typeof params === 'object' && params !== null) {
+                        Object.entries(params).forEach(([k, v]) => {
+                            if (k !== 'flow_token') {
+                                const cleanKey = k.replace(/screen_\d+_/i, '').replace(/_\d+$/, '').replace(/_/g, ' ');
+                                const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                                flowSummary += `• ${cleanKey}: ${valStr}\n`;
+                            }
+                        });
+                        if (params.flow_token) {
+                            flowSummary += `\n(Token: ${params.flow_token})`;
+                        }
+                        text = flowSummary.trim();
+                    } else {
+                        text = params.id || rawParams || text;
+                    }
+                    mediaType = 'flow_response';
+                } catch (e) {
+                    text = msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || text;
+                    mediaType = 'flow_response';
+                }
             }
             
             // Extract Media Content
@@ -1126,7 +1146,50 @@ app.post('/api/meta/webhook', async (req, res) => {
             let mediaType = null;
             
             if (msg.interactive) {
-                text = msg.interactive.button_reply?.title || msg.interactive.list_reply?.title || text;
+                if (msg.interactive.type === 'nfm_reply' || msg.interactive.nfm_reply) {
+                    const nfm = msg.interactive.nfm_reply || {};
+                    let parsedData = {};
+                    try {
+                        parsedData = typeof nfm.response_json === 'string' ? JSON.parse(nfm.response_json) : (nfm.response_json || {});
+                    } catch (e) {
+                        parsedData = { raw: nfm.response_json };
+                    }
+                    
+                    let flowSummary = '📋 [Flow Response Received]\n';
+                    if (nfm.body && nfm.body !== 'Sent') {
+                        flowSummary += `Flow: ${nfm.body}\n`;
+                    }
+                    if (typeof parsedData === 'object' && parsedData !== null) {
+                        const entries = Object.entries(parsedData);
+                        if (entries.length > 0) {
+                            entries.forEach(([key, val]) => {
+                                if (key !== 'flow_token') {
+                                    const cleanKey = key.replace(/screen_\d+_/i, '').replace(/_\d+$/, '').replace(/_/g, ' ');
+                                    const valStr = typeof val === 'object' ? JSON.stringify(val) : String(val);
+                                    flowSummary += `• ${cleanKey}: ${valStr}\n`;
+                                }
+                            });
+                            if (parsedData.flow_token) {
+                                flowSummary += `\n(Token: ${parsedData.flow_token})`;
+                            }
+                        } else {
+                            flowSummary += `Flow completed (${nfm.name || 'Flow'})`;
+                        }
+                    } else {
+                        flowSummary += String(nfm.response_json || nfm.body || 'Completed');
+                    }
+                    
+                    text = flowSummary.trim();
+                    mediaType = 'flow_response';
+                } else if (msg.interactive.button_reply) {
+                    text = msg.interactive.button_reply.title || msg.interactive.button_reply.id || '[Button Reply]';
+                } else if (msg.interactive.list_reply) {
+                    text = msg.interactive.list_reply.title || msg.interactive.list_reply.id || '[List Selection]';
+                } else if (msg.interactive.address_message) {
+                    text = `📍 [Address Selected]: ${JSON.stringify(msg.interactive.address_message)}`;
+                } else {
+                    text = msg.interactive.body?.text || msg.interactive.header?.text || '[Interactive Message]';
+                }
             } else if (msg.type === 'button') {
                 text = msg.button?.text || msg.button?.payload || text;
             } else if (msg.type === 'image') {
@@ -3508,10 +3571,20 @@ async function getMetaMediaObjectServer(linkUrl, instance, mType = 'image') {
             const cleanType = (mType || 'image').toLowerCase();
             if (cleanType === 'image' && !mimeType.startsWith('image/')) mimeType = 'image/jpeg';
             if (cleanType === 'video' && !mimeType.startsWith('video/')) mimeType = 'video/mp4';
-            if (cleanType === 'document' && !mimeType.includes('pdf')) mimeType = 'application/pdf';
+            if (cleanType === 'document' && !mimeType.includes('pdf')) {
+                if (!mimeType || mimeType === 'application/octet-stream') mimeType = 'application/pdf';
+            }
+            if (cleanType === 'audio' || cleanType === 'voice') {
+                if (!mimeType || !mimeType.startsWith('audio/')) {
+                    mimeType = 'audio/ogg; codecs=opus';
+                }
+            }
 
             let ext = mimeType.split('/')[1] || 'jpg';
             if (ext.includes(';')) ext = ext.split(';')[0];
+            if (cleanType === 'audio' || cleanType === 'voice') {
+                ext = ext.replace('codecs=opus', '').trim() || 'ogg';
+            }
 
             const form = new FormData();
             form.append('messaging_product', 'whatsapp');
@@ -4576,7 +4649,7 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
             return res.json([]);
         }
 
-        // 2. Fetch unread counts in a single group query
+        // 2. Fetch unread counts and last inbound timestamps in single queries
         const unreadRes = await pool.query(`
             SELECT remote_jid, COUNT(*) as count
             FROM chat_messages
@@ -4586,6 +4659,18 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
         const unreadMap = new Map();
         for (const r of unreadRes.rows) {
             unreadMap.set(r.remote_jid, parseInt(r.count, 10) || 0);
+        }
+
+        // Fetch last inbound message timestamp for Meta 24-hour customer service window
+        const inboundRes = await pool.query(`
+            SELECT remote_jid, MAX(timestamp) as last_inbound_timestamp
+            FROM chat_messages
+            WHERE instance_id = $1 AND from_me = false
+            GROUP BY remote_jid
+        `, [instanceId]);
+        const inboundMap = new Map();
+        for (const r of inboundRes.rows) {
+            inboundMap.set(r.remote_jid, r.last_inbound_timestamp);
         }
 
         // 3. Fetch labels in a single query
@@ -4601,21 +4686,43 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
             labelsMap.get(l.remote_jid).push({ id: l.id, name: l.name, color: l.color });
         }
 
-        const sessions = sessionsRes.rows.map(row => ({
-            remoteJid: row.remote_jid,
-            contactName: row.contact_name || row.push_name || null,
-            unreadCount: unreadMap.get(row.remote_jid) || 0,
-            lastMessage: {
-                id: row.id,
-                instanceId: row.instance_id,
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
+        const sessions = sessionsRes.rows.map(row => {
+            const lastInbound = inboundMap.get(row.remote_jid) || null;
+            let isWindowActive = false;
+            let remainingMs = 0;
+            if (lastInbound) {
+                const inboundTime = new Date(lastInbound).getTime();
+                const diff = now - inboundTime;
+                if (diff < TWENTY_FOUR_HOURS_MS && diff >= 0) {
+                    isWindowActive = true;
+                    remainingMs = TWENTY_FOUR_HOURS_MS - diff;
+                }
+            }
+
+            return {
                 remoteJid: row.remote_jid,
-                fromMe: row.from_me,
-                text: row.text,
-                status: row.status || 'sent',
-                timestamp: row.timestamp
-            },
-            labels: labelsMap.get(row.remote_jid) || []
-        }));
+                contactName: row.contact_name || row.push_name || null,
+                unreadCount: unreadMap.get(row.remote_jid) || 0,
+                lastInboundTimestamp: lastInbound ? new Date(lastInbound).toISOString() : null,
+                isWindowActive,
+                remainingMs,
+                lastMessage: {
+                    id: row.id,
+                    instanceId: row.instance_id,
+                    remoteJid: row.remote_jid,
+                    fromMe: row.from_me,
+                    text: row.text,
+                    mediaUrl: row.media_url,
+                    mediaType: row.media_type,
+                    status: row.status || 'sent',
+                    timestamp: row.timestamp
+                },
+                labels: labelsMap.get(row.remote_jid) || []
+            };
+        });
 
         sessions.sort((a, b) => new Date(b.lastMessage.timestamp).getTime() - new Date(a.lastMessage.timestamp).getTime());
 
@@ -4749,8 +4856,18 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
             if (!mediaType && mediaUrl) {
                 if (mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || mediaUrl.includes('image')) {
                     mediaType = 'image';
-                } else if (mediaUrl.match(/\.(mp4|webm|mov)/i) || mediaUrl.includes('video')) {
+                } else if (mediaUrl.match(/\.(mp4|webm|mov|m4v)/i) || mediaUrl.includes('video')) {
                     mediaType = 'video';
+                } else if (mediaUrl.match(/\.(mp3|ogg|wav|m4a|aac|opus)/i) || mediaUrl.includes('audio') || mediaUrl.includes('voice')) {
+                    mediaType = 'audio';
+                } else if (mediaUrl.match(/\.(pdf|doc|docx|xls|xlsx|txt|csv|zip)/i) || mediaUrl.includes('document')) {
+                    mediaType = 'document';
+                }
+            }
+
+            if (!mediaType && row.text) {
+                if (row.text.includes('[Flow Response') || row.text.includes('nfm_reply') || (row.text.includes('"flow_token"') && row.text.trim().startsWith('{'))) {
+                    mediaType = 'flow_response';
                 }
             }
 
@@ -4836,11 +4953,18 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             };
             
             if (media) {
-                const metaType = (type === 'video' || type === 'document') ? type : 'image';
+                const metaType = (type === 'video' || type === 'document' || type === 'audio' || type === 'voice') 
+                    ? (type === 'voice' ? 'audio' : type) 
+                    : 'image';
                 msgData.type = metaType;
                 const mediaObj = await getMetaMediaObjectServer(media, instance, metaType);
                 msgData[metaType] = mediaObj;
-                if (message) msgData[metaType].caption = message;
+                if (message && metaType !== 'audio') {
+                    msgData[metaType].caption = message;
+                }
+                if (metaType === 'document' && req.body.fileName) {
+                    msgData[metaType].filename = req.body.fileName;
+                }
                 delete msgData.text;
             }
             
@@ -4867,11 +4991,19 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
                     mediaBuffer = { url: media };
                 }
 
-                sentMsg = await instance.sock.sendMessage(remoteJid, { 
-                    [type || 'image']: mediaBuffer,
-                    caption: message,
+                const bType = (type === 'audio' || type === 'voice') ? 'audio' : (type || 'image');
+                const bOptions = {
+                    [bType]: mediaBuffer,
+                    caption: (bType === 'audio' ? undefined : message),
+                    mimetype: (type === 'audio' || type === 'voice') ? 'audio/mp4' : undefined,
+                    ptt: (type === 'voice'),
                     ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {}
-                });
+                };
+                if (bType === 'document' && req.body.fileName) {
+                    bOptions.fileName = req.body.fileName;
+                }
+
+                sentMsg = await instance.sock.sendMessage(remoteJid, bOptions);
             } else {
                 sentMsg = await instance.sock.sendMessage(remoteJid, { text: message, ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {} });
             }

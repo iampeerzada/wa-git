@@ -1,8 +1,147 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye } from 'lucide-react';
+import { 
+  Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, 
+  X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye,
+  Mic, Square, ExternalLink, Clock, AlertTriangle, FileText, Image, Film, Music, 
+  Download, Bell, BellOff, Info, RefreshCw, Volume2, ShieldCheck, HelpCircle, Sparkles,
+  CheckCircle2, ClipboardList, ChevronDown, ChevronUp
+} from 'lucide-react';
 import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel } from '../types';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
+
+const playChimeSound = () => {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.12); // A5
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.36);
+  } catch (e) {
+    // Autoplay policy fallback
+  }
+};
+
+const showDesktopNotification = (title: string, body: string) => {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification(title, {
+        body,
+        icon: 'https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg'
+      });
+    } catch (e) {}
+  }
+};
+
+const getCleanPhone = (jid: string) => {
+  if (!jid) return '';
+  return jid.split('@')[0].replace(/[^0-9]/g, '');
+};
+
+const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
+  const cleanPhone = getCleanPhone(jid);
+  if (!cleanPhone) return;
+  const textParam = prefillMsg ? `?text=${encodeURIComponent(prefillMsg)}` : '';
+  const url = `https://wa.me/${cleanPhone}${textParam}`;
+  try {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } catch (e) {
+    window.open(url, '_blank');
+  }
+};
+
+interface ParsedFlowData {
+  title: string;
+  fields: Array<{ key: string; value: string }>;
+  token?: string;
+  rawJson?: string;
+}
+
+const parseFlowResponseData = (text: string): ParsedFlowData | null => {
+  if (!text) return null;
+  const trimmed = text.trim();
+
+  // Try parsing directly as JSON
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      let obj = JSON.parse(trimmed);
+      if (obj.response_json && typeof obj.response_json === 'string') {
+        try {
+          const inner = JSON.parse(obj.response_json);
+          obj = { ...obj, ...inner };
+        } catch (e) {}
+      }
+      const fields: Array<{ key: string; value: string }> = [];
+      const token = obj.flow_token;
+      Object.entries(obj).forEach(([k, v]) => {
+        if (k !== 'flow_token' && k !== 'response_json') {
+          const cleanKey = k.replace(/screen_\d+_/i, '').replace(/_\d+$/, '').replace(/_/g, ' ');
+          fields.push({
+            key: cleanKey,
+            value: typeof v === 'object' ? JSON.stringify(v) : String(v)
+          });
+        }
+      });
+      return {
+        title: obj.flow_name || obj.body || 'WhatsApp Flow Submission',
+        fields,
+        token: token ? String(token) : undefined,
+        rawJson: JSON.stringify(obj, null, 2)
+      };
+    } catch (e) {}
+  }
+
+  // Check if it's formatted text with bullet points or [Flow Response
+  if (trimmed.includes('[Flow Response') || trimmed.includes('📋')) {
+    const lines = trimmed.split('\n');
+    const fields: Array<{ key: string; value: string }> = [];
+    let token = '';
+    let title = 'WhatsApp Flow Submission';
+
+    lines.forEach(line => {
+      const l = line.trim();
+      if (l.startsWith('Flow:') || l.startsWith('Action:')) {
+        title = l.replace(/^(Flow|Action):\s*/, '').trim();
+      } else if (l.startsWith('•') || l.startsWith('-')) {
+        const parts = l.replace(/^[•\-]\s*/, '').split(':');
+        if (parts.length >= 2) {
+          fields.push({
+            key: parts[0].trim(),
+            value: parts.slice(1).join(':').trim()
+          });
+        } else {
+          fields.push({ key: 'Response', value: l.replace(/^[•\-]\s*/, '') });
+        }
+      } else if (l.includes('Token:') || l.includes('token:')) {
+        token = l.replace(/.*Token:\s*/i, '').replace(/\)$/, '').trim();
+      }
+    });
+
+    return {
+      title,
+      fields,
+      token: token || undefined,
+      rawJson: trimmed
+    };
+  }
+
+  return null;
+};
 
 const DEFAULT_META_TEMPLATES: Record<string, {
   name: string;
@@ -106,19 +245,55 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   // Label State
   const [labels, setLabels] = useState<ChatLabel[]>([]);
   const [selectedLabelFilter, setSelectedLabelFilter] = useState<string>('');
-  const [chatFilter, setChatFilter] = useState<'all' | 'direct' | 'groups' | 'unread'>('all');
+  const [chatFilter, setChatFilter] = useState<'all' | 'unread' | 'window_active' | 'window_expired' | 'direct' | 'groups'>('all');
   const [showLabelManager, setShowLabelManager] = useState(false);
   const [newLabelName, setNewLabelName] = useState('');
   const [newLabelColor, setNewLabelColor] = useState('#25D366');
   const [showChatLabelModal, setShowChatLabelModal] = useState(false);
 
+  // New WhatsApp Web & 24-Hour Features
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [currentTimeTick, setCurrentTimeTick] = useState(Date.now());
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
+  const [showWindowInfoModal, setShowWindowInfoModal] = useState(false);
+  const [lightboxMedia, setLightboxMedia] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
+  const [expandedFlowRawMap, setExpandedFlowRawMap] = useState<Record<string, boolean>>({});
+  const [copiedFlowId, setCopiedFlowId] = useState<string | null>(null);
+  
+  // Voice Recording State
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<any>(null);
+
+  // Attachment inputs
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const docInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+
   const socketRef = useRef<Socket | null>(null);
   const selectedInstanceIdRef = useRef(selectedInstanceId);
   const selectedSessionRef = useRef(selectedSession);
+  const soundEnabledRef = useRef(soundEnabled);
   const currentActiveJidRef = useRef<string | null>(null);
   
   useEffect(() => { selectedInstanceIdRef.current = selectedInstanceId; }, [selectedInstanceId]);
   useEffect(() => { selectedSessionRef.current = selectedSession; }, [selectedSession]);
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+
+  // Periodic ticker to keep 24h countdowns accurate in real time
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTimeTick(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Request browser notification permissions on mount
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -226,6 +401,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           msg.remoteJid.replace(/\D/g, '') === currentSession.remoteJid.replace(/\D/g, '')
         );
 
+        // Sound alert & notification for incoming messages from customer
+        if (!msg.fromMe) {
+          if (soundEnabledRef.current) {
+            playChimeSound();
+          }
+          showDesktopNotification(
+            formatDisplayJid(msg.remoteJid),
+            msg.text || (msg.mediaType ? `[${msg.mediaType}]` : '[Media message]')
+          );
+        }
+
         // Update messages if this is the active chat
         if (matchesCurrent) {
           setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
@@ -237,16 +423,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
         
-        // Update sessions list
+        // Update sessions list & 24h customer window
         setSessions(prev => {
           const existing = prev.find(s => s.remoteJid === msg.remoteJid || s.remoteJid.replace(/\D/g, '') === msg.remoteJid.replace(/\D/g, ''));
+          const inboundTs = (!msg.fromMe) ? msg.timestamp : (existing?.lastInboundTimestamp || null);
+          const isWinActive = !msg.fromMe ? true : (existing?.isWindowActive ?? false);
+
           if (existing) {
+            const updated = {
+              ...existing,
+              lastMessage: msg,
+              unreadCount: matchesCurrent ? 0 : (existing.unreadCount || 0) + (!msg.fromMe ? 1 : 0),
+              lastInboundTimestamp: inboundTs,
+              isWindowActive: isWinActive
+            };
+            if (matchesCurrent && selectedSessionRef.current) {
+              setSelectedSession(updated);
+            }
             return [
-              { ...existing, lastMessage: msg, unreadCount: matchesCurrent ? 0 : (existing.unreadCount || 0) + 1 },
+              updated,
               ...prev.filter(s => s.remoteJid !== existing.remoteJid)
             ];
           } else {
-            return [{ remoteJid: msg.remoteJid, lastMessage: msg, unreadCount: 1 }, ...prev];
+            return [{
+              remoteJid: msg.remoteJid,
+              lastMessage: msg,
+              unreadCount: matchesCurrent ? 0 : 1,
+              lastInboundTimestamp: !msg.fromMe ? msg.timestamp : null,
+              isWindowActive: !msg.fromMe
+            }, ...prev];
           }
         });
       }
@@ -509,6 +714,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         payload.type = file.type.startsWith('image/') ? 'image' : 
                        file.type.startsWith('video/') ? 'video' : 
                        file.type.startsWith('audio/') ? 'audio' : 'document';
+        payload.fileName = file.name;
       }
 
       const res = await fetch(`${apiBase}/api/chat/send`, {
@@ -524,17 +730,136 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       if (!res.ok) {
         console.error('Failed to send message');
       }
-      // Note: The message will appear in the UI via the socket 'new_message' event
-      // because Baileys emits messages.upsert for messages sent from the socket too.
     } catch (err) {
       console.error('Send error', err);
     }
   };
 
+  const sendVoiceNote = async (base64Audio: string) => {
+    if (!selectedSession || !selectedInstanceId) return;
+    try {
+      const payload: any = {
+        instanceId: selectedInstanceId,
+        remoteJid: selectedSession.remoteJid,
+        message: '',
+        media: base64Audio,
+        type: 'voice',
+        fileName: `voice_note_${Date.now()}.ogg`
+      };
+      await fetch(`${apiBase}/api/chat/send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      console.error('Failed to send voice note', e);
+    }
+  };
+
+  const startVoiceRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      
+      mediaRecorder.onstop = () => {
+        stream.getTracks().forEach(track => track.stop());
+        if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+        if (audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/ogg; codecs=opus' });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64Audio = reader.result as string;
+            sendVoiceNote(base64Audio);
+          };
+          reader.readAsDataURL(audioBlob);
+        }
+        setIsRecordingVoice(false);
+        setRecordingDuration(0);
+      };
+
+      mediaRecorder.start();
+      setIsRecordingVoice(true);
+      setRecordingDuration(0);
+      recordTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+    } catch (err) {
+      alert('Microphone access is required to record voice notes. Please allow microphone access in your browser settings.');
+    }
+  };
+
+  const cancelVoiceRecording = () => {
+    audioChunksRef.current = [];
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecordingVoice(false);
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    setRecordingDuration(0);
+  };
+
+  const stopVoiceRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecordingVoice(false);
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    setRecordingDuration(0);
+  };
+
+  const getWindowCountdown = (lastInbound?: string | null) => {
+    if (!lastInbound) return { isActive: false, label: 'No Inbound', remainingFormatted: '', isExpiringSoon: false };
+    const inboundMs = new Date(lastInbound).getTime();
+    const diff = currentTimeTick - inboundMs;
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    
+    if (diff >= TWENTY_FOUR_HOURS || diff < 0) {
+      const hoursAgo = Math.max(1, Math.floor(diff / (60 * 60 * 1000)));
+      return { 
+        isActive: false, 
+        label: 'Window Expired', 
+        remainingFormatted: 'Expired',
+        isExpiringSoon: false,
+        hoursAgo
+      };
+    }
+
+    const remMs = TWENTY_FOUR_HOURS - diff;
+    const hours = Math.floor(remMs / (60 * 60 * 1000));
+    const mins = Math.floor((remMs % (60 * 60 * 1000)) / (60 * 1000));
+    const isExpiringSoon = hours < 2;
+
+    return {
+      isActive: true,
+      label: `${hours}h ${mins}m left`,
+      remainingFormatted: `${hours}h ${mins}m`,
+      isExpiringSoon,
+      hours,
+      mins
+    };
+  };
+
+  const unreadCount = sessions.filter(s => s.unreadCount > 0).length;
+  const activeWindowCount = sessions.filter(s => getWindowCountdown(s.lastInboundTimestamp).isActive).length;
+  const expiredWindowCount = sessions.filter(s => s.lastInboundTimestamp && !getWindowCountdown(s.lastInboundTimestamp).isActive).length;
+
   const filteredSessions = sessions.filter(s => {
     const matchesSearch = !s.remoteJid.includes('status@broadcast') && // Hide status updates
     (s.remoteJid.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.lastMessage?.text.toLowerCase().includes(searchTerm.toLowerCase()));
+     (s.contactName && s.contactName.toLowerCase().includes(searchTerm.toLowerCase())) ||
+     s.lastMessage?.text?.toLowerCase().includes(searchTerm.toLowerCase()));
 
     const matchesLabel = selectedLabelFilter ? s.labels?.some(l => l.id === selectedLabelFilter) : true;
 
@@ -542,6 +867,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     if (chatFilter === 'direct') matchesType = s.remoteJid.endsWith('@s.whatsapp.net');
     else if (chatFilter === 'groups') matchesType = s.remoteJid.endsWith('@g.us');
     else if (chatFilter === 'unread') matchesType = s.unreadCount > 0;
+    else if (chatFilter === 'window_active') {
+      matchesType = getWindowCountdown(s.lastInboundTimestamp).isActive;
+    }
+    else if (chatFilter === 'window_expired') {
+      matchesType = Boolean(s.lastInboundTimestamp && !getWindowCountdown(s.lastInboundTimestamp).isActive);
+    }
 
     return matchesSearch && matchesLabel && matchesType;
   });
@@ -682,101 +1013,208 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           )}
         </div>
 
-        {/* Search */}
-        <div className="px-3 pb-3">
-          <div className="relative">
+        {/* Search & Notification Controls */}
+        <div className="px-3 pb-2 flex items-center gap-2">
+          <div className="relative flex-1">
             <Search className="absolute left-3 top-2.5 text-gray-500" size={16} />
             <input
               type="text"
-              placeholder="Search or start new chat"
+              placeholder="Search chats or phone..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full bg-[#202c33] text-gray-200 pl-10 pr-4 py-2 rounded-lg text-sm outline-none placeholder-gray-500"
             />
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSoundEnabled(!soundEnabled);
+              if (!soundEnabled) playChimeSound();
+            }}
+            className={`p-2 rounded-lg border transition-colors ${
+              soundEnabled 
+                ? 'bg-[#202c33] border-emerald-500/40 text-emerald-400 hover:bg-[#2a3942]' 
+                : 'bg-[#202c33] border-gray-700 text-gray-500 hover:text-gray-300'
+            }`}
+            title={soundEnabled ? 'Incoming alert chime is ON (Click to mute)' : 'Incoming alert chime is MUTED (Click to enable)'}
+          >
+            {soundEnabled ? <Bell size={16} /> : <BellOff size={16} />}
+          </button>
         </div>
 
         {/* Filter Tabs */}
-        <div className="flex items-center gap-2 px-3 pb-3 overflow-x-auto no-scrollbar">
-          {['all', 'unread', 'direct', 'groups'].map(filter => (
-            <button
-              key={filter}
-              onClick={() => setChatFilter(filter as any)}
-              className={`px-3 py-1 rounded-full text-xs font-bold capitalize transition-colors whitespace-nowrap ${
-                chatFilter === filter
-                  ? 'bg-[#25D366] text-[#0b141a]'
-                  : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
-              }`}
-            >
-              {filter}
-            </button>
-          ))}
+        <div className="flex items-center gap-1.5 px-3 pb-3 overflow-x-auto no-scrollbar">
+          <button
+            onClick={() => setChatFilter('all')}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
+              chatFilter === 'all'
+                ? 'bg-[#25D366] text-[#0b141a]'
+                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
+            }`}
+          >
+            All ({sessions.length})
+          </button>
+          <button
+            onClick={() => setChatFilter('unread')}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1 ${
+              chatFilter === 'unread'
+                ? 'bg-[#25D366] text-[#0b141a]'
+                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
+            }`}
+          >
+            Unread
+            {unreadCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${chatFilter === 'unread' ? 'bg-[#0b141a] text-[#25D366]' : 'bg-[#25D366] text-[#0b141a]'}`}>
+                {unreadCount}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setChatFilter('window_active')}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1 ${
+              chatFilter === 'window_active'
+                ? 'bg-emerald-500 text-[#0b141a]'
+                : 'bg-[#202c33] text-emerald-400 hover:bg-[#2a3942]'
+            }`}
+            title="Customer replied in last 24h - Free messaging open"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            24h Active ({activeWindowCount})
+          </button>
+          <button
+            onClick={() => setChatFilter('window_expired')}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1 ${
+              chatFilter === 'window_expired'
+                ? 'bg-amber-500 text-[#0b141a]'
+                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942]'
+            }`}
+            title="24h Window expired - Requires Meta Template to re-open"
+          >
+            ⏳ Expired ({expiredWindowCount})
+          </button>
+          <button
+            onClick={() => setChatFilter('direct')}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
+              chatFilter === 'direct'
+                ? 'bg-[#25D366] text-[#0b141a]'
+                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
+            }`}
+          >
+            Direct
+          </button>
         </div>
 
         {/* Sessions List */}
         <div className="flex-1 overflow-y-auto overscroll-y-contain">
           {filteredSessions.length === 0 ? (
             <div className="p-8 text-center text-gray-500 text-sm">
-              No conversations found
+              No conversations found in this view
             </div>
           ) : (
-            filteredSessions.map((session) => (
-              <button
-                key={session.remoteJid}
-                onClick={() => handleSelectSession(session)}
-                className={`w-full flex items-center gap-3 p-3 hover:bg-[#202c33] transition-colors border-b border-gray-800/50 ${
-                  selectedSession?.remoteJid === session.remoteJid ? 'bg-[#2a3942]' : ''
-                }`}
-              >
-                <div className="w-12 h-12 bg-gray-700 rounded-full flex items-center justify-center text-gray-300 flex-shrink-0 overflow-hidden">
-                  {profileCache[session.remoteJid]?.imgUrl ? (
+            filteredSessions.map((session) => {
+              const win = getWindowCountdown(session.lastInboundTimestamp);
+              return (
+                <div
+                  key={session.remoteJid}
+                  onClick={() => handleSelectSession(session)}
+                  className={`w-full flex items-center gap-3 p-3 hover:bg-[#202c33] cursor-pointer transition-colors border-b border-gray-800/50 group/item ${
+                    selectedSession?.remoteJid === session.remoteJid ? 'bg-[#2a3942]' : ''
+                  }`}
+                >
+                  <div className="w-12 h-12 bg-gray-700 rounded-full flex items-center justify-center text-gray-300 shrink-0 overflow-hidden relative">
+                    {profileCache[session.remoteJid]?.imgUrl ? (
                       <img src={profileCache[session.remoteJid].imgUrl} alt="" className="w-full h-full object-cover" />
-                  ) : (
+                    ) : (
                       <User size={24} />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0 text-left">
-                  <div className="flex justify-between items-baseline gap-2 min-w-0">
-                    <h3 className="text-sm font-medium text-gray-100 truncate">
-                      {profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid)}
-                    </h3>
-                    {session.lastMessage && (
-                      <span className="text-[10px] text-gray-500 shrink-0">
-                        {formatTime(session.lastMessage.timestamp)}
-                      </span>
+                    )}
+                    {win.isActive && (
+                      <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-[#111b21]" title="24h Service Window Active" />
                     )}
                   </div>
-                  <p className="text-xs text-gray-400 truncate mt-0.5 flex items-center gap-1">
-                    {session.lastMessage?.fromMe && (
-                      session.lastMessage.status === 'read' ? (
-                        <CheckCheck size={13} className="text-[#53bdeb] shrink-0" />
-                      ) : session.lastMessage.status === 'delivered' ? (
-                        <CheckCheck size={13} className="text-gray-300 shrink-0" />
-                      ) : (
-                        <Check size={13} className="text-gray-300 shrink-0" />
-                      )
-                    )}
-                    <span className="truncate">{session.lastMessage?.text || 'No messages'}</span>
-                  </p>
-                  
-                  {/* Labels Display */}
-                  {session.labels && session.labels.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {session.labels.map(l => (
-                        <span key={l.id} className="text-[9px] px-1.5 py-0.5 rounded-full text-[#0b141a] font-bold" style={{ backgroundColor: l.color }}>
-                          {l.name}
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="flex justify-between items-baseline gap-2 min-w-0">
+                      <h3 className="text-sm font-medium text-gray-100 truncate">
+                        {profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid)}
+                      </h3>
+                      {session.lastMessage && (
+                        <span className="text-[10px] text-gray-500 shrink-0">
+                          {formatTime(session.lastMessage.timestamp)}
                         </span>
-                      ))}
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-400 truncate mt-0.5 flex items-center gap-1">
+                      {session.lastMessage?.fromMe && (
+                        session.lastMessage.status === 'read' ? (
+                          <CheckCheck size={13} className="text-[#53bdeb] shrink-0" />
+                        ) : session.lastMessage.status === 'delivered' ? (
+                          <CheckCheck size={13} className="text-gray-300 shrink-0" />
+                        ) : (
+                          <Check size={13} className="text-gray-300 shrink-0" />
+                        )
+                      )}
+                      <span className="truncate">
+                        {(() => {
+                          const lMsg = session.lastMessage;
+                          if (!lMsg) return 'No messages';
+                          if (lMsg.mediaType === 'flow_response' || (lMsg.text && (lMsg.text.includes('[Flow Response') || lMsg.text.includes('"flow_token"') || (lMsg.text.startsWith('{') && lMsg.text.includes('flow'))))) {
+                            return '📋 Flow Response Received';
+                          }
+                          return lMsg.text || (lMsg.mediaUrl ? `[${lMsg.mediaType || 'Media'}]` : 'No messages');
+                        })()}
+                      </span>
+                    </p>
+                    
+                    {/* 24h Customer Service Window Badge */}
+                    <div className="flex items-center justify-between gap-1 mt-1.5">
+                      {session.lastInboundTimestamp ? (
+                        win.isActive ? (
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1 ${win.isExpiringSoon ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'}`}>
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            24h: {win.remainingFormatted} left
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700">
+                            ⏳ 24h Expired
+                          </span>
+                        )
+                      ) : (
+                        <span className="text-[9px] text-gray-600">Outgoing only</span>
+                      )}
+
+                      {/* Quick wa.me button */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openInWhatsAppWeb(session.remoteJid);
+                        }}
+                        className="opacity-0 group-hover/item:opacity-100 p-1 text-gray-400 hover:text-[#25D366] hover:bg-black/40 rounded transition-all flex items-center gap-0.5 text-[10px]"
+                        title="Chat via WhatsApp App / Web (wa.me) directly from another phone number"
+                      >
+                        <ExternalLink size={12} />
+                        <span>wa.me</span>
+                      </button>
+                    </div>
+
+                    {/* Labels Display */}
+                    {session.labels && session.labels.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {session.labels.map(l => (
+                          <span key={l.id} className="text-[9px] px-1.5 py-0.5 rounded-full text-[#0b141a] font-bold" style={{ backgroundColor: l.color }}>
+                            {l.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {session.unreadCount > 0 && (
+                    <div className="w-5 h-5 bg-[#25D366] rounded-full flex items-center justify-center text-[10px] font-bold text-[#0b141a] shrink-0">
+                      {session.unreadCount}
                     </div>
                   )}
                 </div>
-                {session.unreadCount > 0 && (
-                  <div className="w-5 h-5 bg-[#25D366] rounded-full flex items-center justify-center text-[10px] font-bold text-[#0b141a]">
-                    {session.unreadCount}
-                  </div>
-                )}
-              </button>
-            ))
+              );
+            })
           )}
         </div>
       </div>
@@ -787,42 +1225,124 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         {selectedSession ? (
           <>
             {/* Header */}
-            <div className="h-16 bg-[#202c33] flex items-center justify-between px-4 border-b border-gray-800">
-              <div className="flex items-center gap-3">
-                <button onClick={() => setSelectedSession(null)} className="md:hidden p-1 -ml-2 text-gray-400 hover:text-white"><ArrowLeft size={20} /></button>
-                <div className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-gray-300 overflow-hidden">
+            <div className="h-16 bg-[#202c33] flex items-center justify-between px-3 md:px-4 border-b border-gray-800 gap-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <button onClick={() => setSelectedSession(null)} className="md:hidden p-1 -ml-1 text-gray-400 hover:text-white"><ArrowLeft size={20} /></button>
+                <div className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-gray-300 overflow-hidden shrink-0 relative">
                   {profileCache[selectedSession.remoteJid]?.imgUrl ? (
                       <img src={profileCache[selectedSession.remoteJid].imgUrl} alt="" className="w-full h-full object-cover" />
                   ) : (
                       <User size={20} />
                   )}
+                  {getWindowCountdown(selectedSession.lastInboundTimestamp).isActive && (
+                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#202c33]" />
+                  )}
                 </div>
-                <div>
-                  <h3 className="text-sm font-medium text-gray-100 flex items-center gap-2">
-                    {profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid)}
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2 truncate">
+                    <span className="truncate">{profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid)}</span>
                     {selectedSession.labels && selectedSession.labels.length > 0 && (
-                        <div className="flex -space-x-1">
+                        <div className="flex -space-x-1 shrink-0">
                             {selectedSession.labels.map(l => (
                                 <div key={l.id} className="w-2 h-2 rounded-full ring-1 ring-[#202c33]" style={{ backgroundColor: l.color }} title={l.name} />
                             ))}
                         </div>
                     )}
                   </h3>
-                  <span className="text-[10px] text-[#25D366]">
-                    {typingStatus[selectedSession.remoteJid] ? 'typing...' : 
-                     presenceStatus[selectedSession.remoteJid] === 'online' ? 'online' : ''}
-                  </span>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400">
+                    <span className="font-mono text-gray-500">{formatDisplayJid(selectedSession.remoteJid)}</span>
+                    {typingStatus[selectedSession.remoteJid] ? (
+                      <span className="text-emerald-400 font-medium">typing...</span>
+                    ) : presenceStatus[selectedSession.remoteJid] === 'online' ? (
+                      <span className="text-emerald-400">online</span>
+                    ) : null}
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center gap-5 text-gray-400">
+
+              {/* 24-Hour Customer Window Pill */}
+              <div className="hidden lg:flex items-center">
+                {(() => {
+                  const win = getWindowCountdown(selectedSession.lastInboundTimestamp);
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => setShowWindowInfoModal(true)}
+                      className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs border ${
+                        win.isActive
+                          ? (win.isExpiringSoon 
+                              ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25' 
+                              : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25')
+                          : 'bg-gray-800/80 border-gray-700 text-gray-400 hover:bg-gray-700/60'
+                      }`}
+                      title="Click to learn how Meta's 24-hour customer window works"
+                    >
+                      <Clock size={13} className={win.isActive ? (win.isExpiringSoon ? 'text-amber-400' : 'text-emerald-400') : 'text-gray-400'} />
+                      <span>{win.isActive ? `24h Window: ${win.remainingFormatted} left` : '24h Window: Expired'}</span>
+                      <Info size={11} className="opacity-70" />
+                    </button>
+                  );
+                })()}
+              </div>
+
+              {/* Quick Action Buttons */}
+              <div className="flex items-center gap-1.5 md:gap-2 text-gray-400 shrink-0">
+                {/* 1-Click WhatsApp App / Web (wa.me) Deep Link */}
+                <button
+                  type="button"
+                  onClick={() => openInWhatsAppWeb(selectedSession.remoteJid)}
+                  className="flex items-center gap-1.5 bg-[#25D366]/15 hover:bg-[#25D366]/25 border border-[#25D366]/40 text-[#25D366] px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all shadow-xs"
+                  title="Directly text this contact from your personal or sales WhatsApp app / web on another number"
+                >
+                  <ExternalLink size={13} />
+                  <span className="hidden sm:inline font-semibold">Chat on WhatsApp</span>
+                </button>
+
+                {/* Send Template Shortcut */}
+                <button
+                  type="button"
+                  onClick={() => setShowTemplates(true)}
+                  className="hidden sm:flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
+                  title="Send official Meta Template (re-opens the 24h window)"
+                >
+                  <LayoutTemplate size={13} />
+                  <span>Template</span>
+                </button>
+
+                {/* Copy Number */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const phone = getCleanPhone(selectedSession.remoteJid);
+                    if (phone) navigator.clipboard.writeText(phone);
+                  }}
+                  className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+                  title="Copy contact phone number"
+                >
+                  <Copy size={16} />
+                </button>
+
+                {/* Info Guide */}
+                <button
+                  type="button"
+                  onClick={() => setShowWindowInfoModal(true)}
+                  className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+                  title="Meta 24-Hour Window & Messaging Rules Guide"
+                >
+                  <HelpCircle size={16} />
+                </button>
+
+                {/* Label Manager */}
                 <div className="relative">
-                    <Tag 
-                        size={20} 
-                        className={`cursor-pointer hover:text-[#25D366] transition-colors ${showChatLabelModal ? 'text-[#25D366]' : ''}`} 
+                    <button 
                         onClick={() => setShowChatLabelModal(!showChatLabelModal)}
-                    />
+                        className={`p-2 rounded-lg hover:bg-gray-800 transition-colors ${showChatLabelModal ? 'text-[#25D366]' : 'text-gray-400 hover:text-white'}`}
+                        title="Assign Labels"
+                    >
+                      <Tag size={16} />
+                    </button>
                     {showChatLabelModal && (
-                        <div className="absolute top-8 right-0 w-48 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 duration-150">
+                        <div className="absolute top-10 right-0 w-48 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 duration-150">
                             <p className="text-[10px] text-gray-500 font-bold uppercase mb-2 px-1">Assign Labels</p>
                             <div className="space-y-1 max-h-48 overflow-y-auto">
                                 {labels.length === 0 && <p className="text-xs text-gray-500 italic px-1">No labels created.</p>}
@@ -830,7 +1350,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                     const isSelected = selectedSession.labels?.some(sl => sl.id === l.id);
                                     return (
                                         <button 
-                                            key={l.id}
+                                            key={l.id} 
                                             onClick={() => toggleChatLabel(l.id)}
                                             className={`w-full text-left px-2 py-1.5 rounded text-xs flex items-center justify-between hover:bg-[#111b21] transition-colors ${isSelected ? 'text-white' : 'text-gray-400'}`}
                                         >
@@ -846,11 +1366,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         </div>
                     )}
                 </div>
-                <Video size={20} className="cursor-not-allowed opacity-50" />
-                <Phone size={18} className="cursor-not-allowed opacity-50" />
-                <div className="w-[1px] h-6 bg-gray-700 mx-1" />
-                <Search size={20} className="cursor-pointer hover:text-gray-200" />
-                <MoreVertical size={20} className="cursor-pointer hover:text-gray-200" />
               </div>
             </div>
 
@@ -919,35 +1434,201 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                           {msg.mediaUrl && (
                               <div className="mb-1">
                                   {(msg.mediaType === 'image' || (!msg.mediaType && (msg.mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || msg.mediaUrl.includes('image') || msg.mediaUrl.includes('/media/')))) ? (
-                                      <img 
-                                        src={msg.mediaUrl} 
-                                        alt="Media" 
-                                        className="rounded-lg max-w-full max-h-[320px] object-cover cursor-pointer hover:opacity-95 transition-opacity" 
-                                        onClick={() => window.open(msg.mediaUrl, '_blank')}
-                                      />
-                                  ) : (msg.mediaType === 'video' || msg.mediaType === 'gif') ? (
-                                      <video 
+                                      <div className="relative group/media my-0.5">
+                                        <img 
                                           src={msg.mediaUrl} 
-                                          controls={msg.mediaType !== 'gif'} 
-                                          autoPlay={msg.mediaType === 'gif'} 
-                                          loop={msg.mediaType === 'gif'} 
-                                          muted={msg.mediaType === 'gif'} 
-                                          playsInline 
-                                          className="rounded-lg max-w-full max-h-[320px]" 
-                                      />
-                                  ) : msg.mediaType === 'audio' ? (
-                                      <audio src={msg.mediaUrl} controls className="w-full min-w-[200px] my-1" />
+                                          alt="Media" 
+                                          className="rounded-lg max-w-full max-h-[320px] object-cover cursor-pointer hover:opacity-95 transition-opacity" 
+                                          onClick={() => setLightboxMedia({ url: msg.mediaUrl!, type: 'image' })}
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            window.open(msg.mediaUrl, '_blank');
+                                          }}
+                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow"
+                                          title="Open Fullscreen"
+                                        >
+                                          <Download size={13} />
+                                        </button>
+                                      </div>
+                                  ) : (msg.mediaType === 'video' || msg.mediaType === 'gif') ? (
+                                      <div className="my-0.5 rounded-lg overflow-hidden bg-black/30">
+                                        <video 
+                                            src={msg.mediaUrl} 
+                                            controls={msg.mediaType !== 'gif'} 
+                                            autoPlay={msg.mediaType === 'gif'} 
+                                            loop={msg.mediaType === 'gif'} 
+                                            muted={msg.mediaType === 'gif'} 
+                                            playsInline 
+                                            className="rounded-lg max-w-full max-h-[320px]" 
+                                        />
+                                      </div>
+                                  ) : (msg.mediaType === 'audio' || msg.mediaType === 'voice') ? (
+                                      <div className="flex items-center gap-2.5 bg-black/30 p-2.5 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1">
+                                        <div className="w-8 h-8 rounded-full bg-[#25D366]/20 text-[#25D366] flex items-center justify-center shrink-0">
+                                          <Mic size={16} />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <span className="text-[10px] text-gray-300 font-medium uppercase tracking-wide block mb-1">
+                                            {msg.mediaType === 'voice' ? 'Voice Message' : 'Audio Note'}
+                                          </span>
+                                          <audio src={msg.mediaUrl} controls className="w-full h-8" />
+                                        </div>
+                                      </div>
                                   ) : (
-                                      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 bg-black/20 p-2.5 rounded-lg text-blue-400 hover:underline border border-white/5 text-xs">
-                                          <Paperclip size={16} />
-                                          <span className="truncate">View Document / Attachment</span>
-                                      </a>
+                                      <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1 hover:bg-black/40 transition-colors">
+                                        <div className="flex items-center gap-2.5 min-w-0">
+                                          <div className="w-9 h-9 rounded-lg bg-red-500/20 text-red-400 flex items-center justify-center shrink-0">
+                                            <FileText size={18} />
+                                          </div>
+                                          <div className="min-w-0">
+                                            <p className="text-xs font-medium text-white truncate max-w-[160px]" title={msg.fileName || msg.text || 'Document'}>
+                                              {msg.fileName || (msg.text && msg.text !== '[Document]' ? msg.text : 'Attachment Document')}
+                                            </p>
+                                            <span className="text-[10px] text-gray-400 uppercase font-mono">Document File</span>
+                                          </div>
+                                        </div>
+                                        <a 
+                                          href={msg.mediaUrl} 
+                                          download 
+                                          target="_blank" 
+                                          rel="noopener noreferrer" 
+                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0"
+                                          title="Download document"
+                                        >
+                                          <Download size={15} />
+                                        </a>
+                                      </div>
                                   )}
                               </div>
                           )}
 
-                          {msg.text && !(msg.mediaUrl && (msg.text === '[Image]' || msg.text === '[Video]' || msg.text === '[Document]' || msg.text === '[Audio]' || msg.text === '[Sticker]')) && (
+                          {(msg.text || msg.mediaType === 'flow_response') && !(msg.mediaUrl && (msg.text === '[Image]' || msg.text === '[Video]' || msg.text === '[Document]' || msg.text === '[Audio]' || msg.text === '[Sticker]')) && (
                             (() => {
+                              const isFlowMsg = msg.mediaType === 'flow_response' || 
+                                (msg.text && (
+                                  msg.text.includes('[Flow Response') || 
+                                  msg.text.includes('nfm_reply') || 
+                                  msg.text.includes('"flow_token"') ||
+                                  (msg.text.trim().startsWith('{') && msg.text.includes('flow'))
+                                ));
+
+                              if (isFlowMsg) {
+                                const flowData = parseFlowResponseData(msg.text || '{}');
+                                const isRawExpanded = !!expandedFlowRawMap[msg.id];
+
+                                return (
+                                  <div className="min-w-[260px] max-w-[360px] pt-1 pb-4 pr-1 text-left">
+                                    {/* Header Badge */}
+                                    <div className="flex items-center justify-between gap-1.5 pb-2 mb-2 border-b border-emerald-500/20">
+                                      <div className="flex items-center gap-2">
+                                        <div className="w-6 h-6 rounded-lg bg-emerald-500/20 text-emerald-300 flex items-center justify-center shrink-0 border border-emerald-500/30">
+                                          <ClipboardList size={13} />
+                                        </div>
+                                        <div>
+                                          <div className="text-[11px] font-bold text-emerald-300 flex items-center gap-1">
+                                            <span>{flowData?.title || 'WhatsApp Flow Response'}</span>
+                                            <CheckCircle2 size={11} className="text-emerald-400" />
+                                          </div>
+                                          <div className="text-[9px] text-gray-400 font-medium">Customer Submitted Form / Survey</div>
+                                        </div>
+                                      </div>
+                                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold uppercase tracking-wider border border-emerald-500/30">
+                                        Flow
+                                      </span>
+                                    </div>
+
+                                    {/* Fields List */}
+                                    {flowData && flowData.fields.length > 0 ? (
+                                      <div className="space-y-1.5 my-2">
+                                        {flowData.fields.map((f, fIdx) => (
+                                          <div key={fIdx} className="bg-black/35 hover:bg-black/50 transition-colors p-2 rounded-lg border border-white/10">
+                                            <div className="text-[10px] font-semibold text-emerald-300/90 uppercase tracking-wide">
+                                              {f.key}
+                                            </div>
+                                            <div className="text-xs text-white font-medium mt-0.5 break-words whitespace-pre-wrap">
+                                              {f.value}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div className="bg-black/30 p-2.5 rounded-lg border border-white/10 text-xs text-gray-200 whitespace-pre-wrap break-words my-2">
+                                        {msg.text || '[Flow Submission Received]'}
+                                      </div>
+                                    )}
+
+                                    {/* Flow Token (if present) */}
+                                    {flowData?.token && (
+                                      <div className="flex items-center justify-between text-[10px] text-gray-400 bg-black/25 px-2 py-1 rounded border border-white/5 my-1.5 font-mono">
+                                        <span className="truncate">Token: {flowData.token}</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            navigator.clipboard.writeText(flowData.token || '');
+                                            setCopiedFlowId(msg.id);
+                                            setTimeout(() => setCopiedFlowId(null), 2000);
+                                          }}
+                                          className="text-gray-400 hover:text-emerald-300 ml-1 shrink-0"
+                                          title="Copy token"
+                                        >
+                                          <Copy size={11} />
+                                        </button>
+                                      </div>
+                                    )}
+
+                                    {/* Action Buttons */}
+                                    <div className="flex items-center gap-1.5 pt-2 border-t border-white/10 mt-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const textToCopy = flowData && flowData.fields.length > 0
+                                            ? flowData.fields.map(f => `${f.key}: ${f.value}`).join('\n')
+                                            : (msg.text || '');
+                                          navigator.clipboard.writeText(textToCopy);
+                                          setCopiedFlowId(msg.id);
+                                          setTimeout(() => setCopiedFlowId(null), 2000);
+                                        }}
+                                        className="flex-1 py-1 px-2 rounded-md bg-white/10 hover:bg-white/15 text-[11px] text-gray-200 font-medium flex items-center justify-center gap-1 transition-colors border border-white/10"
+                                      >
+                                        <Copy size={11} />
+                                        <span>{copiedFlowId === msg.id ? 'Copied!' : 'Copy Answers'}</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => openInWhatsAppWeb(msg.remoteJid, `Hi, thank you for submitting: ${flowData?.title || 'Form'}`)}
+                                        className="py-1 px-2 rounded-md bg-[#25D366]/20 hover:bg-[#25D366]/30 text-[11px] text-emerald-300 font-medium flex items-center justify-center gap-1 transition-colors border border-[#25D366]/40"
+                                        title="Chat directly in WhatsApp App or Web"
+                                      >
+                                        <ExternalLink size={11} />
+                                        <span>WhatsApp</span>
+                                      </button>
+
+                                      {flowData?.rawJson && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setExpandedFlowRawMap(prev => ({ ...prev, [msg.id]: !prev[msg.id] }))}
+                                          className="p-1 rounded-md bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                                          title={isRawExpanded ? 'Hide Raw JSON' : 'View Raw JSON'}
+                                        >
+                                          {isRawExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                                        </button>
+                                      )}
+                                    </div>
+
+                                    {/* Expandable Raw JSON */}
+                                    {isRawExpanded && flowData?.rawJson && (
+                                      <pre className="mt-2 p-2 rounded bg-black/60 text-[10px] text-emerald-400 font-mono overflow-x-auto max-h-36 border border-emerald-500/20">
+                                        {flowData.rawJson}
+                                      </pre>
+                                    )}
+                                  </div>
+                                );
+                              }
+
                               const templateMatch = msg.text ? msg.text.match(/^\[Template:\s*([a-zA-Z0-9_\-]+)\]/i) : null;
                               const templateName = templateMatch ? templateMatch[1] : msg.templateDetails?.name;
 
@@ -1084,14 +1765,49 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                 </div>
             )}
 
-            {/* Input */}
-            <div className="bg-[#202c33] p-3 flex items-center gap-3 relative">
+            {/* 24-Hour Service Window Expired Reminder Banner */}
+            {selectedSession.lastInboundTimestamp && !getWindowCountdown(selectedSession.lastInboundTimestamp).isActive && (
+              <div className="px-4 py-2 bg-amber-950/75 border-t border-amber-600/30 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-200 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle size={15} className="text-amber-400 shrink-0" />
+                  <span>
+                    <strong>24-Hour Free Service Window Expired:</strong> Non-template text messages may fail. Send an approved template or chat via WhatsApp Web directly.
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowTemplates(true)}
+                    className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-lg text-amber-200 font-medium transition-colors flex items-center gap-1 shadow-xs"
+                  >
+                    <LayoutTemplate size={12} />
+                    <span>Send Approved Template</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openInWhatsAppWeb(selectedSession.remoteJid)}
+                    className="px-2.5 py-1 bg-[#25D366]/20 hover:bg-[#25D366]/30 border border-[#25D366]/40 rounded-lg text-emerald-300 font-medium transition-colors flex items-center gap-1 shadow-xs"
+                  >
+                    <ExternalLink size={12} />
+                    <span>Chat on WhatsApp App</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Input Container */}
+            <div className="bg-[#202c33] p-3 flex items-center gap-2 md:gap-3 relative">
               {/* Templates Modal */}
               {showTemplates && (
-                  <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-lg shadow-xl border border-gray-700 w-64 max-h-60 overflow-y-auto">
-                      <div className="p-2 border-b border-gray-700 font-medium text-gray-300 text-xs uppercase tracking-wider">Quick Templates</div>
+                  <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-xl shadow-2xl border border-gray-700 w-72 max-h-72 overflow-y-auto">
+                      <div className="p-3 border-b border-gray-700/80 flex items-center justify-between font-semibold text-gray-200 text-xs uppercase tracking-wider bg-[#1d272d]">
+                        <span>Official Meta Templates</span>
+                        <span className="text-[10px] text-emerald-400 font-mono">24h Safe</span>
+                      </div>
                       {(!Array.isArray(templates) || templates.length === 0) ? (
-                          <div className="p-4 text-center text-gray-500 text-sm">No templates found</div>
+                          <div className="p-4 text-center text-gray-400 text-xs">
+                            No custom templates found. Use default templates or sync from Meta.
+                          </div>
                       ) : (
                           (Array.isArray(templates) ? templates : []).map((t: any) => (
                               <button 
@@ -1101,20 +1817,98 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                       setNewMessage(t.content);
                                       setShowTemplates(false);
                                   }}
-                                  className="w-full text-left p-2 hover:bg-[#111b21] text-gray-300 text-sm truncate border-b border-gray-700/50 last:border-0"
+                                  className="w-full text-left p-2.5 hover:bg-[#111b21] text-gray-200 text-xs border-b border-gray-700/50 last:border-0 transition-colors"
                               >
-                                  {t.name}
+                                  <div className="font-medium text-white">{t.name}</div>
+                                  <div className="text-gray-400 text-[11px] truncate mt-0.5">{t.content}</div>
                               </button>
                           ))
                       )}
                   </div>
               )}
+
+              {/* Attachment Picker Menu Popover */}
+              {showAttachmentMenu && (
+                <div className="absolute bottom-16 left-12 z-50 bg-[#202c33] border border-gray-700 rounded-2xl shadow-2xl p-2 w-60 space-y-1 animate-in fade-in zoom-in-95 duration-150">
+                  <div className="px-2 py-1 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Send Media</div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachmentMenu(false);
+                      imageInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs text-gray-200 hover:bg-[#111b21] hover:text-white transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-blue-500/20 text-blue-400 flex items-center justify-center shrink-0">
+                      <Image size={16} />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-medium text-white">Photos & Videos</div>
+                      <div className="text-[10px] text-gray-400">PNG, JPG, MP4, WebM</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachmentMenu(false);
+                      docInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs text-gray-200 hover:bg-[#111b21] hover:text-white transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0">
+                      <FileText size={16} />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-medium text-white">Document</div>
+                      <div className="text-[10px] text-gray-400">PDF, Word, Excel, CSV</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachmentMenu(false);
+                      audioInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs text-gray-200 hover:bg-[#111b21] hover:text-white transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                      <Music size={16} />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-medium text-white">Audio File</div>
+                      <div className="text-[10px] text-gray-400">MP3, WAV, OGG</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachmentMenu(false);
+                      startVoiceRecording();
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs text-gray-200 hover:bg-[#111b21] hover:text-white transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                      <Mic size={16} />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-medium text-white">Voice Note</div>
+                      <div className="text-[10px] text-gray-400">Record from microphone</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* Emoji Picker */}
               {showEmojiPicker && (
                 <div className="absolute bottom-16 left-4 z-50">
                   <EmojiPicker onEmojiClick={handleEmojiClick} theme="dark" />
                 </div>
               )}
               
+              {/* File Preview */}
               {selectedFile && (
                 <div className="absolute bottom-16 left-16 z-50 bg-[#2a3942] p-2 rounded-lg border border-gray-700 shadow-lg">
                   <div className="relative">
@@ -1136,51 +1930,112 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                 </div>
               )}
 
-              <Smile 
-                className={`cursor-pointer hover:text-gray-200 ${showEmojiPicker ? 'text-[#25D366]' : 'text-gray-400'}`} 
-                size={24} 
-                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-              />
-              
+              {/* Hidden file inputs */}
               <input 
                 type="file" 
-                ref={fileInputRef}
+                ref={imageInputRef} 
+                accept="image/*,video/*" 
                 className="hidden" 
-                onChange={handleFileChange}
+                onChange={handleFileChange} 
               />
-              
-              <Paperclip 
-                className={`cursor-pointer hover:text-gray-200 ${selectedFile ? 'text-[#25D366]' : 'text-gray-400'}`}
-                size={24} 
-                onClick={() => fileInputRef.current?.click()}
+              <input 
+                type="file" 
+                ref={docInputRef} 
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.zip" 
+                className="hidden" 
+                onChange={handleFileChange} 
               />
-              
-              <LayoutTemplate 
-                className={`cursor-pointer hover:text-gray-200 ${showTemplates ? 'text-[#25D366]' : 'text-gray-400'}`}
-                size={24}
-                onClick={() => setShowTemplates(!showTemplates)}
-                title="Quick Templates"
+              <input 
+                type="file" 
+                ref={audioInputRef} 
+                accept="audio/*" 
+                className="hidden" 
+                onChange={handleFileChange} 
               />
-              
-              <form onSubmit={handleSendMessage} className="flex-1">
-                <input
-                  type="text"
-                  placeholder="Type a message"
-                  value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
-                  className="w-full bg-[#2a3942] text-gray-200 px-4 py-2 rounded-lg text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366]"
-                />
-              </form>
-              
-              <button 
-                onClick={handleSendMessage}
-                disabled={!newMessage.trim() && !selectedFile}
-                className={`p-2 rounded-full transition-colors ${
-                  newMessage.trim() || selectedFile ? 'bg-[#25D366] text-[#0b141a]' : 'text-gray-500 cursor-not-allowed'
-                }`}
-              >
-                <Send size={20} />
-              </button>
+
+              {isRecordingVoice ? (
+                /* Live Voice Recording Bar */
+                <div className="flex-1 flex items-center justify-between bg-[#111b21] px-4 py-2.5 rounded-xl border border-red-500/50">
+                  <div className="flex items-center gap-3">
+                    <span className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+                    <span className="text-xs font-semibold text-red-400">
+                      Recording Voice Note: {Math.floor(recordingDuration / 60)}:{(recordingDuration % 60).toString().padStart(2, '0')}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelVoiceRecording}
+                      className="p-1.5 text-gray-400 hover:text-red-400 rounded-lg hover:bg-white/5 transition-colors"
+                      title="Cancel Recording"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopVoiceRecording}
+                      className="bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] p-1.5 rounded-full transition-colors"
+                      title="Send Voice Note"
+                    >
+                      <Send size={15} />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Standard Message Input Bar */
+                <>
+                  <Smile 
+                    className={`cursor-pointer hover:text-gray-200 transition-colors ${showEmojiPicker ? 'text-[#25D366]' : 'text-gray-400'}`} 
+                    size={22} 
+                    onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                    title="Emojis"
+                  />
+                  
+                  <Paperclip 
+                    className={`cursor-pointer hover:text-gray-200 transition-colors ${showAttachmentMenu || selectedFile ? 'text-[#25D366]' : 'text-gray-400'}`}
+                    size={22} 
+                    onClick={() => setShowAttachmentMenu(!showAttachmentMenu)}
+                    title="Attach Media (Image, Video, Document, Voice)"
+                  />
+                  
+                  <LayoutTemplate 
+                    className={`cursor-pointer hover:text-gray-200 transition-colors ${showTemplates ? 'text-[#25D366]' : 'text-gray-400'}`}
+                    size={22}
+                    onClick={() => setShowTemplates(!showTemplates)}
+                    title="Official Meta Quick Templates"
+                  />
+                  
+                  <form onSubmit={handleSendMessage} className="flex-1">
+                    <input
+                      type="text"
+                      placeholder="Type a message..."
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                      className="w-full bg-[#2a3942] text-gray-200 px-4 py-2 rounded-lg text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366]"
+                    />
+                  </form>
+                  
+                  {(!newMessage.trim() && !selectedFile) ? (
+                    <button 
+                      type="button"
+                      onClick={startVoiceRecording}
+                      className="p-2 rounded-full text-gray-400 hover:text-[#25D366] hover:bg-gray-700/50 transition-colors"
+                      title="Record Voice Message"
+                    >
+                      <Mic size={20} />
+                    </button>
+                  ) : (
+                    <button 
+                      type="button"
+                      onClick={handleSendMessage}
+                      className="p-2 rounded-full bg-[#25D366] text-[#0b141a] hover:bg-[#128c7e] transition-colors"
+                      title="Send Message"
+                    >
+                      <Send size={20} />
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           </>
         ) : (
@@ -1289,6 +2144,131 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                 className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-xl text-xs font-medium transition-colors"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lightbox Media Modal */}
+      {lightboxMedia && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-in fade-in duration-150"
+          onClick={() => setLightboxMedia(null)}
+        >
+          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+            <div className="absolute -top-12 right-0 flex items-center gap-3">
+              <a
+                href={lightboxMedia.url}
+                download
+                target="_blank"
+                rel="noopener noreferrer"
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3"
+              >
+                <Download size={14} />
+                <span>Download</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setLightboxMedia(null)}
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {lightboxMedia.type === 'image' ? (
+              <img 
+                src={lightboxMedia.url} 
+                alt="Full preview" 
+                className="max-w-full max-h-[82vh] rounded-xl object-contain shadow-2xl" 
+              />
+            ) : (
+              <video 
+                src={lightboxMedia.url} 
+                controls 
+                autoPlay 
+                className="max-w-full max-h-[82vh] rounded-xl shadow-2xl" 
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Meta 24-Hour Customer Window & Messaging Guide Modal */}
+      {showWindowInfoModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#202c33] border border-gray-700 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-4 border-b border-gray-700/80 flex items-center justify-between bg-[#111b21]">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                  <Clock size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Meta 24-Hour Customer Service Window</h3>
+                  <p className="text-[11px] text-gray-400">Official WhatsApp Cloud API Rules & Best Practices</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowWindowInfoModal(false)}
+                className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs text-gray-300 leading-relaxed">
+              <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl space-y-1">
+                <div className="flex items-center gap-2 text-emerald-300 font-bold">
+                  <ShieldCheck size={16} />
+                  <span>How the 24-Hour Window Works</span>
+                </div>
+                <p className="text-gray-300">
+                  Whenever an end customer texts your WhatsApp number, Meta immediately opens a <strong>24-hour Customer Service Window</strong>. Every new message from the customer resets the timer to 24 hours.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-2">
+                  <Sparkles size={14} className="text-emerald-400" />
+                  Inside the 24-Hour Window (Active)
+                </h4>
+                <ul className="list-disc pl-5 space-y-1 text-gray-300">
+                  <li><strong>Free messaging:</strong> You can send regular non-template messages at no extra conversation fee within your monthly 1,000 free service tier.</li>
+                  <li><strong>Full rich media:</strong> Send voice notes, PDF documents, videos, photos, and quick reply buttons freely.</li>
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-bold text-amber-300 text-xs uppercase tracking-wider flex items-center gap-2">
+                  <AlertTriangle size={14} className="text-amber-400" />
+                  When the 24-Hour Window Expires
+                </h4>
+                <ul className="list-disc pl-5 space-y-1 text-gray-300">
+                  <li>Meta Cloud API <strong>blocks free-form text messages</strong> to prevent customer spam.</li>
+                  <li>To restart the conversation, you must send an <strong>Approved Meta Template</strong> (e.g. Utility or Marketing reminder). Once the customer replies, a new 24-hour free window opens immediately!</li>
+                </ul>
+              </div>
+
+              <div className="p-3.5 bg-blue-500/10 border border-blue-500/30 rounded-xl space-y-2">
+                <div className="flex items-center gap-2 text-blue-300 font-bold">
+                  <ExternalLink size={16} />
+                  <span>Connect Using Another WhatsApp Number</span>
+                </div>
+                <p className="text-gray-300">
+                  If you or your team want to text the customer directly from standard WhatsApp Web or mobile app on another phone number (e.g. personal, sales, or support phone), simply click the <strong>&quot;Chat on WhatsApp (wa.me)&quot;</strong> button in the chat header or sidebar!
+                </p>
+                <p className="text-[11px] text-blue-200">
+                  This opens standard WhatsApp Web or desktop app instantly without having to search or manually type the customer&apos;s number.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-gray-700/80 bg-[#111b21] flex justify-end">
+              <button
+                onClick={() => setShowWindowInfoModal(false)}
+                className="px-4 py-2 bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] font-semibold rounded-xl text-xs transition-colors"
+              >
+                Got It
               </button>
             </div>
           </div>

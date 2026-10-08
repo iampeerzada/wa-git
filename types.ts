@@ -163,7 +163,8 @@ export interface ChatMessage {
   fromMe: boolean;
   text: string;
   mediaUrl?: string;
-  mediaType?: 'image' | 'video' | 'document' | 'gif';
+  mediaType?: 'image' | 'video' | 'document' | 'audio' | 'voice' | 'gif' | 'flow_response';
+  fileName?: string;
   timestamp: string;
   status?: 'sent' | 'delivered' | 'read' | 'failed';
   quotedMsgId?: string;
@@ -188,9 +189,13 @@ export interface ChatLabel {
 
 export interface ChatSession {
   remoteJid: string;
+  contactName?: string | null;
   lastMessage?: ChatMessage;
   unreadCount: number;
   labels?: ChatLabel[];
+  lastInboundTimestamp?: string | null;
+  isWindowActive?: boolean;
+  remainingMs?: number;
 }
 
 export interface ScheduledCampaign {
