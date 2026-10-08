@@ -201,6 +201,15 @@ export default function Templates({ instances = [], currentUser, apiBase, mediaA
                     if (b.type === 'QUICK_REPLY') return { type: 'QUICK_REPLY', text: b.text };
                     if (b.type === 'URL') return { type: 'URL', text: b.text, url: b.url };
                     if (b.type === 'PHONE_NUMBER') return { type: 'PHONE_NUMBER', text: b.text, phone_number: b.phone };
+                    if (b.type === 'COPY_CODE') return { type: 'COPY_CODE', example: [b.example || 'DISCOUNT20'] };
+                    if (b.type === 'FLOW') return { 
+                        type: 'FLOW', 
+                        text: b.text, 
+                        flow_id: b.flow_id, 
+                        flow_action: b.flow_action || 'navigate', 
+                        ...(b.navigate_screen ? { navigate_screen: b.navigate_screen } : {})
+                    };
+                    if (b.type === 'CATALOG') return { type: 'CATALOG', text: b.text || 'View catalog' };
                     return null;
                 }).filter(Boolean)
             });
@@ -311,11 +320,19 @@ export default function Templates({ instances = [], currentUser, apiBase, mediaA
                               className="w-full bg-[#202c33] text-white border border-gray-700 focus:border-[#25D366] outline-none rounded-lg px-2.5 py-1 text-xs disabled:opacity-50 cursor-pointer"
                           >
                               <option value="en">English (en)</option>
-                              <option value="en_US">English (US)</option>
-                              <option value="en_GB">English (UK)</option>
+                              <option value="en_US">English (US - en_US)</option>
+                              <option value="en_GB">English (UK - en_GB)</option>
+                              <option value="hi">Hindi (hi)</option>
+                              <option value="ar">Arabic (ar)</option>
                               <option value="es">Spanish (es)</option>
-                              <option value="pt_BR">Portuguese (BR)</option>
+                              <option value="pt_BR">Portuguese (BR - pt_BR)</option>
                               <option value="id">Indonesian (id)</option>
+                              <option value="fr">French (fr)</option>
+                              <option value="de">German (de)</option>
+                              <option value="it">Italian (it)</option>
+                              <option value="ru">Russian (ru)</option>
+                              <option value="tr">Turkish (tr)</option>
+                              <option value="zh_CN">Chinese (Simplified - zh_CN)</option>
                           </select>
                       </div>
                   </div>
@@ -431,16 +448,28 @@ export default function Templates({ instances = [], currentUser, apiBase, mediaA
                       </div>
                       <div className="space-y-1.5">
                           {buttons.map((btn, i) => (
-                              <div key={i} className="flex gap-1.5 items-start">
-                                  <select value={btn.type} onChange={e => { const nb = [...buttons]; nb[i].type = e.target.value; setButtons(nb); }} className="bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs w-1/3 outline-none cursor-pointer">
+                              <div key={i} className="flex gap-1.5 items-start bg-[#111b21] p-2 rounded-lg border border-gray-800">
+                                  <select value={btn.type} onChange={e => { const nb = [...buttons]; nb[i].type = e.target.value; setButtons(nb); }} className="bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs w-1/3 outline-none cursor-pointer shrink-0">
                                       <option value="QUICK_REPLY">Quick Reply</option>
-                                      <option value="URL">URL</option>
-                                      <option value="PHONE_NUMBER">Phone</option>
+                                      <option value="URL">URL Link</option>
+                                      <option value="PHONE_NUMBER">Phone Call</option>
+                                      <option value="COPY_CODE">Copy Coupon Code</option>
+                                      <option value="FLOW">WhatsApp Flow</option>
+                                      <option value="CATALOG">View Catalog</option>
                                   </select>
                                   <div className="w-full space-y-1">
-                                      <input type="text" value={btn.text} onChange={e => { const nb = [...buttons]; nb[i].text = e.target.value; setButtons(nb); }} placeholder="Button Text (Max 25)" maxLength={25} className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none" />
-                                      {btn.type === 'URL' && <input type="url" value={btn.url} onChange={e => { const nb = [...buttons]; nb[i].url = e.target.value; setButtons(nb); }} placeholder="https://..." className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />}
-                                      {btn.type === 'PHONE_NUMBER' && <input type="tel" value={btn.phone} onChange={e => { const nb = [...buttons]; nb[i].phone = e.target.value; setButtons(nb); }} placeholder="+1234567890" className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />}
+                                      {btn.type !== 'COPY_CODE' && (
+                                        <input type="text" value={btn.text} onChange={e => { const nb = [...buttons]; nb[i].text = e.target.value; setButtons(nb); }} placeholder={btn.type === 'FLOW' ? 'Flow Button Label (e.g. Start Survey)' : 'Button Text (Max 25)'} maxLength={25} className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none" />
+                                      )}
+                                      {btn.type === 'URL' && <input type="url" value={btn.url} onChange={e => { const nb = [...buttons]; nb[i].url = e.target.value; setButtons(nb); }} placeholder="https://yourstore.com/deal or https://site.com/{{1}}" className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />}
+                                      {btn.type === 'PHONE_NUMBER' && <input type="tel" value={btn.phone} onChange={e => { const nb = [...buttons]; nb[i].phone = e.target.value; setButtons(nb); }} placeholder="+919876543210" className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />}
+                                      {btn.type === 'COPY_CODE' && <input type="text" value={btn.example || ''} onChange={e => { const nb = [...buttons]; nb[i].example = e.target.value; setButtons(nb); }} placeholder="Sample Coupon Code (e.g. SUMMER50)" className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />}
+                                      {btn.type === 'FLOW' && (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                                          <input type="text" value={btn.flow_id || ''} onChange={e => { const nb = [...buttons]; nb[i].flow_id = e.target.value; setButtons(nb); }} placeholder="Meta Flow ID" className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />
+                                          <input type="text" value={btn.navigate_screen || ''} onChange={e => { const nb = [...buttons]; nb[i].navigate_screen = e.target.value; setButtons(nb); }} placeholder="Screen Name (e.g. SCREEN_1)" className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-2 py-1 text-xs outline-none font-mono" />
+                                        </div>
+                                      )}
                                   </div>
                                   <button onClick={() => { const nb = [...buttons]; nb.splice(i, 1); setButtons(nb); }} className="text-red-400 hover:text-red-300 p-1 cursor-pointer rounded-lg hover:bg-red-500/10"><Trash2 size={14} /></button>
                               </div>

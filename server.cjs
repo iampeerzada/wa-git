@@ -2729,6 +2729,7 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
     console.log(`[API Send Bulk] Processing bulk request for ${numbers.length} numbers.`);
     
     try {
+        const campaignId = `bulk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         let currentDelay = 0;
         const jobs = numbers.map((number, index) => {
             // Calculate a staggered delay for each message based on the options
@@ -2751,7 +2752,8 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
                     mediaUrl,
                     mediaType,
                     waButtons: buttons,
-                    options: { ...options, delay: randomDelay }
+                    campaignId,
+                    options: { ...options, delay: randomDelay, campaignId }
                 },
                 opts: {
                     delay: currentDelay // BullMQ delay option
@@ -2763,9 +2765,15 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
         const chunkSize = 500;
         for (let i = 0; i < jobs.length; i += chunkSize) {
             const chunk = jobs.slice(i, i + chunkSize);
-            await outboundQueue.addBulk(chunk);
+            if (outboundQueue) {
+                await outboundQueue.addBulk(chunk);
+            }
         }
-        res.json({ success: true, message: `${numbers.length} messages queued for bulk sending` });
+        res.json({ 
+            success: true, 
+            campaignId,
+            message: `${numbers.length} messages queued for bulk sending` 
+        });
     } catch (err) {
         console.error('[API Send Bulk] Error:', err);
         res.status(500).json({ error: err.message });
@@ -3012,10 +3020,18 @@ app.get('/api/campaigns/scheduled', authenticate, async (req, res) => {
     res.json({ success: true, campaigns: userCampaigns });
 });
 
-app.post('/api/campaigns/scheduled/:id/cancel', authenticate, async (req, res) => {
+app.post(['/api/campaigns/scheduled/:id/cancel', '/api/campaigns/:id/stop'], authenticate, async (req, res) => {
     const { id } = req.params;
     let found = false;
 
+    // 1. Mark in Redis for instant worker skip
+    try {
+        if (redisConnection) {
+            await redisConnection.set(`campaign_cancelled:${id}`, '1', 'EX', 86400 * 7);
+        }
+    } catch (e) {}
+
+    // 2. Mark in memory
     if (inMemoryScheduledCampaigns.has(id)) {
         const c = inMemoryScheduledCampaigns.get(id);
         if (req.user.role === 'superadmin' || c.userId === req.user.id) {
@@ -3024,20 +3040,115 @@ app.post('/api/campaigns/scheduled/:id/cancel', authenticate, async (req, res) =
         }
     }
 
+    // 3. Mark in DB (for both 'scheduled' and 'processing' statuses!)
     if (pool) {
         const q = req.user.role === 'superadmin'
-            ? `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE id = $1 AND status = 'scheduled'`
-            : `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE id = $1 AND user_id = $2 AND status = 'scheduled'`;
+            ? `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE id = $1 AND status IN ('scheduled', 'processing')`
+            : `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE id = $1 AND user_id = $2 AND status IN ('scheduled', 'processing')`;
         const params = req.user.role === 'superadmin' ? [id] : [id, req.user.id];
         const dbRes = await pool.query(q, params).catch(() => ({ rowCount: 0 }));
         if (dbRes.rowCount > 0) found = true;
     }
 
-    if (!found) {
-        return res.status(404).json({ error: 'Scheduled campaign not found or already executed' });
+    // 4. Drain matching delayed/waiting jobs from BullMQ queue
+    if (outboundQueue) {
+        try {
+            const delayed = await outboundQueue.getDelayed();
+            const waiting = await outboundQueue.getWaiting();
+            for (const job of [...delayed, ...waiting]) {
+                if (job && job.data && (job.data.campaignId === id || job.data.options?.campaignId === id)) {
+                    await job.remove().catch(() => {});
+                    found = true;
+                }
+            }
+        } catch (qErr) {
+            console.warn('[Queue Cleanup Warning]', qErr.message);
+        }
     }
 
-    res.json({ success: true, message: 'Scheduled campaign cancelled successfully' });
+    if (io) {
+        io.emit('campaign_status_updated', { id, status: 'cancelled' });
+    }
+
+    res.json({ success: true, message: 'Campaign cancelled / stopped successfully' });
+});
+
+app.post(['/api/campaigns/stop-active', '/api/queue/stop-active'], authenticate, async (req, res) => {
+    const userId = req.user.id;
+    const nowTs = Date.now().toString();
+    const campaignId = req.body?.campaignId;
+
+    let clearedJobsCount = 0;
+
+    // 1. Signal Redis to immediately drop all current jobs from this user timestamp
+    try {
+        if (redisConnection) {
+            await redisConnection.set(`user_queue_stopped:${userId}`, nowTs, 'EX', 86400 * 7);
+            if (campaignId) {
+                await redisConnection.set(`campaign_cancelled:${campaignId}`, '1', 'EX', 86400 * 7);
+            }
+        }
+    } catch (e) {}
+
+    // 2. Mark in-memory campaigns
+    for (const [cId, c] of inMemoryScheduledCampaigns.entries()) {
+        if ((req.user.role === 'superadmin' || c.userId === userId) && (!campaignId || cId === campaignId)) {
+            if (c.status === 'processing' || c.status === 'scheduled') {
+                c.status = 'cancelled';
+            }
+        }
+    }
+
+    // 3. Mark database scheduled/processing campaigns
+    if (pool) {
+        try {
+            if (campaignId) {
+                const q = req.user.role === 'superadmin'
+                    ? `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE id = $1 AND status IN ('scheduled', 'processing')`
+                    : `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE id = $1 AND user_id = $2 AND status IN ('scheduled', 'processing')`;
+                await pool.query(q, req.user.role === 'superadmin' ? [campaignId] : [campaignId, userId]);
+            } else {
+                const q = req.user.role === 'superadmin'
+                    ? `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE status IN ('scheduled', 'processing')`
+                    : `UPDATE scheduled_campaigns SET status = 'cancelled' WHERE user_id = $1 AND status IN ('scheduled', 'processing')`;
+                await pool.query(q, req.user.role === 'superadmin' ? [] : [userId]);
+            }
+        } catch (dbErr) {
+            console.warn('[Stop Active DB Warning]', dbErr.message);
+        }
+    }
+
+    // 4. Actively remove pending/delayed jobs from BullMQ
+    if (outboundQueue) {
+        try {
+            const delayed = await outboundQueue.getDelayed();
+            const waiting = await outboundQueue.getWaiting();
+            for (const job of [...delayed, ...waiting]) {
+                if (job && job.data && (job.data.userId === userId || req.user.role === 'superadmin')) {
+                    if (!campaignId || job.data.campaignId === campaignId || job.data.options?.campaignId === campaignId) {
+                        await job.remove().catch(() => {});
+                        clearedJobsCount++;
+                    }
+                }
+            }
+        } catch (qErr) {
+            console.warn('[Queue Stop Warning]', qErr.message);
+        }
+    }
+
+    if (io) {
+        io.emit('user_queue_stopped', { userId, campaignId, stoppedAt: nowTs });
+        if (campaignId) {
+            io.emit('campaign_status_updated', { id: campaignId, status: 'cancelled' });
+        }
+    }
+
+    console.log(`[Campaign Stop] User ${userId} stopped active campaigns. Cleared ${clearedJobsCount} queued jobs.`);
+    res.json({
+        success: true,
+        message: 'Active campaign & outbound queue stopped successfully.',
+        clearedJobs: clearedJobsCount
+    });
 });
 
 app.post('/api/campaigns/scheduled/:id/execute-now', authenticate, async (req, res) => {

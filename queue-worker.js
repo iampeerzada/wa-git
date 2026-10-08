@@ -120,7 +120,7 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
     return { link: linkUrl };
 };
 
-const sanitizeMetaComponents = async (rawComponents, instance) => {
+const sanitizeMetaComponents = async (rawComponents, instance, options = {}) => {
     if (!Array.isArray(rawComponents)) return [];
     const clean = [];
 
@@ -157,7 +157,9 @@ const sanitizeMetaComponents = async (rawComponents, instance) => {
             if (Array.isArray(comp.parameters)) {
                 for (let param of comp.parameters) {
                     let textVal = param?.text !== undefined ? param.text : (typeof param === 'string' ? param : '');
-                    bodyParams.push({ type: 'text', text: String(textVal) });
+                    if (textVal !== '') {
+                        bodyParams.push({ type: 'text', text: String(textVal) });
+                    }
                 }
             }
             if (bodyParams.length > 0) {
@@ -170,13 +172,30 @@ const sanitizeMetaComponents = async (rawComponents, instance) => {
             if (Array.isArray(comp.parameters)) {
                 for (let param of comp.parameters) {
                     if (subType === 'url') {
-                        btnParams.push({ type: 'text', text: String(param.text || param || '') });
+                        btnParams.push({ type: 'text', text: String(param?.text || param || '') });
                     } else if (subType === 'quick_reply') {
-                        btnParams.push({ type: 'payload', payload: String(param.payload || param || 'CLICKED') });
+                        btnParams.push({ type: 'payload', payload: String(param?.payload || param || 'CLICKED') });
                     } else if (subType === 'copy_code') {
-                        btnParams.push({ type: 'coupon_code', coupon_code: String(param.coupon_code || param || '') });
+                        btnParams.push({ type: 'coupon_code', coupon_code: String(param?.coupon_code || param || '') });
+                    } else if (subType === 'flow') {
+                        const flowToken = param?.action?.flow_token || options.flowToken || options.flow_token || `flow_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                        const actionObj = { flow_token: String(flowToken) };
+                        const actData = param?.action?.flow_action_data || options.flowActionData || options.flow_action_data;
+                        if (actData && typeof actData === 'object' && Object.keys(actData).length > 0) {
+                            actionObj.flow_action_data = actData;
+                        }
+                        btnParams.push({ type: 'action', action: actionObj });
                     }
                 }
+            }
+            if (subType === 'flow' && btnParams.length === 0) {
+                const flowToken = options.flowToken || options.flow_token || `flow_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                const actionObj = { flow_token: String(flowToken) };
+                const actData = options.flowActionData || options.flow_action_data;
+                if (actData && typeof actData === 'object' && Object.keys(actData).length > 0) {
+                    actionObj.flow_action_data = actData;
+                }
+                btnParams.push({ type: 'action', action: actionObj });
             }
             if (btnParams.length > 0) {
                 clean.push({
@@ -186,6 +205,40 @@ const sanitizeMetaComponents = async (rawComponents, instance) => {
                     parameters: btnParams
                 });
             }
+        } else if (rawType === 'buttons' && Array.isArray(comp.buttons)) {
+            comp.buttons.forEach((btn, btnIdx) => {
+                const bType = String(btn.type || '').toUpperCase();
+                if (bType === 'FLOW' || bType === 'COMPLETE_FLOW' || bType === 'NAVIGATE' || btn.flow_id) {
+                    const flowToken = options.flowToken || options.flow_token || `flow_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                    const actionObj = { flow_token: String(flowToken) };
+                    const actData = options.flowActionData || options.flow_action_data;
+                    if (actData && typeof actData === 'object' && Object.keys(actData).length > 0) {
+                        actionObj.flow_action_data = actData;
+                    }
+                    clean.push({
+                        type: 'button',
+                        sub_type: 'flow',
+                        index: String(btnIdx),
+                        parameters: [{ type: 'action', action: actionObj }]
+                    });
+                } else if (bType === 'URL' && btn.url && /\{\{\d+\}\}/.test(btn.url)) {
+                    const btnVal = options.buttonVariables?.[btnIdx] || options.buttonUrlVariable || '12345';
+                    clean.push({
+                        type: 'button',
+                        sub_type: 'url',
+                        index: String(btnIdx),
+                        parameters: [{ type: 'text', text: String(btnVal) }]
+                    });
+                } else if (bType === 'COPY_CODE') {
+                    const codeVal = options.couponCode || btn.example?.[0] || 'CODE123';
+                    clean.push({
+                        type: 'button',
+                        sub_type: 'copy_code',
+                        index: String(btnIdx),
+                        parameters: [{ type: 'coupon_code', coupon_code: String(codeVal) }]
+                    });
+                }
+            });
         }
     }
     return clean;
@@ -247,8 +300,24 @@ const setupWorker = (instancesMap, saveMessage, io) => {
       waButtons,
       options,
       instanceIds,
-      templates
+      templates,
+      campaignId
     } = job.data;
+
+    // --- CAMPAIGN CANCELLATION CHECK ---
+    const activeCampaignId = campaignId || options?.campaignId;
+    if (activeCampaignId) {
+        const isCancelled = await connection.get(`campaign_cancelled:${activeCampaignId}`);
+        if (isCancelled) {
+            console.log(`[Worker] Job skipped because campaign ${activeCampaignId} was cancelled by user.`);
+            return;
+        }
+    }
+    const userStoppedTs = await connection.get(`user_queue_stopped:${userId}`);
+    if (userStoppedTs && job.timestamp && job.timestamp <= parseInt(userStoppedTs, 10)) {
+        console.log(`[Worker] Job skipped because user ${userId} stopped their active queue.`);
+        return;
+    }
 
     // --- MULTI-INSTANCE & MULTI-TEMPLATE ROTATION ---
     if (instanceIds && Array.isArray(instanceIds) && instanceIds.length > 0) {
@@ -418,27 +487,33 @@ const setupWorker = (instancesMap, saveMessage, io) => {
 
                 if (activeTplName) {
                     msgData.type = "template";
-                    msgData.template = {
-                        name: activeTplName,
-                        language: { code: activeTplLang }
-                    };
-
-                    if (options.components && Array.isArray(options.components) && options.components.length > 0) {
-                        msgData.template.components = await sanitizeMetaComponents(options.components, instance);
-                    } else {
-                        // Look up stored template structure to build exact matching parameters
-                        let dbTplComps = [];
-                        try {
-                            const dbTplRes = await pool.query('SELECT components FROM meta_templates WHERE name = $1 AND (instance_id = $2 OR instance_id IS NOT NULL) ORDER BY (instance_id = $2) DESC LIMIT 1', [activeTplName, instance.id]);
-                            if (dbTplRes.rows.length > 0 && dbTplRes.rows[0].components) {
+                    // Look up stored template structure to build exact matching parameters and exact approved language
+                    let dbTplComps = [];
+                    let exactDbLang = activeTplLang;
+                    try {
+                        const dbTplRes = await pool.query('SELECT language, components FROM meta_templates WHERE name = $1 AND (instance_id = $2 OR instance_id IS NOT NULL) ORDER BY (instance_id = $2) DESC LIMIT 1', [activeTplName, instance.id]);
+                        if (dbTplRes.rows.length > 0) {
+                            if (dbTplRes.rows[0].language) {
+                                exactDbLang = dbTplRes.rows[0].language;
+                            }
+                            if (dbTplRes.rows[0].components) {
                                 dbTplComps = typeof dbTplRes.rows[0].components === 'string' 
                                     ? JSON.parse(dbTplRes.rows[0].components) 
                                     : dbTplRes.rows[0].components;
                             }
-                        } catch (err) {
-                            console.error('[Worker] Error looking up template components:', err.message);
                         }
+                    } catch (err) {
+                        console.error('[Worker] Error looking up template components:', err.message);
+                    }
 
+                    msgData.template = {
+                        name: activeTplName,
+                        language: { code: exactDbLang || activeTplLang || 'en' }
+                    };
+
+                    if (options.components && Array.isArray(options.components) && options.components.length > 0) {
+                        msgData.template.components = await sanitizeMetaComponents(options.components, instance, options);
+                    } else {
                         const comps = [];
 
                         // 1. Header Component
@@ -491,12 +566,25 @@ const setupWorker = (instancesMap, saveMessage, io) => {
 
                         // 3. Footer Component: NEVER ADD FOOTER! Footers in Meta templates are static and cause #131009
 
-                        // 4. Buttons Component
+                        // 4. Buttons Component (including FLOW, URL, QUICK_REPLY, COPY_CODE)
                         const dbButtons = Array.isArray(dbTplComps) ? dbTplComps.find(c => String(c.type).toUpperCase() === 'BUTTONS') : null;
                         if (dbButtons && Array.isArray(dbButtons.buttons)) {
                             dbButtons.buttons.forEach((btn, btnIdx) => {
                                 const btnType = String(btn.type).toUpperCase();
-                                if (btnType === 'URL' && btn.url && /\{\{\d+\}\}/.test(btn.url)) {
+                                if (btnType === 'FLOW' || btnType === 'COMPLETE_FLOW' || btnType === 'NAVIGATE' || btn.flow_id) {
+                                    const flowToken = options.flowToken || options.flow_token || `flow_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                                    const actionObj = { flow_token: String(flowToken) };
+                                    const actData = options.flowActionData || options.flow_action_data;
+                                    if (actData && typeof actData === 'object' && Object.keys(actData).length > 0) {
+                                        actionObj.flow_action_data = actData;
+                                    }
+                                    comps.push({
+                                        type: "button",
+                                        sub_type: "flow",
+                                        index: String(btnIdx),
+                                        parameters: [{ type: "action", action: actionObj }]
+                                    });
+                                } else if (btnType === 'URL' && btn.url && /\{\{\d+\}\}/.test(btn.url)) {
                                     const btnVar = options.buttonVariables?.[btnIdx] || options.buttonUrlVariable || activeTplVars[expectedBodyVarsCount + btnIdx] || btn.example?.[0] || '12345';
                                     comps.push({
                                         type: "button",
@@ -544,12 +632,80 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                     }
 
                     delete msgData.text;
+                } else if (options?.location || options?.type === 'location') {
+                    msgData.type = "location";
+                    const loc = options.location || {};
+                    msgData.location = {
+                        latitude: parseFloat(loc.latitude || options.latitude || 0),
+                        longitude: parseFloat(loc.longitude || options.longitude || 0),
+                        name: loc.name || options.locationName || undefined,
+                        address: loc.address || options.locationAddress || undefined
+                    };
+                    delete msgData.text;
+                } else if (options?.contacts || options?.type === 'contacts') {
+                    msgData.type = "contacts";
+                    msgData.contacts = Array.isArray(options.contacts) ? options.contacts : [options.contacts];
+                    delete msgData.text;
+                } else if (options?.reaction || options?.type === 'reaction') {
+                    msgData.type = "reaction";
+                    const react = options.reaction || {};
+                    msgData.reaction = {
+                        message_id: react.message_id || options.messageId || options.reactionMessageId,
+                        emoji: react.emoji || options.emoji || '👍'
+                    };
+                    delete msgData.text;
+                } else if (options?.interactiveList || options?.type === 'interactive_list' || (options?.interactive && options.interactive.type === 'list')) {
+                    msgData.type = "interactive";
+                    msgData.interactive = options.interactive || {
+                        type: "list",
+                        header: options.interactiveList?.header ? { type: "text", text: options.interactiveList.header } : undefined,
+                        body: { text: finalMessage || options.interactiveList?.body || 'Please choose an option:' },
+                        footer: options.interactiveList?.footer ? { text: options.interactiveList.footer } : undefined,
+                        action: {
+                            button: options.interactiveList?.buttonText || 'Select Option',
+                            sections: options.interactiveList?.sections || []
+                        }
+                    };
+                    delete msgData.text;
+                } else if (options?.interactiveCtaUrl || options?.type === 'cta_url' || (options?.interactive && options.interactive.type === 'cta_url')) {
+                    msgData.type = "interactive";
+                    msgData.interactive = options.interactive || {
+                        type: "cta_url",
+                        body: { text: finalMessage || 'Check this out:' },
+                        action: {
+                            name: "cta_url",
+                            parameters: {
+                                display_text: options.interactiveCtaUrl?.displayText || 'Visit Link',
+                                url: options.interactiveCtaUrl?.url || 'https://ifastx.in'
+                            }
+                        }
+                    };
+                    delete msgData.text;
+                } else if (options?.interactiveLocationRequest || options?.type === 'location_request_message') {
+                    msgData.type = "interactive";
+                    msgData.interactive = {
+                        type: "location_request_message",
+                        body: { text: finalMessage || 'Please share your live location:' },
+                        action: {
+                            name: "send_location"
+                        }
+                    };
+                    delete msgData.text;
                 } else if (mediaUrl) {
-                    const mType = (mediaType || 'image').toLowerCase();
+                    let mType = (mediaType || options?.mediaType || 'image').toLowerCase();
+                    if (mType === 'audio' || mType === 'voice' || mType === 'ptt') {
+                        mType = 'audio';
+                    } else if (mType === 'sticker') {
+                        mType = 'sticker';
+                    } else if (mType !== 'video' && mType !== 'document') {
+                        mType = 'image';
+                    }
                     msgData.type = mType;
                     const mediaObj = await getMetaMediaObject(mediaUrl, instance, mType);
                     msgData[mType] = mediaObj;
-                    if (finalMessage) msgData[mType].caption = finalMessage;
+                    if (finalMessage && mType !== 'audio' && mType !== 'sticker') {
+                        msgData[mType].caption = finalMessage;
+                    }
                     delete msgData.text;
                 } else if (waButtons && waButtons.length > 0) {
                     msgData.type = "interactive";
@@ -586,7 +742,11 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                 
                 const metaJson = await metaRes.json();
                 if (!metaRes.ok || metaJson.error) {
-                    throw new Error(metaJson.error?.message || 'Meta API Error');
+                    const errorDetails = metaJson.error?.error_user_msg || metaJson.error?.error_user_title || metaJson.error?.message || 'Meta API Error';
+                    const errorCode = metaJson.error?.code ? `(#${metaJson.error.code}) ` : '';
+                    const fullError = `${errorCode}${errorDetails}`;
+                    console.error(`[Meta API Error] ${fullError}`, JSON.stringify(metaJson.error));
+                    throw new Error(fullError);
                 }
                 
                 msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { WhatsAppInstance, InstanceStatus, MessageTemplate, ContactGroup, User, UserRole, Plan, MediaAsset, InteractiveButton, ScheduledCampaign } from '../types';
-import { Send, Users, Clock, ShieldCheck, Play, Pause, RotateCcw, CheckCircle2, XCircle, AlertTriangle, FileText, ChevronDown, ChevronUp, Maximize2, Copy, Check, Lock, Layers, Image as ImageIcon, Eye, Smartphone, MoreVertical, Paperclip, Smile, ExternalLink, Phone, Reply, Zap, Activity, ShieldAlert, History, ChevronLeft, ChevronRight, Filter, Calendar, X, Trash2, RefreshCw } from 'lucide-react';
+import { Send, Users, Clock, ShieldCheck, Play, Pause, RotateCcw, CheckCircle2, XCircle, AlertTriangle, FileText, ChevronDown, ChevronUp, Maximize2, Copy, Check, Lock, Layers, Image as ImageIcon, Eye, Smartphone, MoreVertical, Paperclip, Smile, ExternalLink, Phone, Reply, Zap, Activity, ShieldAlert, History, ChevronLeft, ChevronRight, Filter, Calendar, X, Trash2, RefreshCw, Square, OctagonAlert } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from 'recharts';
 
 interface BulkSenderProps {
@@ -29,7 +29,9 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   const [showMediaLib, setShowMediaLib] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, success: 0, failed: 0, queued: 0 });
   const [metaTemplates, setMetaTemplates] = useState<any[]>([]);
-  const [selectedMetaTemplate, setSelectedMetaTemplate] = useState<{name: string, language: string} | null>(null);
+  const [selectedMetaTemplate, setSelectedMetaTemplate] = useState<{name: string, language: string, components?: any, category?: string} | null>(null);
+  const [activeCampaignId, setActiveCampaignId] = useState<string | null>(null);
+  const [isStoppingQueue, setIsStoppingQueue] = useState(false);
   const [logs, setLogs] = useState<{ msg: string; type: 'success' | 'error' | 'info' | 'warning' }[]>([]);
   const [viewMode, setViewMode] = useState<'sender' | 'history' | 'scheduled'>(initialViewMode || 'sender');
   const [historyLogs, setHistoryLogs] = useState<any[]>([]);
@@ -107,8 +109,11 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     }
   };
 
-  const handleCancelScheduled = async (id: string) => {
-    if (!confirm('Are you sure you want to cancel this scheduled campaign?')) return;
+  const handleCancelScheduled = async (id: string, isRunning: boolean = false) => {
+    const promptMsg = isRunning 
+      ? 'Are you sure you want to STOP this running campaign immediately? Pending drip-feed messages will be cancelled.' 
+      : 'Are you sure you want to cancel this scheduled campaign?';
+    if (!confirm(promptMsg)) return;
     setActionLoadingId(id);
     try {
       const res = await fetch(`${apiBase}/api/campaigns/scheduled/${id}/cancel`, {
@@ -120,6 +125,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       });
       const data = await res.json();
       if (res.ok) {
+        addLog(isRunning ? `Campaign ${id} stopped by user.` : `Campaign ${id} cancelled.`, 'warning');
         fetchScheduledCampaigns();
       } else {
         alert(data.error || 'Failed to cancel campaign');
@@ -128,6 +134,37 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       alert(e.message);
     } finally {
       setActionLoadingId(null);
+    }
+  };
+
+  const handleStopActiveCampaign = async (specificCampaignId?: string) => {
+    if (!confirm('Are you sure you want to STOP the running outbound campaign immediately? All pending and queued messages will be aborted.')) return;
+    setIsStoppingQueue(true);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/stop-active`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        },
+        body: JSON.stringify({ campaignId: specificCampaignId || activeCampaignId })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setIsSending(false);
+        setProgress(p => ({ ...p, queued: 0 }));
+        addLog(`Campaign stopped immediately. ${data.clearedJobs !== undefined ? data.clearedJobs + ' queued messages dropped.' : 'Outbound queue cleared.'}`, 'warning');
+        alert('Campaign execution stopped successfully!');
+        fetchScheduledCampaigns();
+        fetchHistory();
+      } else {
+        alert(data.error || 'Failed to stop campaign');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Error stopping campaign');
+    } finally {
+      setIsStoppingQueue(false);
     }
   };
 
@@ -360,6 +397,9 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         if (selectedMetaTemplate) {
           payload.options.templateName = selectedMetaTemplate.name;
           payload.options.templateLanguage = selectedMetaTemplate.language;
+          if (selectedMetaTemplate.components) {
+            payload.options.components = selectedMetaTemplate.components;
+          }
         }
 
         if (selectedMedia) {
@@ -419,6 +459,9 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         if (selectedMetaTemplate) {
             payload.options.templateName = selectedMetaTemplate.name;
             payload.options.templateLanguage = selectedMetaTemplate.language;
+            if (selectedMetaTemplate.components) {
+                payload.options.components = selectedMetaTemplate.components;
+            }
         }
 
         if (selectedMedia) {
@@ -442,6 +485,9 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         const data = await res.json();
         
         if (res.status === 200 || data.success) {
+            if (data.campaignId) {
+                setActiveCampaignId(data.campaignId);
+            }
             setProgress(p => ({ ...p, current: numberList.length, queued: numberList.length }));
             addLog(`Campaign Batching Completed. Backend is now drip-feeding ${numberList.length} messages.`, 'success');
         } else if (res.status === 429) {
@@ -535,17 +581,27 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
           </div>
       )}
 
-      {isSending && (
-          <div className="bg-blue-500/10 border border-blue-500/30 p-3.5 sm:p-4 rounded-xl flex items-center justify-between flex-wrap gap-3 mb-4 animate-pulse">
+      {(isSending || progress.queued > 0) && (
+          <div className="bg-blue-500/10 border border-blue-500/30 p-3.5 sm:p-4 rounded-xl flex items-center justify-between flex-wrap gap-3 mb-4 animate-in fade-in duration-200">
               <div className="flex items-center gap-3">
-                  <Activity className="text-blue-400" size={20} />
+                  <Activity className="text-blue-400 animate-pulse" size={20} />
                   <div>
                       <p className="text-white font-bold text-xs">Enterprise Anti-Ban Layer Active</p>
-                      <p className="text-blue-400/70 text-[9px] uppercase font-bold tracking-wider">Applying randomized jitter & presence simulation</p>
+                      <p className="text-blue-400/70 text-[9px] uppercase font-bold tracking-wider">Applying randomized jitter & presence simulation · Drip-feeding {progress.queued || progress.total} messages</p>
                   </div>
               </div>
               <div className="flex items-center gap-2">
                   <span className="text-[9px] font-bold text-blue-400 bg-blue-400/10 px-2.5 py-0.5 rounded-md border border-blue-400/20">THROTTLING ENABLED</span>
+                  <button
+                    type="button"
+                    onClick={() => handleStopActiveCampaign()}
+                    disabled={isStoppingQueue}
+                    className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-red-500/20"
+                    title="Stop running campaign immediately"
+                  >
+                    <Square size={12} fill="currentColor" />
+                    <span>{isStoppingQueue ? 'Stopping...' : 'Stop Campaign'}</span>
+                  </button>
               </div>
           </div>
       )}
@@ -630,10 +686,10 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       {(!Array.isArray(metaTemplates) || metaTemplates.length === 0) ? (
          <div className="p-3 text-xs text-gray-500 italic text-center">No approved templates found. Sync in Meta Templates tab.</div>
       ) : (
-         (Array.isArray(metaTemplates) ? metaTemplates : []).filter(t => t.status === 'APPROVED').map(tpl => (
+          (Array.isArray(metaTemplates) ? metaTemplates : []).filter(t => t.status === 'APPROVED').map(tpl => (
             <button key={tpl.id} onClick={() => {
                 setMessage('[META TEMPLATE] ' + tpl.name);
-                setSelectedMetaTemplate({ name: tpl.name, language: tpl.language, components: tpl.components });
+                setSelectedMetaTemplate({ name: tpl.name, language: tpl.language, components: tpl.components, category: tpl.category });
                 if (Array.isArray(tpl.components)) {
                     const headerComp = tpl.components.find((c: any) => c.type === 'HEADER');
                     if (headerComp && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerComp.format)) {
@@ -644,8 +700,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                     }
                 }
                 setShowTemplates(false);
+                addLog(`Loaded Meta Approved Template: ${tpl.name} (${tpl.language}) [${tpl.category || 'UTILITY'}]`, 'info');
             }} className="w-full text-left p-2.5 hover:bg-[#2a3942] border-b border-gray-700/50 last:border-0 transition-all cursor-pointer">
-                <div className="text-xs font-bold text-white mb-0.5 truncate">{tpl.name} ({tpl.language})</div>
+                <div className="text-xs font-bold text-white mb-0.5 truncate flex items-center justify-between">
+                  <span>{tpl.name}</span>
+                  <span className="text-[9px] px-1.5 py-0.2 bg-emerald-500/20 text-emerald-300 rounded font-mono">{tpl.language}</span>
+                </div>
                 <div className="text-[10px] text-gray-400 line-clamp-2">{tpl.category}</div>
             </button>
          ))
@@ -705,6 +765,26 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                   </select>
                 </div>
               </div>
+
+              {selectedMetaTemplate && (
+                <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-between flex-wrap gap-2 animate-in fade-in slide-in-from-left-2">
+                   <div className="flex items-center gap-2">
+                     <FileText className="text-[#25D366] shrink-0" size={16} />
+                     <div className="min-w-0">
+                       <p className="text-[9px] text-emerald-400 uppercase font-bold tracking-wider">Meta Approved Template Attached</p>
+                       <p className="text-xs text-white font-mono truncate">{selectedMetaTemplate.name} ({selectedMetaTemplate.language}) · <span className="text-emerald-300 uppercase text-[10px] font-sans font-bold">{selectedMetaTemplate.category || 'UTILITY'}</span></p>
+                     </div>
+                   </div>
+                   <button 
+                     type="button"
+                     onClick={() => { setSelectedMetaTemplate(null); setMessage(''); }} 
+                     className="text-gray-400 hover:text-red-400 p-1 transition-colors cursor-pointer"
+                     title="Clear template"
+                   >
+                     <X size={15} />
+                   </button>
+                </div>
+              )}
 
               {selectedMedia && (
                 <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-xl flex items-center justify-between flex-wrap gap-2 animate-in fade-in slide-in-from-left-2">
@@ -1105,8 +1185,25 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
 
           <div className="bg-[#111b21] rounded-xl border border-gray-800/80 p-3.5 sm:p-4 shadow-md">
             <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center justify-between flex-wrap gap-2">
-              <span>Campaign Staggering</span>
-              {progress.total > 0 && <span className="text-[10px] font-mono text-gray-400">{progress.current}/{progress.total} Pushed</span>}
+              <span className="flex items-center gap-1.5">
+                <Layers size={14} className="text-[#25D366]" />
+                Campaign Staggering
+              </span>
+              <div className="flex items-center gap-2">
+                {progress.total > 0 && <span className="text-[10px] font-mono text-gray-400">{progress.current}/{progress.total} Pushed</span>}
+                {(isSending || progress.queued > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => handleStopActiveCampaign()}
+                    disabled={isStoppingQueue}
+                    className="px-2.5 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer shadow-sm shadow-red-500/20"
+                    title="Stop active campaign"
+                  >
+                    <Square size={10} fill="currentColor" />
+                    <span>{isStoppingQueue ? 'Stopping...' : 'Stop Campaign'}</span>
+                  </button>
+                )}
+              </div>
             </h3>
             <div className="space-y-3">
               <div className="relative h-1.5 bg-gray-800 rounded-full overflow-hidden">
@@ -1159,10 +1256,21 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 </div>
               )}
 
-              {isSending && (
-                <div className="flex items-center gap-2 p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl">
-                  <Activity size={13} className="text-blue-400 animate-pulse" />
-                  <span className="text-[9px] text-blue-400 font-bold uppercase">Compliance Layer is feeding the queue...</span>
+              {(isSending || progress.queued > 0) && (
+                <div className="flex items-center justify-between p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                  <div className="flex items-center gap-2">
+                    <Activity size={13} className="text-blue-400 animate-pulse shrink-0" />
+                    <span className="text-[9px] text-blue-400 font-bold uppercase">Compliance Layer is feeding the queue...</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleStopActiveCampaign()}
+                    disabled={isStoppingQueue}
+                    className="px-2 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded text-[9px] font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer"
+                  >
+                    <Square size={9} fill="currentColor" />
+                    <span>Stop</span>
+                  </button>
                 </div>
               )}
             </div>
@@ -1253,6 +1361,17 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
             </div>
 
             <div className="flex items-center gap-2">
+              {scheduledCampaigns.some(c => c.status === 'processing') && (
+                <button
+                  onClick={() => handleStopActiveCampaign()}
+                  disabled={isStoppingQueue}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 font-bold text-xs uppercase tracking-wider transition-all cursor-pointer animate-pulse"
+                  title="Stop all currently running campaigns"
+                >
+                  <Square size={12} fill="currentColor" />
+                  <span>Stop All Running</span>
+                </button>
+              )}
               <button
                 onClick={() => fetchScheduledCampaigns()}
                 disabled={isLoadingScheduled}
@@ -1433,6 +1552,18 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                           </button>
 
                           <div className="flex items-center gap-1.5">
+                            {campaign.status === 'processing' && (
+                              <button
+                                onClick={() => handleCancelScheduled(campaign.id, true)}
+                                disabled={actionLoadingId === campaign.id}
+                                className="px-2.5 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/40 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer animate-pulse"
+                                title="Stop running campaign immediately"
+                              >
+                                <Square size={11} fill="currentColor" />
+                                <span>{actionLoadingId === campaign.id ? 'Stopping...' : 'Stop Running'}</span>
+                              </button>
+                            )}
+
                             {campaign.status === 'scheduled' && (
                               <>
                                 <button
@@ -1445,7 +1576,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                                   <span>Run Now</span>
                                 </button>
                                 <button
-                                  onClick={() => handleCancelScheduled(campaign.id)}
+                                  onClick={() => handleCancelScheduled(campaign.id, false)}
                                   disabled={actionLoadingId === campaign.id}
                                   className="px-2.5 py-1.5 rounded-lg bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                                   title="Cancel scheduled campaign"
