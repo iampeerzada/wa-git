@@ -3371,13 +3371,12 @@ app.get('/api/campaigns/active', authenticate, async (req, res) => {
                 ? `SELECT sc.*, i.name as instance_name, i.provider as instance_provider 
                    FROM scheduled_campaigns sc 
                    LEFT JOIN instances i ON sc.instance_id = i.id 
-                   WHERE sc.status IN ('processing', 'scheduled', 'cancelled')
-                   ORDER BY sc.created_at DESC LIMIT 50`
+                   ORDER BY COALESCE(sc.executed_at, sc.created_at, sc.scheduled_at, NOW()) DESC LIMIT 50`
                 : `SELECT sc.*, i.name as instance_name, i.provider as instance_provider 
                    FROM scheduled_campaigns sc 
                    LEFT JOIN instances i ON sc.instance_id = i.id 
-                   WHERE sc.user_id = $1 AND sc.status IN ('processing', 'scheduled', 'cancelled')
-                   ORDER BY sc.created_at DESC LIMIT 50`;
+                   WHERE sc.user_id = $1
+                   ORDER BY COALESCE(sc.executed_at, sc.created_at, sc.scheduled_at, NOW()) DESC LIMIT 50`;
             const params = isSuper ? [] : [userId];
             const dbRes = await pool.query(q, params).catch(() => ({ rows: [] }));
             campaigns = dbRes.rows;
@@ -3397,7 +3396,7 @@ app.get('/api/campaigns/active', authenticate, async (req, res) => {
                     WHERE campaign_id = $1
                 `, [r.id]).catch(() => ({ rows: [{ sent_count: 0, failed_count: 0 }] }));
 
-                if (metricsRes.rows.length > 0) {
+                if (metricsRes.rows && metricsRes.rows.length > 0) {
                     sentCount = parseInt(metricsRes.rows[0].sent_count, 10) || 0;
                     failedCount = parseInt(metricsRes.rows[0].failed_count, 10) || 0;
                 }
@@ -3406,7 +3405,7 @@ app.get('/api/campaigns/active', authenticate, async (req, res) => {
             const total = parseInt(r.total_recipients, 10) || 0;
             const pending = Math.max(0, total - sentCount - failedCount);
 
-            let status = r.status;
+            let status = r.status || 'processing';
             if (status === 'processing' && (sentCount + failedCount >= total) && total > 0) {
                 status = 'completed';
                 if (pool) {

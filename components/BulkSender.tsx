@@ -567,6 +567,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
             }
             setProgress(p => ({ ...p, current: numberList.length, queued: numberList.length }));
             addLog(`Campaign Batching Completed. Backend is now drip-feeding ${numberList.length} messages.`, 'success');
+            fetchRunningCampaigns();
         } else if (res.status === 429) {
             addLog(`Safety Limit hit: ${data.error}`, 'error');
         } else {
@@ -615,8 +616,9 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
           <Send className="w-3.5 h-3.5" />
           <span>New Campaign</span>
         </button>
+
         <button
-          onClick={() => { setViewMode('scheduled'); fetchScheduledCampaigns(); }}
+          onClick={() => { setViewMode('scheduled'); fetchScheduledCampaigns(); fetchRunningCampaigns(); }}
           className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
             viewMode === 'scheduled'
               ? 'bg-[#25D366] text-black shadow-md shadow-[#25D366]/10'
@@ -624,7 +626,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
           }`}
         >
           <Calendar className="w-3.5 h-3.5" />
-          <span>Scheduled Campaigns</span>
+          <span>Active & Scheduled Campaigns</span>
           {scheduledCampaigns.filter(c => c.status === 'scheduled').length > 0 && (
             <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
               viewMode === 'scheduled' ? 'bg-black text-[#25D366]' : 'bg-amber-400 text-black'
@@ -633,6 +635,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
             </span>
           )}
         </button>
+
         <button
           onClick={() => setViewMode('history')}
           className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
@@ -649,150 +652,39 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       {viewMode === 'sender' ? (
         <>
           {isSuspended && (
-          <div className="bg-red-500/10 border border-red-500/30 p-3 sm:p-4 rounded-xl flex items-center gap-3 text-red-500 mb-4">
+            <div className="bg-red-500/10 border border-red-500/30 p-3 sm:p-4 rounded-xl flex items-center gap-3 text-red-500 mb-4">
               <Lock size={18} />
               <div className="text-xs">
-                  <p className="font-bold">Execution Blocked</p>
-                  <p className="opacity-80">Your subscription has expired. Please visit the Billing tab to renew access.</p>
+                <p className="font-bold">Execution Blocked</p>
+                <p className="opacity-80">Your subscription has expired. Please visit the Billing tab to renew access.</p>
               </div>
-          </div>
-      )}
+            </div>
+          )}
 
-      {(isSending || progress.queued > 0) && (
-          <div className="bg-blue-500/10 border border-blue-500/30 p-3.5 sm:p-4 rounded-xl flex items-center justify-between flex-wrap gap-3 mb-4 animate-in fade-in duration-200">
+          {(isSending || progress.queued > 0) && (
+            <div className="bg-blue-500/10 border border-blue-500/30 p-3.5 sm:p-4 rounded-xl flex items-center justify-between flex-wrap gap-3 mb-4 animate-in fade-in duration-200">
               <div className="flex items-center gap-3">
-                  <Activity className="text-blue-400 animate-pulse" size={20} />
-                  <div>
-                      <p className="text-white font-bold text-xs">Enterprise Anti-Ban Layer Active</p>
-                      <p className="text-blue-400/70 text-[9px] uppercase font-bold tracking-wider">Applying randomized jitter & presence simulation · Drip-feeding {progress.queued || progress.total} messages</p>
-                  </div>
+                <Activity className="text-blue-400 animate-pulse" size={20} />
+                <div>
+                  <p className="text-white font-bold text-xs">Enterprise Anti-Ban Layer Active</p>
+                  <p className="text-blue-400/70 text-[9px] uppercase font-bold tracking-wider">Applying randomized jitter & presence simulation · Drip-feeding {progress.queued || progress.total} messages</p>
+                </div>
               </div>
               <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-bold text-blue-400 bg-blue-400/10 px-2.5 py-0.5 rounded-md border border-blue-400/20">THROTTLING ENABLED</span>
-                  <button
-                    type="button"
-                    onClick={() => handleStopActiveCampaign()}
-                    disabled={isStoppingQueue}
-                    className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-red-500/20"
-                    title="Stop running campaign immediately"
-                  >
-                    <Square size={12} fill="currentColor" />
-                    <span>{isStoppingQueue ? 'Stopping...' : 'Stop Campaign'}</span>
-                  </button>
+                <span className="text-[9px] font-bold text-blue-400 bg-blue-400/10 px-2.5 py-0.5 rounded-md border border-blue-400/20">THROTTLING ENABLED</span>
+                <button
+                  type="button"
+                  onClick={() => handleStopActiveCampaign()}
+                  disabled={isStoppingQueue}
+                  className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-red-500/20"
+                  title="Stop running campaign immediately"
+                >
+                  <Square size={12} fill="currentColor" />
+                  <span>{isStoppingQueue ? 'Stopping...' : 'Stop Campaign'}</span>
+                </button>
               </div>
-          </div>
-      )}
-      {/* Active & Running Campaigns Section */}
-      {runningCampaigns.filter(c => c.status === 'processing' || c.status === 'scheduled' || c.status === 'cancelled').length > 0 && (
-        <div className="bg-[#111b21] rounded-xl border border-gray-800 p-4 shadow-xl mb-4 space-y-3">
-          <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-gray-800">
-            <div className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-[#25D366] animate-pulse" />
-              <h3 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
-                Active & Running Campaigns ({runningCampaigns.filter(c => c.status === 'processing' || c.status === 'scheduled').length})
-              </h3>
             </div>
-            <button
-              onClick={fetchRunningCampaigns}
-              className="text-[11px] font-bold text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
-            >
-              <RefreshCw className={`w-3 h-3 ${isLoadingRunning ? 'animate-spin' : ''}`} />
-              <span>Refresh Status</span>
-            </button>
-          </div>
-
-          <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
-            {runningCampaigns.map((camp) => {
-              const total = camp.totalRecipients || 1;
-              const processed = (camp.sentCount || 0) + (camp.failedCount || 0);
-              const percent = Math.min(100, Math.round((processed / total) * 100));
-              const isMeta = camp.instanceProvider === 'meta';
-
-              return (
-                <div key={camp.id} className="bg-[#182229] border border-gray-800/80 rounded-xl p-3.5 space-y-2.5">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <span className={`w-2.5 h-2.5 rounded-full ${camp.status === 'processing' ? 'bg-[#25D366] animate-ping' : camp.status === 'scheduled' ? 'bg-amber-400' : 'bg-red-400'}`} />
-                      <span className="font-extrabold text-xs text-white">{camp.name}</span>
-                      <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border ${
-                        isMeta 
-                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' 
-                          : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                      }`}>
-                        {isMeta ? 'Meta API' : 'Baileys'} ({camp.instanceName})
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
-                        camp.status === 'processing'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                          : camp.status === 'scheduled'
-                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                          : 'bg-red-500/10 text-red-400 border border-red-500/30'
-                      }`}>
-                        {camp.status}
-                      </span>
-
-                      <button
-                        onClick={() => fetchCampaignDetails(camp.id)}
-                        className="text-[11px] font-bold text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 px-2.5 py-1 rounded-lg flex items-center gap-1 border border-blue-500/20 transition-all cursor-pointer"
-                        title="View Detailed Logs & Failure Reasons"
-                      >
-                        <Eye size={12} />
-                        <span>Send Status & Failures</span>
-                      </button>
-
-                      {(camp.status === 'processing' || camp.status === 'scheduled') && (
-                        <button
-                          onClick={() => handleStopActiveCampaign(camp.id)}
-                          disabled={isStoppingQueue}
-                          className="text-[11px] font-black text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer shadow-sm shadow-red-500/20 uppercase tracking-wider"
-                          title="Stop Campaign execution immediately"
-                        >
-                          <Square size={10} fill="currentColor" />
-                          <span>{isStoppingQueue ? 'Stopping...' : 'Stop'}</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Progress Bar */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px] text-gray-400 font-bold">
-                      <span>Progress: {percent}%</span>
-                      <span>{processed} / {total} Recipient Messages Processed</span>
-                    </div>
-                    <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden border border-gray-800 flex">
-                      <div className="bg-[#25D366] transition-all duration-300" style={{ width: `${Math.round(((camp.sentCount || 0) / total) * 100)}%` }} title="Sent" />
-                      <div className="bg-red-500 transition-all duration-300" style={{ width: `${Math.round(((camp.failedCount || 0) / total) * 100)}%` }} title="Failed" />
-                    </div>
-                  </div>
-
-                  {/* Stat Counters */}
-                  <div className="grid grid-cols-4 gap-2 pt-1 text-center">
-                    <div className="bg-black/30 p-1.5 rounded-lg border border-gray-800">
-                      <div className="text-[9px] uppercase font-bold text-gray-400">Total</div>
-                      <div className="text-xs font-black text-white">{total}</div>
-                    </div>
-                    <div className="bg-emerald-500/5 p-1.5 rounded-lg border border-emerald-500/20">
-                      <div className="text-[9px] uppercase font-bold text-emerald-400">Sent (Success)</div>
-                      <div className="text-xs font-black text-emerald-400">{camp.sentCount || 0}</div>
-                    </div>
-                    <div className="bg-red-500/5 p-1.5 rounded-lg border border-red-500/20">
-                      <div className="text-[9px] uppercase font-bold text-red-400">Failed</div>
-                      <div className="text-xs font-black text-red-400">{camp.failedCount || 0}</div>
-                    </div>
-                    <div className="bg-amber-500/5 p-1.5 rounded-lg border border-amber-500/20">
-                      <div className="text-[9px] uppercase font-bold text-amber-400">Pending</div>
-                      <div className="text-xs font-black text-amber-400">{camp.pendingCount || 0}</div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+          )}
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="xl:col-span-2 space-y-4">
@@ -1504,6 +1396,129 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         </>
       ) : viewMode === 'scheduled' ? (
         <div className="space-y-4">
+          {/* Active & Running Campaigns Section */}
+          <div className="bg-[#111b21] rounded-xl border border-gray-800 p-4 shadow-xl mb-4 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-gray-800">
+              <div className="flex items-center gap-2">
+                <Activity className="w-4 h-4 text-[#25D366] animate-pulse" />
+                <h3 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
+                  Active & Running Campaigns ({runningCampaigns.filter(c => c.status === 'processing' || c.status === 'scheduled').length})
+                </h3>
+              </div>
+              <button
+                onClick={fetchRunningCampaigns}
+                className="text-[11px] font-bold text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
+              >
+                <RefreshCw className={`w-3 h-3 ${isLoadingRunning ? 'animate-spin' : ''}`} />
+                <span>Refresh Status</span>
+              </button>
+            </div>
+
+            {runningCampaigns.length === 0 ? (
+              <div className="py-5 px-4 text-center bg-[#182229]/60 rounded-xl border border-gray-800/60">
+                <p className="text-xs font-bold text-gray-300">No active or running bulk campaigns right now.</p>
+                <p className="text-[11px] text-gray-500 mt-1">When you launch a campaign, real-time progress, delivery metrics, stop control, and detailed failure logs will appear here automatically.</p>
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+                {runningCampaigns.map((camp) => {
+                  const total = camp.totalRecipients || 1;
+                  const processed = (camp.sentCount || 0) + (camp.failedCount || 0);
+                  const percent = Math.min(100, Math.round((processed / total) * 100));
+                  const isMeta = camp.instanceProvider === 'meta';
+
+                  return (
+                    <div key={camp.id} className="bg-[#182229] border border-gray-800/80 rounded-xl p-3.5 space-y-2.5">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2.5">
+                          <span className={`w-2.5 h-2.5 rounded-full ${
+                            camp.status === 'processing' ? 'bg-[#25D366] animate-ping' : 
+                            camp.status === 'scheduled' ? 'bg-amber-400' : 
+                            camp.status === 'completed' ? 'bg-blue-400' : 'bg-red-400'
+                          }`} />
+                          <span className="font-extrabold text-xs text-white">{camp.name}</span>
+                          <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border ${
+                            isMeta 
+                              ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' 
+                              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                          }`}>
+                            {isMeta ? 'Meta API' : 'Baileys'} ({camp.instanceName})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
+                            camp.status === 'processing'
+                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                              : camp.status === 'scheduled'
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                              : camp.status === 'completed'
+                              ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30'
+                              : 'bg-red-500/10 text-red-400 border border-red-500/30'
+                          }`}>
+                            {camp.status}
+                          </span>
+
+                          <button
+                            onClick={() => fetchCampaignDetails(camp.id)}
+                            className="text-[11px] font-bold text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 px-2.5 py-1 rounded-lg flex items-center gap-1 border border-blue-500/20 transition-all cursor-pointer"
+                            title="View Detailed Logs & Failure Reasons"
+                          >
+                            <Eye size={12} />
+                            <span>Send Status & Failures</span>
+                          </button>
+
+                          {(camp.status === 'processing' || camp.status === 'scheduled') && (
+                            <button
+                              onClick={() => handleStopActiveCampaign(camp.id)}
+                              disabled={isStoppingQueue}
+                              className="text-[11px] font-black text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer shadow-sm shadow-red-500/20 uppercase tracking-wider"
+                              title="Stop Campaign execution immediately"
+                            >
+                              <Square size={10} fill="currentColor" />
+                              <span>{isStoppingQueue ? 'Stopping...' : 'Stop'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Progress Bar */}
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[11px] text-gray-400 font-bold">
+                          <span>Progress: {percent}%</span>
+                          <span>{processed} / {total} Recipient Messages Processed</span>
+                        </div>
+                        <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden border border-gray-800 flex">
+                          <div className="bg-[#25D366] transition-all duration-300" style={{ width: `${Math.round(((camp.sentCount || 0) / total) * 100)}%` }} title="Sent" />
+                          <div className="bg-red-500 transition-all duration-300" style={{ width: `${Math.round(((camp.failedCount || 0) / total) * 100)}%` }} title="Failed" />
+                        </div>
+                      </div>
+
+                      {/* Stat Counters */}
+                      <div className="grid grid-cols-4 gap-2 pt-1 text-center">
+                        <div className="bg-black/30 p-1.5 rounded-lg border border-gray-800">
+                          <div className="text-[9px] uppercase font-bold text-gray-400">Total</div>
+                          <div className="text-xs font-black text-white">{total}</div>
+                        </div>
+                        <div className="bg-emerald-500/5 p-1.5 rounded-lg border border-emerald-500/20">
+                          <div className="text-[9px] uppercase font-bold text-emerald-400">Sent (Success)</div>
+                          <div className="text-xs font-black text-emerald-400">{camp.sentCount || 0}</div>
+                        </div>
+                        <div className="bg-red-500/5 p-1.5 rounded-lg border border-red-500/20">
+                          <div className="text-[9px] uppercase font-bold text-red-400">Failed</div>
+                          <div className="text-xs font-black text-red-400">{camp.failedCount || 0}</div>
+                        </div>
+                        <div className="bg-amber-500/5 p-1.5 rounded-lg border border-amber-500/20">
+                          <div className="text-[9px] uppercase font-bold text-amber-400">Pending</div>
+                          <div className="text-xs font-black text-amber-400">{camp.pendingCount || 0}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Top Metrics Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
             <div className="bg-[#111b21] border border-gray-800/80 p-3.5 sm:p-4 rounded-xl shadow-xs">
