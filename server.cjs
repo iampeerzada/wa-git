@@ -2821,58 +2821,59 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
     }
 
     console.log(`[API Send Bulk] Processing bulk request for ${numbers.length} numbers.`);
-    
+
     try {
-        const campaignId = `bulk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const campaignId = 'camp_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
         
         let isMeta = false;
         if (instanceId) {
-            const instCheck = instancesMap.get(instanceId);
-            if (instCheck?.provider === 'meta') {
-                isMeta = true;
-            } else {
-                try {
-                    const dbInst = await pool.query('SELECT provider FROM instances WHERE id = $1 OR instance_key = $1', [instanceId]);
-                    if (dbInst.rows.length > 0 && dbInst.rows[0].provider === 'meta') {
-                        isMeta = true;
-                    }
-                } catch(e) {}
+            const instObj = instancesMap.get(instanceId);
+            if (instObj) {
+                isMeta = instObj.provider === 'meta' || Boolean(instObj.metaPhoneNumberId || instObj.meta_phone_number_id);
+            } else if (pool) {
+                const instDb = await pool.query('SELECT provider, meta_phone_number_id FROM instances WHERE id = $1', [instanceId]);
+                if (instDb.rows.length > 0) {
+                    isMeta = instDb.rows[0].provider === 'meta' || Boolean(instDb.rows[0].meta_phone_number_id);
+                }
             }
         }
 
-        const effectiveDelayMin = isMeta ? 0 : (options?.delayMin !== undefined ? options.delayMin : 3);
-        const effectiveDelayMax = isMeta ? 0 : (options?.delayMax !== undefined ? options.delayMax : 7);
-
         let currentDelay = 0;
-        const jobs = numbers.map((number, index) => {
-            const randomDelay = (effectiveDelayMin === 0 && effectiveDelayMax === 0) 
-                ? 0 
-                : Math.floor(Math.random() * (effectiveDelayMax - effectiveDelayMin + 1) + effectiveDelayMin) * 1000;
-            
-            if (index > 0) {
-                currentDelay += randomDelay;
-            }
+        const dMin = Math.max(1, parseInt(options?.delayMin, 10) || 5);
+        const dMax = Math.max(dMin, parseInt(options?.delayMax, 10) || 15);
 
+        const jobs = numbers.map((num, idx) => {
+            let jobDelay = 0;
+            if (!isMeta && idx > 0) {
+                const stepDelay = Math.floor(Math.random() * (dMax - dMin + 1) + dMin) * 1000;
+                currentDelay += stepDelay;
+                jobDelay = currentDelay;
+            }
             return {
-                name: 'send-message',
+                name: 'send-bulk-message',
                 data: {
+                    campaignId,
                     userId: req.user.id,
                     instanceId,
-                    number,
+                    number: num,
                     message,
                     mediaUrl,
                     mediaType,
                     waButtons: buttons,
-                    campaignId,
-                    options: { ...options, delay: randomDelay, campaignId, complianceMode: !isMeta }
+                    options: {
+                        ...options,
+                        campaignId,
+                        isMeta
+                    }
                 },
                 opts: {
-                    delay: currentDelay
+                    delay: jobDelay,
+                    removeOnComplete: true
                 }
             };
         });
 
-        const chunkSize = 500;
+        const chunkSize = 100;
         for (let i = 0; i < jobs.length; i += chunkSize) {
             const chunk = jobs.slice(i, i + chunkSize);
             if (outboundQueue) {
@@ -2930,57 +2931,59 @@ async function executeScheduledCampaign(campaign) {
     }
 
     try {
-        const { instanceId, numbers, message, mediaUrl, mediaType, buttons, options } = campaign;
-        const validNumbers = Array.isArray(numbers) ? numbers : [];
-
-        if (validNumbers.length > 0 && outboundQueue) {
-            let isMeta = false;
-            if (instanceId) {
-                const instCheck = instancesMap.get(instanceId);
-                if (instCheck?.provider === 'meta') {
-                    isMeta = true;
-                } else {
-                    try {
-                        const dbInst = await pool.query('SELECT provider FROM instances WHERE id = $1 OR instance_key = $1', [instanceId]);
-                        if (dbInst.rows.length > 0 && dbInst.rows[0].provider === 'meta') {
-                            isMeta = true;
-                        }
-                    } catch(e) {}
+        const { instanceId, numbers, message, mediaUrl, mediaType, buttons, options, userId } = campaign;
+        let isMeta = false;
+        if (instanceId) {
+            const instObj = instancesMap.get(instanceId);
+            if (instObj) {
+                isMeta = instObj.provider === 'meta' || Boolean(instObj.metaPhoneNumberId || instObj.meta_phone_number_id);
+            } else if (pool) {
+                const instDb = await pool.query('SELECT provider, meta_phone_number_id FROM instances WHERE id = $1', [instanceId]);
+                if (instDb.rows.length > 0) {
+                    isMeta = instDb.rows[0].provider === 'meta' || Boolean(instDb.rows[0].meta_phone_number_id);
                 }
             }
+        }
 
-            const effectiveDelayMin = isMeta ? 0 : (options?.delayMin !== undefined ? options.delayMin : 3);
-            const effectiveDelayMax = isMeta ? 0 : (options?.delayMax !== undefined ? options.delayMax : 7);
+        let currentDelay = 0;
+        const dMin = Math.max(1, parseInt(options?.delayMin, 10) || 5);
+        const dMax = Math.max(dMin, parseInt(options?.delayMax, 10) || 15);
 
-            let currentDelay = 0;
-
-            const jobs = validNumbers.map((number, index) => {
-                const randomDelay = (effectiveDelayMin === 0 && effectiveDelayMax === 0) 
-                    ? 0 
-                    : Math.floor(Math.random() * (effectiveDelayMax - effectiveDelayMin + 1) + effectiveDelayMin) * 1000;
-                if (index > 0) currentDelay += randomDelay;
-
-                return {
-                    name: 'send-message',
-                    data: {
-                        userId: campaign.userId || campaign.user_id,
-                        instanceId,
-                        number,
-                        message,
-                        mediaUrl,
-                        mediaType,
-                        waButtons: buttons,
-                        options: { ...options, delay: randomDelay, complianceMode: !isMeta }
-                    },
-                    opts: {
-                        delay: currentDelay
+        const jobs = (numbers || []).map((num, idx) => {
+            let jobDelay = 0;
+            if (!isMeta && idx > 0) {
+                const stepDelay = Math.floor(Math.random() * (dMax - dMin + 1) + dMin) * 1000;
+                currentDelay += stepDelay;
+                jobDelay = currentDelay;
+            }
+            return {
+                name: 'send-scheduled-message',
+                data: {
+                    campaignId: campaign.id,
+                    userId: userId || campaign.userId,
+                    instanceId,
+                    number: num,
+                    message,
+                    mediaUrl,
+                    mediaType,
+                    waButtons: buttons,
+                    options: {
+                        ...options,
+                        campaignId: campaign.id,
+                        isMeta
                     }
-                };
-            });
+                },
+                opts: {
+                    delay: jobDelay,
+                    removeOnComplete: true
+                }
+            };
+        });
 
-            const chunkSize = 500;
-            for (let i = 0; i < jobs.length; i += chunkSize) {
-                const chunk = jobs.slice(i, i + chunkSize);
+        const chunkSize = 100;
+        for (let i = 0; i < jobs.length; i += chunkSize) {
+            const chunk = jobs.slice(i, i + chunkSize);
+            if (outboundQueue) {
                 await outboundQueue.addBulk(chunk);
             }
         }
@@ -2995,7 +2998,7 @@ async function executeScheduledCampaign(campaign) {
             ).catch(() => {});
         }
 
-        io.emit('campaign_status_updated', { id: campaign.id, status: 'completed' });
+        if (io) io.emit('campaign_status_updated', { id: campaign.id, status: 'completed' });
     } catch (err) {
         console.error(`[Scheduler] Execution error for campaign ${campaign.id}:`, err);
         campaign.status = 'failed';
@@ -3008,7 +3011,7 @@ async function executeScheduledCampaign(campaign) {
             ).catch(() => {});
         }
 
-        io.emit('campaign_status_updated', { id: campaign.id, status: 'failed', error: err.message });
+        if (io) io.emit('campaign_status_updated', { id: campaign.id, status: 'failed', error: err.message });
     }
 }
 

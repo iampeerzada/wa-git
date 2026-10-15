@@ -51,6 +51,14 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
         return { id: metaMediaCache.get(cacheKey) };
     }
 
+    // Direct HTTP/HTTPS link optimization: Meta Cloud API natively accepts direct HTTP/HTTPS URLs
+    // This bypasses the 10-15s local file download and re-upload overhead per recipient.
+    if ((linkUrl.startsWith('http://') || linkUrl.startsWith('https://')) && 
+        !linkUrl.includes('graph.facebook.com') && 
+        !linkUrl.includes('fbsbx.com')) {
+        return { link: linkUrl };
+    }
+
     try {
         let buffer = null;
         let mimeType = 'image/jpeg';
@@ -395,47 +403,15 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                 s.custom_daily_limit, p.daily_limit 
             FROM subscriptions s 
             LEFT JOIN plans p ON s.plan_id = p.id 
-            WHERE s.user_id = $1
-        `, [userId]);
-        
-        if (limitRes.rows.length > 0) {
-            limitData = limitRes.rows[0];
-            const maxDaily = limitData.custom_daily_limit !== null ? limitData.custom_daily_limit : (limitData.daily_limit || 0);
-            
-            if (maxDaily !== 0 && limitData.messages_sent_today >= maxDaily) {
-                requiresWallet = true;
-            }
-        }
-    } catch (err) {
-        console.error('[Worker] Limit Check Error:', err.message);
-    }
 
-    let cost = 1;
-    let costType = 'baileys_credit_cost';
-    let balance = 0;
+
+
+
+
+
     
-    // We need the instance to know if it's meta
-    let checkInst = instancesMap.get(instanceId);
-    if (!checkInst) {
-        try {
-            const dbInst = await pool.query('SELECT * FROM instances WHERE id = $1 OR instance_key = $1', [instanceId]);
-            if (dbInst.rows.length > 0) {
-                const row = dbInst.rows[0];
-                instanceId = row.id;
-                if (row.provider === 'meta') {
-                    checkInst = { status: 'open', phone: row.meta_phone_number_id, provider: 'meta', metaAccessToken: row.meta_access_token, metaPhoneNumberId: row.meta_phone_number_id };
-                } else {
-                    checkInst = { status: row.status, provider: 'baileys' };
-                }
-                instancesMap.set(row.id, checkInst);
-            }
-        } catch (e) {
-            console.error('[Worker] DB Instance Lookup Error:', e.message);
-        }
-    }
 
-    if (checkInst && checkInst.provider === 'meta') {
-        requiresWallet = true; // Meta always deducts from wallet
+
         if (options?.templateName) {
             costType = 'meta_utility_credit_cost'; // Default
             try {
