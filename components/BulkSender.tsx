@@ -71,6 +71,13 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   const [showProtectionModal, setShowProtectionModal] = useState(false);
   const [agreeProtection, setAgreeProtection] = useState(true);
 
+  // Active / Running Campaigns State
+  const [runningCampaigns, setRunningCampaigns] = useState<any[]>([]);
+  const [isLoadingRunning, setIsLoadingRunning] = useState(false);
+  const [selectedCampaignDetails, setSelectedCampaignDetails] = useState<any | null>(null);
+  const [isLoadingCampaignDetails, setIsLoadingCampaignDetails] = useState(false);
+  const [detailsFilterStatus, setDetailsFilterStatus] = useState<'all' | 'sent' | 'failed'>('all');
+
   useEffect(() => {
     if (initialViewMode) {
       setViewMode(initialViewMode);
@@ -87,7 +94,54 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
 
   useEffect(() => {
     fetchScheduledCampaigns();
+    fetchRunningCampaigns();
+    const interval = setInterval(() => {
+      fetchRunningCampaigns();
+    }, 3500);
+    return () => clearInterval(interval);
   }, []);
+
+  const fetchRunningCampaigns = async () => {
+    setIsLoadingRunning(true);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/active`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok && data.campaigns) {
+        setRunningCampaigns(data.campaigns);
+      }
+    } catch (e) {
+      console.error("Error fetching running campaigns:", e);
+    } finally {
+      setIsLoadingRunning(false);
+    }
+  };
+
+  const fetchCampaignDetails = async (campaignId: string) => {
+    setIsLoadingCampaignDetails(true);
+    try {
+      const res = await fetch(`${apiBase}/api/campaigns/${campaignId}/status`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok && data.campaign) {
+        setSelectedCampaignDetails(data.campaign);
+      } else {
+        alert(data.error || 'Failed to fetch campaign details');
+      }
+    } catch (e: any) {
+      alert(e.message || 'Error loading campaign details');
+    } finally {
+      setIsLoadingCampaignDetails(false);
+    }
+  };
 
   const fetchScheduledCampaigns = async () => {
     setIsLoadingScheduled(true);
@@ -241,8 +295,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     const isMeta = inst?.provider === 'meta' || Boolean(inst?.metaPhoneNumberId || inst?.metaWabaId);
     if (selectedInstance && isMeta) {
         fetchMetaTemplates();
+        setDelayMin(0);
+        setDelayMax(0);
     } else {
         setMetaTemplates([]);
+        setDelayMin(5);
+        setDelayMax(15);
     }
   }, [selectedInstance, instances]);
 
@@ -449,8 +507,17 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     setIsSending(true);
     setProgress({ current: 0, total: numberList.length, success: 0, failed: 0, queued: 0 });
     setLogs([]);
-    addLog(`Campaign Initialization: Compliance mode engaged.`, 'warning');
-    addLog(`Detecting Meta fair-use policies... Applying safety staggered delays.`, 'info');
+
+    const selectedInstObj = instances.find(i => i.id === selectedInstance);
+    const isMetaInstance = selectedInstObj?.provider === 'meta' || Boolean(selectedInstObj?.metaPhoneNumberId || selectedInstObj?.metaWabaId);
+
+    if (isMetaInstance) {
+        addLog(`Campaign Initialization: Official Meta Cloud API High-Speed Mode engaged.`, 'success');
+        addLog(`Instant multi-recipient dispatch without anti-ban delay throttling.`, 'info');
+    } else {
+        addLog(`Campaign Initialization: Compliance mode engaged.`, 'warning');
+        addLog(`Applying anti-ban staggered delays for Baileys web socket instance.`, 'info');
+    }
 
     try {
         const payload: any = {
@@ -459,10 +526,10 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
             message,
             buttons: activeButtons.length > 0 ? activeButtons : undefined,
             options: {
-                delayMin,
-                delayMax,
-                simulateTyping: true,
-                complianceMode: true // Signal for backend anti-ban
+                delayMin: isMetaInstance ? 0 : delayMin,
+                delayMax: isMetaInstance ? 0 : delayMax,
+                simulateTyping: !isMetaInstance,
+                complianceMode: !isMetaInstance // Signal for backend anti-ban
             }
         };
 
@@ -614,6 +681,117 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                   </button>
               </div>
           </div>
+      )}
+      {/* Active & Running Campaigns Section */}
+      {runningCampaigns.filter(c => c.status === 'processing' || c.status === 'scheduled' || c.status === 'cancelled').length > 0 && (
+        <div className="bg-[#111b21] rounded-xl border border-gray-800 p-4 shadow-xl mb-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-gray-800">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-[#25D366] animate-pulse" />
+              <h3 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
+                Active & Running Campaigns ({runningCampaigns.filter(c => c.status === 'processing' || c.status === 'scheduled').length})
+              </h3>
+            </div>
+            <button
+              onClick={fetchRunningCampaigns}
+              className="text-[11px] font-bold text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <RefreshCw className={`w-3 h-3 ${isLoadingRunning ? 'animate-spin' : ''}`} />
+              <span>Refresh Status</span>
+            </button>
+          </div>
+
+          <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+            {runningCampaigns.map((camp) => {
+              const total = camp.totalRecipients || 1;
+              const processed = (camp.sentCount || 0) + (camp.failedCount || 0);
+              const percent = Math.min(100, Math.round((processed / total) * 100));
+              const isMeta = camp.instanceProvider === 'meta';
+
+              return (
+                <div key={camp.id} className="bg-[#182229] border border-gray-800/80 rounded-xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-2.5 h-2.5 rounded-full ${camp.status === 'processing' ? 'bg-[#25D366] animate-ping' : camp.status === 'scheduled' ? 'bg-amber-400' : 'bg-red-400'}`} />
+                      <span className="font-extrabold text-xs text-white">{camp.name}</span>
+                      <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border ${
+                        isMeta 
+                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' 
+                          : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      }`}>
+                        {isMeta ? 'Meta API' : 'Baileys'} ({camp.instanceName})
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
+                        camp.status === 'processing'
+                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                          : camp.status === 'scheduled'
+                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                          : 'bg-red-500/10 text-red-400 border border-red-500/30'
+                      }`}>
+                        {camp.status}
+                      </span>
+
+                      <button
+                        onClick={() => fetchCampaignDetails(camp.id)}
+                        className="text-[11px] font-bold text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 px-2.5 py-1 rounded-lg flex items-center gap-1 border border-blue-500/20 transition-all cursor-pointer"
+                        title="View Detailed Logs & Failure Reasons"
+                      >
+                        <Eye size={12} />
+                        <span>Send Status & Failures</span>
+                      </button>
+
+                      {(camp.status === 'processing' || camp.status === 'scheduled') && (
+                        <button
+                          onClick={() => handleStopActiveCampaign(camp.id)}
+                          disabled={isStoppingQueue}
+                          className="text-[11px] font-black text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer shadow-sm shadow-red-500/20 uppercase tracking-wider"
+                          title="Stop Campaign execution immediately"
+                        >
+                          <Square size={10} fill="currentColor" />
+                          <span>{isStoppingQueue ? 'Stopping...' : 'Stop'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[11px] text-gray-400 font-bold">
+                      <span>Progress: {percent}%</span>
+                      <span>{processed} / {total} Recipient Messages Processed</span>
+                    </div>
+                    <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden border border-gray-800 flex">
+                      <div className="bg-[#25D366] transition-all duration-300" style={{ width: `${Math.round(((camp.sentCount || 0) / total) * 100)}%` }} title="Sent" />
+                      <div className="bg-red-500 transition-all duration-300" style={{ width: `${Math.round(((camp.failedCount || 0) / total) * 100)}%` }} title="Failed" />
+                    </div>
+                  </div>
+
+                  {/* Stat Counters */}
+                  <div className="grid grid-cols-4 gap-2 pt-1 text-center">
+                    <div className="bg-black/30 p-1.5 rounded-lg border border-gray-800">
+                      <div className="text-[9px] uppercase font-bold text-gray-400">Total</div>
+                      <div className="text-xs font-black text-white">{total}</div>
+                    </div>
+                    <div className="bg-emerald-500/5 p-1.5 rounded-lg border border-emerald-500/20">
+                      <div className="text-[9px] uppercase font-bold text-emerald-400">Sent (Success)</div>
+                      <div className="text-xs font-black text-emerald-400">{camp.sentCount || 0}</div>
+                    </div>
+                    <div className="bg-red-500/5 p-1.5 rounded-lg border border-red-500/20">
+                      <div className="text-[9px] uppercase font-bold text-red-400">Failed</div>
+                      <div className="text-xs font-black text-red-400">{camp.failedCount || 0}</div>
+                    </div>
+                    <div className="bg-amber-500/5 p-1.5 rounded-lg border border-amber-500/20">
+                      <div className="text-[9px] uppercase font-bold text-amber-400">Pending</div>
+                      <div className="text-xs font-black text-amber-400">{camp.pendingCount || 0}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       )}
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -2172,6 +2350,135 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               <button
                 onClick={() => setSelectedScheduledCampaign(null)}
                 className="px-4 py-2 rounded-xl bg-[#2a3942] hover:bg-[#32444f] text-white text-xs font-bold transition-all cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Selected Campaign Status & Failure Logs Modal */}
+      {selectedCampaignDetails && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-200">
+          <div className="bg-[#111b21] border border-gray-800 rounded-2xl max-w-3xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-[#182229]">
+              <div>
+                <h3 className="text-sm sm:text-base font-extrabold text-white flex items-center gap-2">
+                  <Activity size={18} className="text-[#25D366]" />
+                  Campaign Status & Failure Details
+                </h3>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  Name: <span className="text-white font-bold">{selectedCampaignDetails.name}</span> · Instance: <span className="text-gray-200 font-bold">{selectedCampaignDetails.instanceName}</span>
+                </p>
+              </div>
+              <button
+                onClick={() => setSelectedCampaignDetails(null)}
+                className="p-1.5 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-all cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-4 bg-[#111b21] border-b border-gray-800 grid grid-cols-4 gap-2 text-center">
+              <div className="bg-black/30 p-2 rounded-xl border border-gray-800">
+                <div className="text-[10px] uppercase font-bold text-gray-400">Total</div>
+                <div className="text-sm font-extrabold text-white">{selectedCampaignDetails.totalRecipients}</div>
+              </div>
+              <div className="bg-emerald-500/10 p-2 rounded-xl border border-emerald-500/20">
+                <div className="text-[10px] uppercase font-bold text-emerald-400">Sent (Success)</div>
+                <div className="text-sm font-extrabold text-emerald-400">{selectedCampaignDetails.sentCount}</div>
+              </div>
+              <div className="bg-red-500/10 p-2 rounded-xl border border-red-500/20">
+                <div className="text-[10px] uppercase font-bold text-red-400">Failed</div>
+                <div className="text-sm font-extrabold text-red-400">{selectedCampaignDetails.failedCount}</div>
+              </div>
+              <div className="bg-amber-500/10 p-2 rounded-xl border border-amber-500/20">
+                <div className="text-[10px] uppercase font-bold text-amber-400">Pending</div>
+                <div className="text-sm font-extrabold text-amber-400">{selectedCampaignDetails.pendingCount}</div>
+              </div>
+            </div>
+
+            <div className="p-3 border-b border-gray-800 flex items-center justify-between gap-2 bg-[#182229]">
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setDetailsFilterStatus('all')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    detailsFilterStatus === 'all' ? 'bg-[#25D366] text-black' : 'bg-black/30 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  All ({selectedCampaignDetails.logs?.length || 0})
+                </button>
+                <button
+                  onClick={() => setDetailsFilterStatus('failed')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    detailsFilterStatus === 'failed' ? 'bg-red-500 text-white' : 'bg-black/30 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Failed Only ({selectedCampaignDetails.failedCount})
+                </button>
+                <button
+                  onClick={() => setDetailsFilterStatus('sent')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    detailsFilterStatus === 'sent' ? 'bg-emerald-500 text-black' : 'bg-black/30 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Sent Only ({selectedCampaignDetails.sentCount})
+                </button>
+              </div>
+
+              <button
+                onClick={() => fetchCampaignDetails(selectedCampaignDetails.id)}
+                className="text-xs font-bold text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer"
+              >
+                <RefreshCw size={12} className={isLoadingCampaignDetails ? 'animate-spin' : ''} />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              {(!selectedCampaignDetails.logs || selectedCampaignDetails.logs.length === 0) ? (
+                <div className="text-center py-8 text-gray-500 text-xs italic">
+                  No recipient message logs recorded for this campaign yet.
+                </div>
+              ) : (
+                selectedCampaignDetails.logs
+                  .filter((l: any) => detailsFilterStatus === 'all' || l.status === detailsFilterStatus)
+                  .map((log: any, idx: number) => (
+                    <div
+                      key={idx}
+                      className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+                        log.status === 'sent'
+                          ? 'bg-emerald-500/5 border-emerald-500/20'
+                          : 'bg-red-500/5 border-red-500/20'
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-extrabold text-white">{log.recipient}</span>
+                          <span className={`text-[10px] font-black uppercase px-2 py-0.2 rounded ${
+                            log.status === 'sent' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                          }`}>
+                            {log.status}
+                          </span>
+                        </div>
+                        {log.error && (
+                          <div className="text-red-400 font-mono text-[11px] bg-red-950/40 p-1.5 rounded border border-red-800/40 mt-1">
+                            ⚠️ Error: {log.error}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-gray-400 shrink-0">
+                        {log.created_at ? new Date(log.created_at).toLocaleString() : ''}
+                      </div>
+                    </div>
+                  ))
+              )}
+            </div>
+
+            <div className="p-3 border-t border-gray-800 bg-[#182229] flex justify-end">
+              <button
+                onClick={() => setSelectedCampaignDetails(null)}
+                className="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
               >
                 Close
               </button>

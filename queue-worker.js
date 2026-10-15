@@ -17,6 +17,8 @@ pool.on('error', (err) => {
   }
 });
 
+const metaMediaCache = new Map();
+
 // --- ANTI-BAN UTILS ---
 const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
     const DEFAULT_IMAGE = 'https://dummyimage.com/600x400/25d366/ffffff.png';
@@ -41,6 +43,12 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
 
     if (typeof linkUrl !== 'string') {
         linkUrl = getFallback(mType);
+    }
+
+    const phoneId = instance?.metaPhoneNumberId || instance?.meta_phone_number_id || instance?.phone || 'default';
+    const cacheKey = `${phoneId}_${linkUrl}`;
+    if (metaMediaCache.has(cacheKey)) {
+        return { id: metaMediaCache.get(cacheKey) };
     }
 
     try {
@@ -92,7 +100,6 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
             buffer = Buffer.from(arrayBuf);
         }
 
-        const phoneId = instance.metaPhoneNumberId || instance.meta_phone_number_id || instance.phone;
         const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
 
         if (buffer && phoneId && token) {
@@ -121,6 +128,7 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
             const uploadData = await uploadRes.json();
             if (uploadRes.ok && uploadData.id) {
                 console.log(`[Meta Media] Upload success! Generated Meta Media ID: ${uploadData.id}`);
+                metaMediaCache.set(cacheKey, uploadData.id);
                 return { id: uploadData.id };
             } else {
                 console.error(`[Meta Media] WhatsApp Media API upload error:`, uploadData);
@@ -492,10 +500,6 @@ const setupWorker = (instancesMap, saveMessage, io) => {
 
             if (instance.provider === 'meta') {
                 const jid = number.replace(/[^0-9]/g, '');
-                
-                if (options?.complianceMode) {
-                    await humanJitter(5000, 15000);
-                }
                 
                 let msgData = {
                     messaging_product: "whatsapp",
@@ -905,8 +909,8 @@ const setupWorker = (instancesMap, saveMessage, io) => {
 
             // Log Success
             await pool.query(
-                'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                [userId, instanceId, number, 'sent', msgId, finalMessage || options?.templateName]
+                'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content, campaign_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                [userId, instanceId, number, 'sent', msgId, finalMessage || options?.templateName, activeCampaignId || null]
             );
 
             // Also save into chat_messages for Direct Chat
@@ -1006,8 +1010,8 @@ const setupWorker = (instancesMap, saveMessage, io) => {
     if (!sent) {
         // Log final failure
         await pool.query(
-            'INSERT INTO message_logs (user_id, instance_id, recipient, status, error, content) VALUES ($1, $2, $3, $4, $5, $6)',
-            [userId, instanceId, number, 'failed', lastError?.message || 'Unknown error', message]
+            'INSERT INTO message_logs (user_id, instance_id, recipient, status, error, content, campaign_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [userId, instanceId, number, 'failed', lastError?.message || 'Unknown error', message, activeCampaignId || null]
         );
         throw lastError;
     }
@@ -1015,10 +1019,10 @@ const setupWorker = (instancesMap, saveMessage, io) => {
     return { status: 'sent' };
   }, { 
     connection,
-    concurrency: 5,
+    concurrency: 25,
     limiter: {
-      max: 1,
-      duration: 4000
+      max: 50,
+      duration: 1000
     },
     removeOnComplete: { count: 100 },
     removeOnFail: { count: 500 }

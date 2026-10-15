@@ -228,15 +228,34 @@ pool.connect(async (err, client, release) => {
         }
 
         try {
-            await client.query('ALTER TABLE message_logs ADD COLUMN content TEXT;');
-            console.log('[Database] Added content column to message_logs');
+            await client.query('ALTER TABLE message_logs ADD COLUMN IF NOT EXISTS campaign_id VARCHAR(100);');
+            await client.query('ALTER TABLE message_logs ADD COLUMN IF NOT EXISTS content TEXT;');
+            console.log('[Database] Verified campaign_id and content columns on message_logs');
         } catch (alterErr) {
-            if (alterErr.code === '42701') {
-                console.log('[Database] message_logs content column already exists.');
-            } else {
-                console.error('[Database] Failed to alter message_logs:', alterErr);
-            }
+            console.warn('[Database] message_logs column update notice:', alterErr.message);
         }
+
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS scheduled_campaigns (
+                id VARCHAR(100) PRIMARY KEY,
+                user_id VARCHAR(50),
+                instance_id VARCHAR(50),
+                name VARCHAR(255),
+                message TEXT,
+                media_url TEXT,
+                media_type VARCHAR(20),
+                buttons_json TEXT,
+                numbers TEXT,
+                options TEXT,
+                total_recipients INT DEFAULT 0,
+                scheduled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                executed_at TIMESTAMP,
+                status VARCHAR(20) DEFAULT 'scheduled',
+                error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('[Database] scheduled_campaigns table verified.');
 
         // Create system_settings table if not exists
         await client.query(`
@@ -2805,14 +2824,31 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
     
     try {
         const campaignId = `bulk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        
+        let isMeta = false;
+        if (instanceId) {
+            const instCheck = instancesMap.get(instanceId);
+            if (instCheck?.provider === 'meta') {
+                isMeta = true;
+            } else {
+                try {
+                    const dbInst = await pool.query('SELECT provider FROM instances WHERE id = $1 OR instance_key = $1', [instanceId]);
+                    if (dbInst.rows.length > 0 && dbInst.rows[0].provider === 'meta') {
+                        isMeta = true;
+                    }
+                } catch(e) {}
+            }
+        }
+
+        const effectiveDelayMin = isMeta ? 0 : (options?.delayMin !== undefined ? options.delayMin : 3);
+        const effectiveDelayMax = isMeta ? 0 : (options?.delayMax !== undefined ? options.delayMax : 7);
+
         let currentDelay = 0;
         const jobs = numbers.map((number, index) => {
-            // Calculate a staggered delay for each message based on the options
-            const delayMin = options?.delayMin || 3;
-            const delayMax = options?.delayMax || 7;
-            const randomDelay = Math.floor(Math.random() * (delayMax - delayMin + 1) + delayMin) * 1000;
+            const randomDelay = (effectiveDelayMin === 0 && effectiveDelayMax === 0) 
+                ? 0 
+                : Math.floor(Math.random() * (effectiveDelayMax - effectiveDelayMin + 1) + effectiveDelayMin) * 1000;
             
-            // Accumulate delay to ensure strictly increasing staggered sending
             if (index > 0) {
                 currentDelay += randomDelay;
             }
@@ -2828,15 +2864,14 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
                     mediaType,
                     waButtons: buttons,
                     campaignId,
-                    options: { ...options, delay: randomDelay, campaignId }
+                    options: { ...options, delay: randomDelay, campaignId, complianceMode: !isMeta }
                 },
                 opts: {
-                    delay: currentDelay // BullMQ delay option
+                    delay: currentDelay
                 }
             };
         });
 
-        // Chunk jobs into batches of 500 to prevent Redis limits / BullMQ errors for large campaigns
         const chunkSize = 500;
         for (let i = 0; i < jobs.length; i += chunkSize) {
             const chunk = jobs.slice(i, i + chunkSize);
@@ -2844,6 +2879,29 @@ app.post('/api/send-bulk', authenticate, async (req, res) => {
                 await outboundQueue.addBulk(chunk);
             }
         }
+
+        const campaignName = req.body.name?.trim() || options?.campaignName || `Bulk Campaign (${numbers.length} recipients)`;
+        
+        if (pool) {
+            await pool.query(`
+                INSERT INTO scheduled_campaigns (id, user_id, instance_id, name, message, media_url, media_type, buttons_json, numbers, options, total_recipients, scheduled_at, executed_at, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW(), 'processing')
+                ON CONFLICT (id) DO UPDATE SET status = 'processing', total_recipients = EXCLUDED.total_recipients
+            `, [
+                campaignId,
+                req.user.id,
+                instanceId || '',
+                campaignName,
+                message || '',
+                mediaUrl || '',
+                mediaType || 'image',
+                JSON.stringify(buttons || []),
+                JSON.stringify(numbers),
+                JSON.stringify(options || {}),
+                numbers.length
+            ]).catch(e => console.warn('[Bulk Send DB save notice]', e.message));
+        }
+
         res.json({ 
             success: true, 
             campaignId,
@@ -2876,12 +2934,30 @@ async function executeScheduledCampaign(campaign) {
         const validNumbers = Array.isArray(numbers) ? numbers : [];
 
         if (validNumbers.length > 0 && outboundQueue) {
+            let isMeta = false;
+            if (instanceId) {
+                const instCheck = instancesMap.get(instanceId);
+                if (instCheck?.provider === 'meta') {
+                    isMeta = true;
+                } else {
+                    try {
+                        const dbInst = await pool.query('SELECT provider FROM instances WHERE id = $1 OR instance_key = $1', [instanceId]);
+                        if (dbInst.rows.length > 0 && dbInst.rows[0].provider === 'meta') {
+                            isMeta = true;
+                        }
+                    } catch(e) {}
+                }
+            }
+
+            const effectiveDelayMin = isMeta ? 0 : (options?.delayMin !== undefined ? options.delayMin : 3);
+            const effectiveDelayMax = isMeta ? 0 : (options?.delayMax !== undefined ? options.delayMax : 7);
+
             let currentDelay = 0;
-            const delayMin = options?.delayMin || 3;
-            const delayMax = options?.delayMax || 7;
 
             const jobs = validNumbers.map((number, index) => {
-                const randomDelay = Math.floor(Math.random() * (delayMax - delayMin + 1) + delayMin) * 1000;
+                const randomDelay = (effectiveDelayMin === 0 && effectiveDelayMax === 0) 
+                    ? 0 
+                    : Math.floor(Math.random() * (effectiveDelayMax - effectiveDelayMin + 1) + effectiveDelayMin) * 1000;
                 if (index > 0) currentDelay += randomDelay;
 
                 return {
@@ -2894,7 +2970,7 @@ async function executeScheduledCampaign(campaign) {
                         mediaUrl,
                         mediaType,
                         waButtons: buttons,
-                        options: { ...options, delay: randomDelay }
+                        options: { ...options, delay: randomDelay, complianceMode: !isMeta }
                     },
                     opts: {
                         delay: currentDelay
@@ -3282,6 +3358,143 @@ app.delete('/api/campaigns/scheduled/:id', authenticate, async (req, res) => {
     }
 
     res.json({ success: true, message: 'Scheduled campaign deleted' });
+});
+
+app.get('/api/campaigns/active', authenticate, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const isSuper = req.user.role === 'superadmin';
+
+        let campaigns = [];
+        if (pool) {
+            const q = isSuper
+                ? `SELECT sc.*, i.name as instance_name, i.provider as instance_provider 
+                   FROM scheduled_campaigns sc 
+                   LEFT JOIN instances i ON sc.instance_id = i.id 
+                   WHERE sc.status IN ('processing', 'scheduled', 'cancelled')
+                   ORDER BY sc.created_at DESC LIMIT 50`
+                : `SELECT sc.*, i.name as instance_name, i.provider as instance_provider 
+                   FROM scheduled_campaigns sc 
+                   LEFT JOIN instances i ON sc.instance_id = i.id 
+                   WHERE sc.user_id = $1 AND sc.status IN ('processing', 'scheduled', 'cancelled')
+                   ORDER BY sc.created_at DESC LIMIT 50`;
+            const params = isSuper ? [] : [userId];
+            const dbRes = await pool.query(q, params).catch(() => ({ rows: [] }));
+            campaigns = dbRes.rows;
+        }
+
+        const activeCampaigns = [];
+        for (const r of campaigns) {
+            let sentCount = 0;
+            let failedCount = 0;
+
+            if (pool) {
+                const metricsRes = await pool.query(`
+                    SELECT 
+                        COUNT(CASE WHEN status = 'sent' THEN 1 END) as sent_count,
+                        COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_count
+                    FROM message_logs 
+                    WHERE campaign_id = $1
+                `, [r.id]).catch(() => ({ rows: [{ sent_count: 0, failed_count: 0 }] }));
+
+                if (metricsRes.rows.length > 0) {
+                    sentCount = parseInt(metricsRes.rows[0].sent_count, 10) || 0;
+                    failedCount = parseInt(metricsRes.rows[0].failed_count, 10) || 0;
+                }
+            }
+
+            const total = parseInt(r.total_recipients, 10) || 0;
+            const pending = Math.max(0, total - sentCount - failedCount);
+
+            let status = r.status;
+            if (status === 'processing' && (sentCount + failedCount >= total) && total > 0) {
+                status = 'completed';
+                if (pool) {
+                    pool.query("UPDATE scheduled_campaigns SET status = 'completed' WHERE id = $1", [r.id]).catch(() => {});
+                }
+            }
+
+            activeCampaigns.push({
+                id: r.id,
+                userId: r.user_id,
+                instanceId: r.instance_id,
+                instanceName: r.instance_name || 'Default Instance',
+                instanceProvider: r.instance_provider || 'baileys',
+                name: r.name,
+                message: r.message,
+                totalRecipients: total,
+                sentCount,
+                failedCount,
+                pendingCount: pending,
+                status,
+                createdAt: r.created_at,
+                scheduledAt: r.scheduled_at,
+                executedAt: r.executed_at
+            });
+        }
+
+        res.json({ success: true, campaigns: activeCampaigns });
+    } catch (err) {
+        console.error('[Active Campaigns Endpoint Error]', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/campaigns/:id/status', authenticate, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const userId = req.user.id;
+        const isSuper = req.user.role === 'superadmin';
+
+        let campaign = null;
+        if (pool) {
+            const q = isSuper
+                ? `SELECT sc.*, i.name as instance_name FROM scheduled_campaigns sc LEFT JOIN instances i ON sc.instance_id = i.id WHERE sc.id = $1`
+                : `SELECT sc.*, i.name as instance_name FROM scheduled_campaigns sc LEFT JOIN instances i ON sc.instance_id = i.id WHERE sc.id = $1 AND sc.user_id = $2`;
+            const params = isSuper ? [id] : [id, userId];
+            const dbRes = await pool.query(q, params).catch(() => ({ rows: [] }));
+            if (dbRes.rows.length > 0) campaign = dbRes.rows[0];
+        }
+
+        if (!campaign) {
+            return res.status(404).json({ error: 'Campaign not found' });
+        }
+
+        let logs = [];
+        if (pool) {
+            const logsRes = await pool.query(`
+                SELECT recipient, status, error, message_id, content, created_at 
+                FROM message_logs 
+                WHERE campaign_id = $1 
+                ORDER BY created_at DESC 
+                LIMIT 1000
+            `, [id]).catch(() => ({ rows: [] }));
+            logs = logsRes.rows;
+        }
+
+        const sentCount = logs.filter(l => l.status === 'sent').length;
+        const failedCount = logs.filter(l => l.status === 'failed').length;
+        const total = parseInt(campaign.total_recipients, 10) || 0;
+
+        res.json({
+            success: true,
+            campaign: {
+                id: campaign.id,
+                name: campaign.name,
+                instanceId: campaign.instance_id,
+                instanceName: campaign.instance_name || 'Default Instance',
+                status: campaign.status,
+                totalRecipients: total,
+                sentCount,
+                failedCount,
+                pendingCount: Math.max(0, total - sentCount - failedCount),
+                createdAt: campaign.created_at,
+                logs
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // --- MEDIA MANAGEMENT ---
