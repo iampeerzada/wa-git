@@ -403,15 +403,26 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                 s.custom_daily_limit, p.daily_limit 
             FROM subscriptions s 
             LEFT JOIN plans p ON s.plan_id = p.id 
+            WHERE s.user_id = $1
+        `, [userId]);
 
+        if (limitRes.rows.length > 0) {
+            limitData = limitRes.rows[0];
+            const maxDaily = limitData.custom_daily_limit !== null ? limitData.custom_daily_limit : (limitData.daily_limit || 0);
+            if (maxDaily > 0 && limitData.messages_sent_today >= maxDaily) {
+                requiresWallet = true;
+            }
+        }
+    } catch (err) {
+        console.error('[Worker] Limit Check Error:', err.message);
+    }
 
+    let cost = 1;
+    let balance = 0;
+    let costType = 'baileys_credit_cost';
 
-
-
-
-    
-
-
+    const instObj = (typeof instancesMap !== 'undefined' && instancesMap) ? instancesMap.get(instanceId) : null;
+    if (instObj && instObj.provider === 'meta') {
         if (options?.templateName) {
             costType = 'meta_utility_credit_cost'; // Default
             try {
