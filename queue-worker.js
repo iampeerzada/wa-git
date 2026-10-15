@@ -679,7 +679,6 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                         if (comps.length > 0) {
                             msgData.template.components = comps;
                         }
-                    }
 
                     // Process any template components that contain a raw media link
                     if (msgData.template?.components && Array.isArray(msgData.template.components)) {
