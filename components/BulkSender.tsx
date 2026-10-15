@@ -370,6 +370,84 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     }
   };
 
+  const handleExtractFailedFromHistory = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (historyInstanceFilter && historyInstanceFilter !== 'all') {
+        params.append('instanceId', historyInstanceFilter);
+      }
+      if (historyMonth !== 'all') params.append('month', historyMonth);
+      if (historyYear !== 'all') params.append('year', historyYear);
+      params.append('status', 'failed');
+      params.append('limit', '1000');
+
+      const res = await fetch(`${apiBase}/api/message-logs?${params.toString()}`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'X-Role': currentUser.role
+        }
+      });
+      const data = await res.json();
+      let logsList = Array.isArray(data) ? data : (data.logs || []);
+      
+      const failedNumbers = logsList
+        .filter((l: any) => l.recipient)
+        .map((l: any) => l.recipient.replace(/\D/g, ''))
+        .filter(Boolean);
+
+      const uniqueFailed = Array.from(new Set(failedNumbers));
+      if (uniqueFailed.length === 0) {
+        alert('No failed recipient numbers found for the selected filters.');
+        return;
+      }
+
+      setNumbers(uniqueFailed.join('\n'));
+      setViewMode('sender');
+      addLog(`Extracted ${uniqueFailed.length} failed recipient numbers from Campaign History.`, 'warning');
+      alert(`Extracted ${uniqueFailed.length} failed recipient numbers and loaded them into Bulk Sender!\n\nYou can now review your message and click Launch Campaign.`);
+    } catch (e: any) {
+      alert('Failed to extract failed numbers: ' + e.message);
+    }
+  };
+
+  const handleCopyFailedFromHistory = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (historyInstanceFilter && historyInstanceFilter !== 'all') {
+        params.append('instanceId', historyInstanceFilter);
+      }
+      if (historyMonth !== 'all') params.append('month', historyMonth);
+      if (historyYear !== 'all') params.append('year', historyYear);
+      params.append('status', 'failed');
+      params.append('limit', '1000');
+
+      const res = await fetch(`${apiBase}/api/message-logs?${params.toString()}`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'X-Role': currentUser.role
+        }
+      });
+      const data = await res.json();
+      let logsList = Array.isArray(data) ? data : (data.logs || []);
+      
+      const failedNumbers = logsList
+        .filter((l: any) => l.recipient)
+        .map((l: any) => l.recipient.replace(/\D/g, ''))
+        .filter(Boolean);
+
+      const uniqueFailed = Array.from(new Set(failedNumbers));
+      if (uniqueFailed.length === 0) {
+        alert('No failed recipient numbers found.');
+        return;
+      }
+
+      navigator.clipboard.writeText(uniqueFailed.join('\n'));
+      alert(`Copied ${uniqueFailed.length} failed recipient numbers to clipboard!`);
+    } catch (e: any) {
+      alert('Error copying failed numbers: ' + e.message);
+    }
+  };
+
   const chartData = [
     { name: 'Delivered', value: progress.success, color: '#25D366' },
     { name: 'Queued', value: progress.queued, color: '#EAB308' },
@@ -1973,6 +2051,39 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               </button>
             </div>
 
+            {historyStats.failed > 0 && (
+              <div className="mb-4 bg-red-500/10 border border-red-500/30 p-3 rounded-xl flex items-center justify-between flex-wrap gap-2.5 shadow-sm">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="text-red-400 shrink-0" size={18} />
+                  <div>
+                    <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <span>{historyStats.failed} Failed Messages Logged</span>
+                      <span className="text-[10px] text-red-400 bg-red-500/20 px-2 py-0.2 rounded-md font-mono">Action Required</span>
+                    </p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">Extract failed recipient numbers directly into Bulk Sender to re-launch dispatch with 1 click.</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCopyFailedFromHistory}
+                    className="text-xs font-bold text-amber-300 hover:text-white bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
+                    title="Copy all failed recipient numbers to clipboard"
+                  >
+                    <Copy size={13} />
+                    <span>Copy Failed ({historyStats.failed})</span>
+                  </button>
+                  <button
+                    onClick={handleExtractFailedFromHistory}
+                    className="text-xs font-extrabold text-white bg-red-500 hover:bg-red-600 px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-red-500/20 uppercase tracking-wider"
+                    title="Extract failed numbers and load into Bulk Sender to re-send"
+                  >
+                    <RotateCcw size={13} />
+                    <span>Re-send to Failed ({historyStats.failed})</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {isLoadingHistory ? (
               <p className="text-gray-500 text-center py-8 text-xs font-medium">Loading logs...</p>
             ) : historyLogs.length === 0 ? (
@@ -2413,8 +2524,8 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
               </div>
             </div>
 
-            <div className="p-3 border-b border-gray-800 flex items-center justify-between gap-2 bg-[#182229]">
-              <div className="flex gap-1.5">
+            <div className="p-3 border-b border-gray-800 flex flex-wrap items-center justify-between gap-2 bg-[#182229]">
+              <div className="flex flex-wrap gap-1.5 items-center">
                 <button
                   onClick={() => setDetailsFilterStatus('all')}
                   className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
@@ -2441,13 +2552,61 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 </button>
               </div>
 
-              <button
-                onClick={() => fetchCampaignDetails(selectedCampaignDetails.id)}
-                className="text-xs font-bold text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer"
-              >
-                <RefreshCw size={12} className={isLoadingCampaignDetails ? 'animate-spin' : ''} />
-                <span>Refresh</span>
-              </button>
+              <div className="flex items-center gap-2">
+                {selectedCampaignDetails.failedCount > 0 && (
+                  <>
+                    <button
+                      onClick={() => {
+                        const failedList = (selectedCampaignDetails.logs || [])
+                          .filter((l: any) => l.status === 'failed' || l.status === 'error' || Boolean(l.error))
+                          .map((l: any) => l.recipient)
+                          .filter(Boolean);
+                        const uniqueFailed = Array.from(new Set(failedList));
+                        if (uniqueFailed.length === 0) return alert('No failed recipient numbers found.');
+                        navigator.clipboard.writeText(uniqueFailed.join('\n'));
+                        alert(`Copied ${uniqueFailed.length} failed recipient numbers to clipboard!`);
+                      }}
+                      className="text-xs font-bold text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer"
+                      title="Copy failed recipient numbers to clipboard"
+                    >
+                      <Copy size={12} />
+                      <span>Copy Failed ({selectedCampaignDetails.failedCount})</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        const failedList = (selectedCampaignDetails.logs || [])
+                          .filter((l: any) => l.status === 'failed' || l.status === 'error' || Boolean(l.error))
+                          .map((l: any) => l.recipient)
+                          .filter(Boolean);
+                        const uniqueFailed = Array.from(new Set(failedList));
+                        if (uniqueFailed.length === 0) return alert('No failed recipient numbers found.');
+                        setNumbers(uniqueFailed.join('\n'));
+                        if (selectedCampaignDetails.message) {
+                          setMessage(selectedCampaignDetails.message);
+                        }
+                        setViewMode('sender');
+                        setSelectedCampaignDetails(null);
+                        addLog(`Extracted ${uniqueFailed.length} failed numbers for re-sending campaign.`, 'warning');
+                        alert(`Extracted ${uniqueFailed.length} failed recipient numbers and loaded them into Bulk Sender!\n\nYou can now review/modify the message and click Launch Campaign.`);
+                      }}
+                      className="text-xs font-extrabold text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer shadow-sm shadow-red-500/20"
+                      title="Extract failed numbers and load into Bulk Sender to re-send"
+                    >
+                      <RotateCcw size={12} />
+                      <span>Re-send to Failed ({selectedCampaignDetails.failedCount})</span>
+                    </button>
+                  </>
+                )}
+
+                <button
+                  onClick={() => fetchCampaignDetails(selectedCampaignDetails.id)}
+                  className="text-xs font-bold text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all cursor-pointer"
+                >
+                  <RefreshCw size={12} className={isLoadingCampaignDetails ? 'animate-spin' : ''} />
+                  <span>Refresh</span>
+                </button>
+              </div>
             </div>
 
             <div className="p-4 overflow-y-auto flex-1 space-y-2">

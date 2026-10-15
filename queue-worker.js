@@ -51,14 +51,6 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
         return { id: metaMediaCache.get(cacheKey) };
     }
 
-    // Direct HTTP/HTTPS link optimization: Meta Cloud API natively accepts direct HTTP/HTTPS URLs
-    // This bypasses the 10-15s local file download and re-upload overhead per recipient.
-    if ((linkUrl.startsWith('http://') || linkUrl.startsWith('https://')) && 
-        !linkUrl.includes('graph.facebook.com') && 
-        !linkUrl.includes('fbsbx.com')) {
-        return { link: linkUrl };
-    }
-
     try {
         let buffer = null;
         let mimeType = 'image/jpeg';
@@ -82,7 +74,9 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
                 else if (ext === 'mp4') mimeType = 'video/mp4';
             }
         } else if (linkUrl.startsWith('http')) {
-            const headers = {};
+            const headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            };
             const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
             if (linkUrl.includes('fbsbx.com') || linkUrl.includes('fbcdn.net') || linkUrl.includes('facebook.com') || linkUrl.includes('graph.facebook.com')) {
                 if (token) {
@@ -91,21 +85,13 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
             }
             console.log(`[Meta Media] Fetching source media: ${linkUrl.substring(0, 90)}...`);
             const fetchRes = await fetch(linkUrl, { headers });
-            if (!fetchRes.ok) {
-                console.error(`[Meta Media] Fetch failed with HTTP status ${fetchRes.status}`);
-                throw new Error(`Media download status ${fetchRes.status}`);
+            if (fetchRes.ok) {
+                mimeType = fetchRes.headers.get('content-type') || mimeType;
+                if (!mimeType.includes('html')) {
+                    const arrayBuf = await fetchRes.arrayBuffer();
+                    buffer = Buffer.from(arrayBuf);
+                }
             }
-            mimeType = fetchRes.headers.get('content-type') || mimeType;
-
-            // If source link returned HTML (e.g. 404/redirect page), fallback to safe media URL
-            if (mimeType.includes('html')) {
-                console.warn(`[Meta Media] URL returned HTML instead of media file. Using fallback.`);
-                linkUrl = getFallback(mType);
-                return { link: linkUrl };
-            }
-
-            const arrayBuf = await fetchRes.arrayBuffer();
-            buffer = Buffer.from(arrayBuf);
         }
 
         const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
@@ -135,7 +121,7 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
             });
             const uploadData = await uploadRes.json();
             if (uploadRes.ok && uploadData.id) {
-                console.log(`[Meta Media] Upload success! Generated Meta Media ID: ${uploadData.id}`);
+                console.log(`[Meta Media] Pre-upload success! Generated Meta Media ID: ${uploadData.id}`);
                 metaMediaCache.set(cacheKey, uploadData.id);
                 return { id: uploadData.id };
             } else {
