@@ -180,6 +180,18 @@ pool.connect(async (err, client, release) => {
         `);
         console.log('[Database] chat_messages table verified.');
 
+        // High-performance database indexes for instant chatbox loading
+        try {
+            await client.query(`
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_instance_remote_ts ON chat_messages(instance_id, remote_jid, timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_instance_unread ON chat_messages(instance_id, from_me, status);
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_instance_inbound ON chat_messages(instance_id, from_me, timestamp DESC);
+            `);
+            console.log('[Database] chat_messages query acceleration indexes verified.');
+        } catch (idxErr) {
+            console.warn('[Database] Index optimization notice:', idxErr.message);
+        }
+
         // Verify message_logs has content column
         try {
             await client.query('ALTER TABLE instances ADD COLUMN ai_enabled BOOLEAN DEFAULT FALSE;');
@@ -3545,6 +3557,19 @@ async function getMetaMediaObjectServer(linkUrl, instance, mType = 'image') {
             if (mimeMatch) mimeType = mimeMatch[1];
             const base64Data = linkUrl.split(',')[1];
             buffer = Buffer.from(base64Data, 'base64');
+        } else if (linkUrl.startsWith('/uploads/') || linkUrl.startsWith('uploads/') || linkUrl.includes('uploads/')) {
+            const fs = require('fs');
+            const path = require('path');
+            const cleanRel = linkUrl.substring(linkUrl.indexOf('uploads/'));
+            const localPath = path.join(__dirname, cleanRel);
+            if (fs.existsSync(localPath)) {
+                buffer = fs.readFileSync(localPath);
+                let ext = path.extname(localPath).slice(1).toLowerCase() || 'jpg';
+                if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+                else if (ext === 'png') mimeType = 'image/png';
+                else if (ext === 'pdf') mimeType = 'application/pdf';
+                else if (ext === 'mp4') mimeType = 'video/mp4';
+            }
         } else if (linkUrl.startsWith('http')) {
             const headers = {};
             const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
@@ -4625,61 +4650,60 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
     try {
         const { instanceId } = req.params;
 
-        // 1. Fetch latest distinct messages with contact names in a single fast query
-        const sessionsRes = await pool.query(`
-            SELECT DISTINCT ON (m.remote_jid)
-                m.id,
-                m.instance_id,
-                m.remote_jid,
-                m.from_me,
-                m.text,
-                m.media_url,
-                m.media_type,
-                m.status,
-                m.timestamp,
-                COALESCE(cc.group_name, cc.push_name) AS contact_name,
-                cc.push_name
-            FROM chat_messages m
-            LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND cc.jid = m.remote_jid
-            WHERE m.instance_id = $1
-            ORDER BY m.remote_jid, m.timestamp DESC
-        `, [instanceId]);
+        // 1. Fetch latest distinct messages, unread counts, inbound timestamps, and labels concurrently
+        const [sessionsRes, unreadRes, inboundRes, labelsRes] = await Promise.all([
+            pool.query(`
+                SELECT DISTINCT ON (m.remote_jid)
+                    m.id,
+                    m.instance_id,
+                    m.remote_jid,
+                    m.from_me,
+                    m.text,
+                    m.media_url,
+                    m.media_type,
+                    m.status,
+                    m.timestamp,
+                    COALESCE(cc.group_name, cc.push_name) AS contact_name,
+                    cc.push_name
+                FROM chat_messages m
+                LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND cc.jid = m.remote_jid
+                WHERE m.instance_id = $1
+                ORDER BY m.remote_jid, m.timestamp DESC
+            `, [instanceId]),
+            pool.query(`
+                SELECT remote_jid, COUNT(*) as count
+                FROM chat_messages
+                WHERE instance_id = $1 AND from_me = false AND status != 'read'
+                GROUP BY remote_jid
+            `, [instanceId]),
+            pool.query(`
+                SELECT remote_jid, MAX(timestamp) as last_inbound_timestamp
+                FROM chat_messages
+                WHERE instance_id = $1 AND from_me = false
+                GROUP BY remote_jid
+            `, [instanceId]),
+            pool.query(`
+                SELECT sl.remote_jid, l.id, l.name, l.color
+                FROM chat_session_labels sl
+                JOIN chat_labels l ON l.id = sl.label_id
+                WHERE sl.instance_id = $1
+            `, [instanceId])
+        ]);
 
         if (sessionsRes.rows.length === 0) {
             return res.json([]);
         }
 
-        // 2. Fetch unread counts and last inbound timestamps in single queries
-        const unreadRes = await pool.query(`
-            SELECT remote_jid, COUNT(*) as count
-            FROM chat_messages
-            WHERE instance_id = $1 AND from_me = false AND status != 'read'
-            GROUP BY remote_jid
-        `, [instanceId]);
         const unreadMap = new Map();
         for (const r of unreadRes.rows) {
             unreadMap.set(r.remote_jid, parseInt(r.count, 10) || 0);
         }
 
-        // Fetch last inbound message timestamp for Meta 24-hour customer service window
-        const inboundRes = await pool.query(`
-            SELECT remote_jid, MAX(timestamp) as last_inbound_timestamp
-            FROM chat_messages
-            WHERE instance_id = $1 AND from_me = false
-            GROUP BY remote_jid
-        `, [instanceId]);
         const inboundMap = new Map();
         for (const r of inboundRes.rows) {
             inboundMap.set(r.remote_jid, r.last_inbound_timestamp);
         }
 
-        // 3. Fetch labels in a single query
-        const labelsRes = await pool.query(`
-            SELECT sl.remote_jid, l.id, l.name, l.color
-            FROM chat_session_labels sl
-            JOIN chat_labels l ON l.id = sl.label_id
-            WHERE sl.instance_id = $1
-        `, [instanceId]);
         const labelsMap = new Map();
         for (const l of labelsRes.rows) {
             if (!labelsMap.has(l.remote_jid)) labelsMap.set(l.remote_jid, []);
@@ -4796,29 +4820,38 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
             LIMIT 300
         `, [instanceId, candidateJids]);
         
-        // Pre-fetch template definitions for this instance to resolve template content
-        const templateContentMap = new Map();
-        try {
-            const tplRes = await pool.query(`
-                SELECT name, components FROM meta_templates WHERE instance_id = $1
-            `, [instanceId]);
-            tplRes.rows.forEach(r => {
-                try {
-                    const comps = typeof r.components === 'string' ? JSON.parse(r.components) : (r.components || []);
-                    const bodyComp = comps.find(c => c.type === 'BODY');
-                    const headerComp = comps.find(c => c.type === 'HEADER');
-                    const footerComp = comps.find(c => c.type === 'FOOTER');
-                    const btnComp = comps.find(c => c.type === 'BUTTONS');
-                    templateContentMap.set(r.name.toLowerCase().trim(), {
-                        name: r.name,
-                        header: headerComp ? (headerComp.text || headerComp.format) : null,
-                        body: bodyComp?.text || null,
-                        footer: footerComp?.text || null,
-                        buttons: btnComp?.buttons || []
-                    });
-                } catch(e) {}
-            });
-        } catch(e) {}
+        // Fast cached template definitions for this instance to resolve template content without DB penalty
+        if (!global._metaTplCache) global._metaTplCache = new Map();
+        let templateContentMap = global._metaTplCache.get(instanceId);
+        const cachedAt = global._metaTplCacheTime?.get(instanceId) || 0;
+        
+        if (!templateContentMap || (Date.now() - cachedAt > 120000)) {
+            templateContentMap = new Map();
+            try {
+                const tplRes = await pool.query(`
+                    SELECT name, components FROM meta_templates WHERE instance_id = $1
+                `, [instanceId]);
+                tplRes.rows.forEach(r => {
+                    try {
+                        const comps = typeof r.components === 'string' ? JSON.parse(r.components) : (r.components || []);
+                        const bodyComp = comps.find(c => c.type === 'BODY');
+                        const headerComp = comps.find(c => c.type === 'HEADER');
+                        const footerComp = comps.find(c => c.type === 'FOOTER');
+                        const btnComp = comps.find(c => c.type === 'BUTTONS');
+                        templateContentMap.set(r.name.toLowerCase().trim(), {
+                            name: r.name,
+                            header: headerComp ? (headerComp.text || headerComp.format) : null,
+                            body: bodyComp?.text || null,
+                            footer: footerComp?.text || null,
+                            buttons: btnComp?.buttons || []
+                        });
+                    } catch(e) {}
+                });
+                global._metaTplCache.set(instanceId, templateContentMap);
+                if (!global._metaTplCacheTime) global._metaTplCacheTime = new Map();
+                global._metaTplCacheTime.set(instanceId, Date.now());
+            } catch(e) {}
+        }
 
         const fallbackTemplates = {
             'customer_order_placed': {

@@ -228,8 +228,18 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     setScheduledTime(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
   };
 
+  // Auto-sync selectedInstance on mount or instance change
   useEffect(() => {
-    if (selectedInstance && instances.find(i => i.id === selectedInstance)?.provider === 'meta') {
+    if ((!selectedInstance || !instances.some(i => i.id === selectedInstance)) && instances.length > 0) {
+      const active = instances.find(i => i.status === InstanceStatus.OPEN) || instances[0];
+      setSelectedInstance(active.id);
+    }
+  }, [instances, selectedInstance]);
+
+  useEffect(() => {
+    const inst = instances.find(i => i.id === selectedInstance);
+    const isMeta = inst?.provider === 'meta' || Boolean(inst?.metaPhoneNumberId || inst?.metaWabaId);
+    if (selectedInstance && isMeta) {
         fetchMetaTemplates();
     } else {
         setMetaTemplates([]);
@@ -668,7 +678,14 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 {showTplBtn && (
                   <div className="relative">
                     <button 
-                      onClick={() => setShowTemplates(!showTemplates)}
+                      onClick={() => {
+                        const currentInst = instances.find(i => i.id === selectedInstance);
+                        const isMeta = currentInst?.provider === 'meta' || Boolean(currentInst?.metaPhoneNumberId || currentInst?.metaWabaId);
+                        if (!showTemplates && isMeta && metaTemplates.length === 0) {
+                          fetchMetaTemplates();
+                        }
+                        setShowTemplates(!showTemplates);
+                      }}
                       className="text-xs font-bold text-[#25D366] bg-[#25D366]/10 px-2.5 py-1 rounded-lg flex items-center gap-1.5 hover:bg-[#25D366]/20 transition-all cursor-pointer"
                     >
                       <FileText size={12} />
@@ -676,17 +693,26 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                       <ChevronDown size={12} className={`transition-transform ${showTemplates ? 'rotate-180' : ''}`} />
                     </button>
                     {showTemplates && (
-                      <div className="absolute right-0 mt-2 w-60 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-                        <div className="p-2.5 border-b border-gray-700 bg-black/20 text-[10px] font-bold uppercase text-gray-400 tracking-wider">
-                          Saved Templates
+                      <div className="absolute right-0 mt-2 w-64 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                        <div className="p-2.5 border-b border-gray-700 bg-black/20 text-[10px] font-bold uppercase tracking-wider flex items-center justify-between">
+                          <span className="text-gray-300">
+                            {instances.find(i => i.id === selectedInstance)?.provider === 'meta' || instances.find(i => i.id === selectedInstance)?.metaPhoneNumberId
+                              ? "Meta Templates" 
+                              : "Baileys Templates"}
+                          </span>
+                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-[#111b21] text-[#25D366]">
+                            {instances.find(i => i.id === selectedInstance)?.provider === 'meta' || instances.find(i => i.id === selectedInstance)?.metaPhoneNumberId
+                              ? "META" 
+                              : "QR"}
+                          </span>
                         </div>
                         <div className="max-h-56 overflow-y-auto">
-                          {instances.find(i => i.id === selectedInstance)?.provider === 'meta' ? (
+                          {(instances.find(i => i.id === selectedInstance)?.provider === 'meta' || Boolean(instances.find(i => i.id === selectedInstance)?.metaPhoneNumberId)) ? (
     <>
       {(!Array.isArray(metaTemplates) || metaTemplates.length === 0) ? (
          <div className="p-3 text-xs text-gray-500 italic text-center">No approved templates found. Sync in Meta Templates tab.</div>
       ) : (
-          (Array.isArray(metaTemplates) ? metaTemplates : []).filter(t => t.status === 'APPROVED').map(tpl => (
+          (Array.isArray(metaTemplates) ? metaTemplates : []).filter(t => !t.status || t.status?.toUpperCase() === 'APPROVED' || t.status === 'active').map(tpl => (
             <button key={tpl.id} onClick={() => {
                 setMessage('[META TEMPLATE] ' + tpl.name);
                 setSelectedMetaTemplate({ name: tpl.name, language: tpl.language, components: tpl.components, category: tpl.category });

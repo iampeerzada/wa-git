@@ -209,14 +209,41 @@ const DEFAULT_META_TEMPLATES: Record<string, {
   }
 };
 
+const DEFAULT_BAILEYS_TEMPLATES: Array<{ id: string; name: string; content: string }> = [
+  { id: 'tpl_welcome', name: 'Welcome Message', content: 'Hello! Thank you for contacting us. How can we help you today?' },
+  { id: 'tpl_order_update', name: 'Order Update', content: 'Hi, your order has been received and processed. We will keep you updated!' },
+  { id: 'tpl_followup', name: 'Follow-up Greeting', content: 'Hello! Just checking in to see if you have any further questions for us.' },
+  { id: 'tpl_support', name: 'Support Assistance', content: 'Thanks for reaching out to customer support. A member of our team is reviewing your message.' }
+];
+
 interface ChatInterfaceProps {
   instances: WhatsAppInstance[];
   currentUser: AppUser;
   apiBase: string;
+  templates?: any[];
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, apiBase }) => {
-  const [selectedInstanceId, setSelectedInstanceId] = useState<string>(instances[0]?.id || '');
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, apiBase, templates: propTemplates = [] }) => {
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string>(() => {
+    const saved = localStorage.getItem('wa_chat_selected_instance');
+    if (saved && instances.some(i => i.id === saved)) return saved;
+    const openInst = instances.find(i => i.status === 'open');
+    return openInst?.id || instances[0]?.id || '';
+  });
+
+  const currentInstance = instances.find(i => i.id === selectedInstanceId) || instances[0];
+  const isMetaInstance = currentInstance?.provider === 'meta' || Boolean(currentInstance?.metaPhoneNumberId || currentInstance?.metaWabaId);
+
+  // Auto-sync selectedInstanceId when instances prop loads or changes
+  useEffect(() => {
+    if ((!selectedInstanceId || !instances.some(i => i.id === selectedInstanceId)) && instances.length > 0) {
+      const openInst = instances.find(i => i.status === 'open');
+      const nextId = openInst?.id || instances[0]?.id || '';
+      setSelectedInstanceId(nextId);
+      localStorage.setItem('wa_chat_selected_instance', nextId);
+    }
+  }, [instances, selectedInstanceId]);
+
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ChatSession | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -230,8 +257,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [typingStatus, setTypingStatus] = useState<Record<string, boolean>>({});
   const [presenceStatus, setPresenceStatus] = useState<Record<string, string>>({});
   const [showTemplates, setShowTemplates] = useState(false);
-  const [templates, setTemplates] = useState<any[]>([]); // Using any for simplicity, or import MessageTemplate
+  const [templates, setTemplates] = useState<any[]>([]); // Baileys templates
+  const [metaTemplatesList, setMetaTemplatesList] = useState<any[]>([]); // Meta templates array
   const [metaTemplatesMap, setMetaTemplatesMap] = useState<Record<string, any>>({});
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
   const [selectedPreviewTemplate, setSelectedPreviewTemplate] = useState<{
     name: string;
     header?: string;
@@ -241,6 +270,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     buttons?: any[];
   } | null>(null);
   const [copiedTemplateText, setCopiedTemplateText] = useState(false);
+
+  // In-memory instant caches for zero-delay UI
+  const sessionsCacheRef = useRef<Record<string, ChatSession[]>>({});
+  const messagesCacheRef = useRef<Record<string, ChatMessage[]>>({});
   
   // Label State
   const [labels, setLabels] = useState<ChatLabel[]>([]);
@@ -299,9 +332,31 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
   const handleSelectSession = async (session: ChatSession) => {
     if (selectedSession?.remoteJid === session.remoteJid) return;
-    currentActiveJidRef.current = session.remoteJid;
-    setMessages([]); // Instantly clear previous contact's chat to prevent ghost cache!
+    const targetJid = session.remoteJid;
+    currentActiveJidRef.current = targetJid;
     setSelectedSession(session);
+
+    // Instant zero-delay cached messages display if available
+    const cacheKey = `${selectedInstanceId}_${targetJid}`;
+    let cached = messagesCacheRef.current[cacheKey];
+    if (!cached || cached.length === 0) {
+      try {
+        const stored = sessionStorage.getItem(`wa_msgs_${cacheKey}`);
+        if (stored) {
+          cached = JSON.parse(stored);
+          messagesCacheRef.current[cacheKey] = cached;
+        }
+      } catch(e) {}
+    }
+
+    if (cached && cached.length > 0) {
+      setMessages(cached);
+      setIsLoading(false);
+    } else {
+      setMessages([]);
+      setIsLoading(true);
+    }
+
     if (session.unreadCount > 0) {
       try {
         await fetch(`${apiBase}/api/chat/messages/${selectedInstanceId}/${session.remoteJid}/read`, {
@@ -495,16 +550,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     };
   }, [apiBase]);
 
-  // Fetch Templates
-  useEffect(() => {
-      const saved = localStorage.getItem(`wa_tpls_${currentUser.id}`);
-      if (saved) setTemplates(JSON.parse(saved));
-  }, [currentUser.id]);
-
-  // Fetch Meta Cloud Templates for the current instance/user to resolve sent template messages
-  useEffect(() => {
+  // Fetch Templates dynamically based on instance type
+  const fetchTemplatesForInstance = async () => {
     if (!selectedInstanceId) return;
-    const fetchMetaTemplates = async () => {
+    setIsLoadingTemplates(true);
+    if (isMetaInstance) {
       try {
         const res = await fetch(`${apiBase}/api/meta/templates/${selectedInstanceId}`, {
           headers: {
@@ -515,44 +565,100 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         if (res.ok) {
           const data = await res.json();
           const list = Array.isArray(data) ? data : (data?.templates || data?.data || []);
-          const map: Record<string, any> = {};
-          list.forEach((t: any) => {
-            if (t.name) {
-              const lower = t.name.toLowerCase().trim();
-              let bodyText = t.body || '';
-              let headerText = '';
-              let footerText = '';
-              let buttons: any[] = [];
+          if (list.length > 0) {
+            setMetaTemplatesList(list);
+            const map: Record<string, any> = {};
+            list.forEach((t: any) => {
+              if (t.name) {
+                const lower = t.name.toLowerCase().trim();
+                let bodyText = t.body || '';
+                let headerText = '';
+                let footerText = '';
+                let buttons: any[] = [];
 
-              if (Array.isArray(t.components)) {
-                t.components.forEach((c: any) => {
-                  if (c.type === 'BODY' && c.text) bodyText = c.text;
-                  if (c.type === 'HEADER' && c.text) headerText = c.text;
-                  if (c.type === 'FOOTER' && c.text) footerText = c.text;
-                  if (c.type === 'BUTTONS' && Array.isArray(c.buttons)) buttons = c.buttons;
-                });
+                if (Array.isArray(t.components)) {
+                  t.components.forEach((c: any) => {
+                    if (c.type === 'BODY' && c.text) bodyText = c.text;
+                    if (c.type === 'HEADER' && c.text) headerText = c.text;
+                    if (c.type === 'FOOTER' && c.text) footerText = c.text;
+                    if (c.type === 'BUTTONS' && Array.isArray(c.buttons)) buttons = c.buttons;
+                  });
+                }
+                map[lower] = {
+                  name: t.name,
+                  language: t.language || 'en',
+                  header: headerText,
+                  body: bodyText,
+                  footer: footerText,
+                  buttons,
+                  category: t.category
+                };
               }
-              map[lower] = {
-                name: t.name,
-                language: t.language || 'en',
-                header: headerText,
-                body: bodyText,
-                footer: footerText,
-                buttons,
-                category: t.category
-              };
-            }
-          });
-          setMetaTemplatesMap(map);
+            });
+            setMetaTemplatesMap(map);
+          } else {
+            setMetaTemplatesList(Object.values(DEFAULT_META_TEMPLATES));
+          }
+        } else {
+          setMetaTemplatesList(Object.values(DEFAULT_META_TEMPLATES));
         }
       } catch (err) {
-        // Silently continue
+        setMetaTemplatesList(Object.values(DEFAULT_META_TEMPLATES));
       }
-    };
-    fetchMetaTemplates();
-  }, [selectedInstanceId, apiBase, currentUser.id, currentUser.apiKey]);
+    } else {
+      // Baileys instance: load Baileys quick-reply templates
+      let baileysList: any[] = [];
+      if (Array.isArray(propTemplates) && propTemplates.length > 0) {
+        baileysList = propTemplates;
+      } else {
+        const saved = localStorage.getItem(`wa_tpls_${currentUser.id}`);
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              baileysList = parsed;
+            }
+          } catch(e) {}
+        }
+      }
 
-  // Fetch sessions
+      if (baileysList.length === 0) {
+        baileysList = DEFAULT_BAILEYS_TEMPLATES;
+      }
+
+      setTemplates(baileysList);
+    }
+    setIsLoadingTemplates(false);
+  };
+
+  useEffect(() => {
+    fetchTemplatesForInstance();
+  }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
+
+  // Fast pre-loading of sessions from cache for instant 0ms chatbox opening
+  useEffect(() => {
+    if (!selectedInstanceId) return;
+    
+    // Check in-memory cache first
+    if (sessionsCacheRef.current[selectedInstanceId]?.length) {
+      setSessions(sessionsCacheRef.current[selectedInstanceId]);
+      return;
+    }
+
+    // Check sessionStorage fallback
+    try {
+      const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setSessions(parsed);
+          sessionsCacheRef.current[selectedInstanceId] = parsed;
+        }
+      }
+    } catch(e) {}
+  }, [selectedInstanceId]);
+
+  // Fetch sessions from server in background and seamlessly update
   useEffect(() => {
     if (!selectedInstanceId) return;
 
@@ -567,6 +673,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         if (res.ok) {
           const data = await res.json();
           setSessions(data);
+          sessionsCacheRef.current[selectedInstanceId] = data;
+          try {
+            sessionStorage.setItem(`wa_cached_sessions_${selectedInstanceId}`, JSON.stringify(data));
+          } catch(e) {}
           
           // Pre-populate profile cache from contact/push names in session data without N+1 HTTP spam
           const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
@@ -619,14 +729,33 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     
     const targetJid = selectedSession.remoteJid;
     currentActiveJidRef.current = targetJid;
-    setMessages([]); // Instantly flush previous user's chat messages
+    const cacheKey = `${selectedInstanceId}_${targetJid}`;
+
+    // If cached messages exist, show them instantly without blank loading screen
+    let cached = messagesCacheRef.current[cacheKey];
+    if (!cached || cached.length === 0) {
+      try {
+        const stored = sessionStorage.getItem(`wa_msgs_${cacheKey}`);
+        if (stored) {
+          cached = JSON.parse(stored);
+          messagesCacheRef.current[cacheKey] = cached;
+        }
+      } catch(e) {}
+    }
+
+    if (cached && cached.length > 0) {
+      setMessages(cached);
+      setIsLoading(false);
+    } else {
+      setMessages([]);
+      setIsLoading(true);
+    }
 
     fetchProfileInfo(targetJid);
 
     const abortController = new AbortController();
 
     const fetchMessages = async () => {
-      setIsLoading(true);
       try {
         const res = await fetch(`${apiBase}/api/chat/messages/${selectedInstanceId}/${targetJid}`, {
           signal: abortController.signal,
@@ -637,6 +766,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         });
         if (res.ok) {
           const data = await res.json();
+          messagesCacheRef.current[cacheKey] = data;
+          try {
+            sessionStorage.setItem(`wa_msgs_${cacheKey}`, JSON.stringify(data));
+          } catch(e) {}
           // Ensure we don't display stale response if user switched to another contact
           if (currentActiveJidRef.current === targetJid) {
             setMessages(data);
@@ -1260,52 +1393,22 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                 </div>
               </div>
 
-              {/* 24-Hour Customer Window Pill */}
-              <div className="hidden lg:flex items-center">
-                {(() => {
-                  const win = getWindowCountdown(selectedSession.lastInboundTimestamp);
-                  return (
-                    <button
-                      type="button"
-                      onClick={() => setShowWindowInfoModal(true)}
-                      className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs border ${
-                        win.isActive
-                          ? (win.isExpiringSoon 
-                              ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25' 
-                              : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25')
-                          : 'bg-gray-800/80 border-gray-700 text-gray-400 hover:bg-gray-700/60'
-                      }`}
-                      title="Click to learn how Meta's 24-hour customer window works"
-                    >
-                      <Clock size={13} className={win.isActive ? (win.isExpiringSoon ? 'text-amber-400' : 'text-emerald-400') : 'text-gray-400'} />
-                      <span>{win.isActive ? `24h Window: ${win.remainingFormatted} left` : '24h Window: Expired'}</span>
-                      <Info size={11} className="opacity-70" />
-                    </button>
-                  );
-                })()}
-              </div>
+              {/* 24-Hour Customer Window Pill removed as requested */}
+              <div className="hidden lg:flex items-center" />
 
               {/* Quick Action Buttons */}
               <div className="flex items-center gap-1.5 md:gap-2 text-gray-400 shrink-0">
-                {/* 1-Click WhatsApp App / Web (wa.me) Deep Link */}
-                <button
-                  type="button"
-                  onClick={() => openInWhatsAppWeb(selectedSession.remoteJid)}
-                  className="flex items-center gap-1.5 bg-[#25D366]/15 hover:bg-[#25D366]/25 border border-[#25D366]/40 text-[#25D366] px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all shadow-xs"
-                  title="Directly text this contact from your personal or sales WhatsApp app / web on another number"
-                >
-                  <ExternalLink size={13} />
-                  <span className="hidden sm:inline font-semibold">Chat on WhatsApp</span>
-                </button>
-
                 {/* Send Template Shortcut */}
                 <button
                   type="button"
-                  onClick={() => setShowTemplates(true)}
+                  onClick={() => {
+                    fetchTemplatesForInstance();
+                    setShowTemplates(prev => !prev);
+                  }}
                   className="hidden sm:flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
-                  title="Send official Meta Template (re-opens the 24h window)"
+                  title={isMetaInstance ? "Send official Meta Template" : "Send Baileys Quick Template"}
                 >
-                  <LayoutTemplate size={13} />
+                  <LayoutTemplate size={13} className={isMetaInstance ? "text-[#25D366]" : "text-amber-400"} />
                   <span>Template</span>
                 </button>
 
@@ -1797,32 +1900,115 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
             {/* Input Container */}
             <div className="bg-[#202c33] p-3 flex items-center gap-2 md:gap-3 relative">
-              {/* Templates Modal */}
+              {/* Templates Modal - Renders as per active instance type */}
               {showTemplates && (
-                  <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-xl shadow-2xl border border-gray-700 w-72 max-h-72 overflow-y-auto">
-                      <div className="p-3 border-b border-gray-700/80 flex items-center justify-between font-semibold text-gray-200 text-xs uppercase tracking-wider bg-[#1d272d]">
-                        <span>Official Meta Templates</span>
-                        <span className="text-[10px] text-emerald-400 font-mono">24h Safe</span>
+                  <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-xl shadow-2xl border border-gray-700 w-80 max-h-80 overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
+                      <div className="p-3 border-b border-gray-700/80 flex items-center justify-between font-semibold text-gray-200 text-xs uppercase tracking-wider bg-[#1d272d] sticky top-0 z-10">
+                        <span className="flex items-center gap-1.5 truncate">
+                          <LayoutTemplate size={14} className={isMetaInstance ? "text-[#25D366]" : "text-amber-400"} />
+                          <span>{isMetaInstance ? "Official Meta Templates" : "Baileys Quick Templates"}</span>
+                        </span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border font-bold ${
+                            isMetaInstance 
+                              ? "text-emerald-300 bg-emerald-500/15 border-emerald-500/30" 
+                              : "text-amber-300 bg-amber-500/15 border-amber-500/30"
+                          }`}>
+                            {isMetaInstance ? "META" : "BAILEYS"}
+                          </span>
+                          <button 
+                            type="button" 
+                            onClick={fetchTemplatesForInstance}
+                            className="p-1 hover:text-white text-gray-400 transition-colors"
+                            title="Refresh templates"
+                          >
+                            <RefreshCw size={12} className={isLoadingTemplates ? "animate-spin text-[#25D366]" : ""} />
+                          </button>
+                        </div>
                       </div>
-                      {(!Array.isArray(templates) || templates.length === 0) ? (
-                          <div className="p-4 text-center text-gray-400 text-xs">
-                            No custom templates found. Use default templates or sync from Meta.
-                          </div>
-                      ) : (
-                          (Array.isArray(templates) ? templates : []).map((t: any) => (
-                              <button 
-                                  key={t.id} 
-                                  type="button"
-                                  onClick={() => {
-                                      setNewMessage(t.content);
-                                      setShowTemplates(false);
-                                  }}
-                                  className="w-full text-left p-2.5 hover:bg-[#111b21] text-gray-200 text-xs border-b border-gray-700/50 last:border-0 transition-colors"
+
+                      {isLoadingTemplates ? (
+                        <div className="p-6 text-center text-gray-400 text-xs flex items-center justify-center gap-2">
+                          <RefreshCw size={14} className="animate-spin text-[#25D366]" />
+                          <span>Loading {isMetaInstance ? "Meta" : "Baileys"} templates...</span>
+                        </div>
+                      ) : isMetaInstance ? (
+                        /* Meta Templates List */
+                        (() => {
+                          const availableMetaTemplates = (metaTemplatesList && metaTemplatesList.length > 0)
+                            ? metaTemplatesList
+                            : Object.values(DEFAULT_META_TEMPLATES);
+
+                          if (availableMetaTemplates.length === 0) {
+                            return (
+                              <div className="p-4 text-center text-gray-400 text-xs">
+                                No Meta templates found for this instance. Sync templates in the Meta Templates tab.
+                              </div>
+                            );
+                          }
+
+                          return availableMetaTemplates.map((t: any, idx: number) => {
+                            const bodyComp = Array.isArray(t.components) ? t.components.find((c: any) => c.type === 'BODY') : null;
+                            const bodyContent = t.body || bodyComp?.text || '';
+                            const category = t.category || 'UTILITY';
+                            const status = t.status || 'APPROVED';
+
+                            return (
+                              <button
+                                key={t.id || t.name || idx}
+                                type="button"
+                                onClick={() => {
+                                  // Insert template placeholder or resolved content
+                                  setNewMessage(bodyContent || `[Template: ${t.name}]`);
+                                  setShowTemplates(false);
+                                }}
+                                className="w-full text-left p-3 hover:bg-[#111b21] text-gray-200 text-xs border-b border-gray-700/50 last:border-0 transition-colors cursor-pointer group"
                               >
-                                  <div className="font-medium text-white">{t.name}</div>
-                                  <div className="text-gray-400 text-[11px] truncate mt-0.5">{t.content}</div>
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="font-bold text-white group-hover:text-[#25D366] transition-colors truncate">{t.name}</span>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <span className="text-[8px] px-1 py-0.2 rounded bg-black/40 text-gray-400 border border-gray-700 font-mono uppercase">{category}</span>
+                                    {status === 'APPROVED' && (
+                                      <span className="text-[8px] px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-400 font-bold uppercase">Approved</span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="text-gray-400 text-[11px] line-clamp-2 leading-relaxed">
+                                  {bodyContent || 'Click to select this Meta template'}
+                                </div>
                               </button>
-                          ))
+                            );
+                          });
+                        })()
+                      ) : (
+                        /* Baileys Templates List */
+                        (() => {
+                          if (!Array.isArray(templates) || templates.length === 0) {
+                            return (
+                              <div className="p-4 text-center text-gray-400 text-xs">
+                                No Baileys templates found. Create quick replies in Baileys Templates tab.
+                              </div>
+                            );
+                          }
+
+                          return templates.map((t: any) => {
+                            const templateText = t.content || t.body || t.text || '';
+                            return (
+                              <button 
+                                key={t.id || t.name} 
+                                type="button"
+                                onClick={() => {
+                                  setNewMessage(templateText);
+                                  setShowTemplates(false);
+                                }}
+                                className="w-full text-left p-3 hover:bg-[#111b21] text-gray-200 text-xs border-b border-gray-700/50 last:border-0 transition-colors cursor-pointer group"
+                              >
+                                <div className="font-medium text-white group-hover:text-[#25D366] transition-colors">{t.name}</div>
+                                <div className="text-gray-400 text-[11px] truncate mt-0.5">{templateText}</div>
+                              </button>
+                            );
+                          });
+                        })()
                       )}
                   </div>
               )}
@@ -1999,10 +2185,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                   />
                   
                   <LayoutTemplate 
-                    className={`cursor-pointer hover:text-gray-200 transition-colors ${showTemplates ? 'text-[#25D366]' : 'text-gray-400'}`}
+                    className={`cursor-pointer hover:text-gray-200 transition-colors ${showTemplates ? (isMetaInstance ? 'text-[#25D366]' : 'text-amber-400') : 'text-gray-400'}`}
                     size={22}
-                    onClick={() => setShowTemplates(!showTemplates)}
-                    title="Official Meta Quick Templates"
+                    onClick={() => {
+                      if (!showTemplates) {
+                        fetchTemplatesForInstance();
+                      }
+                      setShowTemplates(!showTemplates);
+                    }}
+                    title={isMetaInstance ? "Official Meta Quick Templates" : "Baileys Quick Reply Templates"}
                   />
                   
                   <form onSubmit={handleSendMessage} className="flex-1">

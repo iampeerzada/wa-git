@@ -334,9 +334,6 @@ const MessageTemplates: React.FC<MessageTemplatesProps> = ({ templates, setTempl
                 </div>
               </div>
               <div className="flex items-center justify-end gap-1 mb-1.5">
-                <button onClick={() => handleEdit(tpl)} className="p-1 text-gray-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all cursor-pointer" title="Edit">
-                  <Edit3 size={13} />
-                </button>
                 <button onClick={() => handleDelete(tpl.id)} className="p-1 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all cursor-pointer" title="Delete">
                   <Trash2 size={13} />
                 </button>

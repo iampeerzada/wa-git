@@ -989,7 +989,7 @@ const App: React.FC = () => {
           {activeTab === 'contacts' && <ContactManager contactGroups={contactGroups} setContactGroups={setContactGroups} currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'media-library' && <MediaLibrary currentUser={currentUser} mediaAssets={mediaAssets} setMediaAssets={setMediaAssets} apiBase={API_BASE} />}
           {activeTab === 'auto-responder' && <AutoResponderManager instances={visibleInstances} currentUser={currentUser} mediaAssets={mediaAssets} apiBase={API_BASE} />}
-          {activeTab === 'chat' && <ChatInterface instances={visibleInstances} currentUser={currentUser} apiBase={API_BASE} />}
+          {activeTab === 'chat' && <ChatInterface instances={visibleInstances} currentUser={currentUser} apiBase={API_BASE} templates={templates} />}
           {activeTab === 'team' && <TeamManager currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'visibility' && <VisibilityManager currentUser={currentUser} hiddenModules={hiddenModules} setHiddenModules={setHiddenModules} apiBase={API_BASE} />}
           {activeTab === 'code' && <CodeSnippets />}

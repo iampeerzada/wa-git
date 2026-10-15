@@ -52,6 +52,19 @@ const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
             if (mimeMatch) mimeType = mimeMatch[1];
             const base64Data = linkUrl.split(',')[1];
             buffer = Buffer.from(base64Data, 'base64');
+        } else if (linkUrl.startsWith('/uploads/') || linkUrl.startsWith('uploads/') || linkUrl.includes('uploads/')) {
+            const fs = require('fs');
+            const path = require('path');
+            const cleanRel = linkUrl.substring(linkUrl.indexOf('uploads/'));
+            const localPath = path.join(__dirname, cleanRel);
+            if (fs.existsSync(localPath)) {
+                buffer = fs.readFileSync(localPath);
+                let ext = path.extname(localPath).slice(1).toLowerCase() || 'jpg';
+                if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+                else if (ext === 'png') mimeType = 'image/png';
+                else if (ext === 'pdf') mimeType = 'application/pdf';
+                else if (ext === 'mp4') mimeType = 'video/mp4';
+            }
         } else if (linkUrl.startsWith('http')) {
             const headers = {};
             const token = instance.metaAccessToken || instance.meta_access_token || instance.metaToken;
@@ -133,7 +146,7 @@ const sanitizeMetaComponents = async (rawComponents, instance, options = {}) => 
 
         if (rawType === 'header') {
             const headerParams = [];
-            if (Array.isArray(comp.parameters)) {
+            if (Array.isArray(comp.parameters) && comp.parameters.length > 0) {
                 for (let param of comp.parameters) {
                     if (!param || !param.type) continue;
                     const pType = String(param.type).toLowerCase();
@@ -148,17 +161,40 @@ const sanitizeMetaComponents = async (rawComponents, instance, options = {}) => 
                         headerParams.push({ type: 'text', text: String(param.text || '') });
                     }
                 }
+            } else {
+                // If comp is raw template structure (e.g. { type: "HEADER", format: "IMAGE" })
+                const fmt = String(comp.format || '').toLowerCase();
+                if (['image', 'video', 'document'].includes(fmt)) {
+                    const linkUrl = options.mediaUrl || options.media_url || comp.example?.header_url?.[0] || comp.example?.header_handle?.[0] || 'https://dummyimage.com/600x400/25d366/ffffff.png';
+                    const mediaObj = await getMetaMediaObject(linkUrl, instance, fmt);
+                    headerParams.push({ type: fmt, [fmt]: mediaObj });
+                } else if (fmt === 'text' && comp.text && /\{\{\d+\}\}/.test(comp.text)) {
+                    const headerVars = options.headerVariables || options.templateVariables || comp.example?.header_text?.[0] || ['Header'];
+                    const hVarsArr = Array.isArray(headerVars) ? headerVars : [headerVars];
+                    hVarsArr.forEach(v => headerParams.push({ type: 'text', text: String(v) }));
+                }
             }
             if (headerParams.length > 0) {
                 clean.push({ type: 'header', parameters: headerParams });
             }
         } else if (rawType === 'body') {
             const bodyParams = [];
-            if (Array.isArray(comp.parameters)) {
+            if (Array.isArray(comp.parameters) && comp.parameters.length > 0) {
                 for (let param of comp.parameters) {
                     let textVal = param?.text !== undefined ? param.text : (typeof param === 'string' ? param : '');
                     if (textVal !== '') {
                         bodyParams.push({ type: 'text', text: String(textVal) });
+                    }
+                }
+            } else if (comp.text) {
+                // Raw template structure for body (e.g. { type: "BODY", text: "Hello {{1}}" })
+                const bodyMatches = comp.text.match(/\{\{\d+\}\}/g) || [];
+                if (bodyMatches.length > 0) {
+                    const givenBodyVars = Array.isArray(options.templateVariables) ? options.templateVariables : (Array.isArray(options.variables) ? options.variables : []);
+                    const exampleVars = comp.example?.body_text?.[0] || [];
+                    for (let i = 0; i < bodyMatches.length; i++) {
+                        const val = givenBodyVars[i] !== undefined ? givenBodyVars[i] : (exampleVars[i] || `Value ${i + 1}`);
+                        bodyParams.push({ type: 'text', text: String(val) });
                     }
                 }
             }
@@ -491,7 +527,7 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                     let dbTplComps = [];
                     let exactDbLang = activeTplLang;
                     try {
-                        const dbTplRes = await pool.query('SELECT language, components FROM meta_templates WHERE name = $1 AND (instance_id = $2 OR instance_id IS NOT NULL) ORDER BY (instance_id = $2) DESC LIMIT 1', [activeTplName, instance.id]);
+                        const dbTplRes = await pool.query('SELECT language, components FROM meta_templates WHERE LOWER(name) = LOWER($1) AND (instance_id = $2 OR instance_id IS NOT NULL) ORDER BY (instance_id = $2) DESC LIMIT 1', [activeTplName, instance.id]);
                         if (dbTplRes.rows.length > 0) {
                             if (dbTplRes.rows[0].language) {
                                 exactDbLang = dbTplRes.rows[0].language;
@@ -500,6 +536,28 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                                 dbTplComps = typeof dbTplRes.rows[0].components === 'string' 
                                     ? JSON.parse(dbTplRes.rows[0].components) 
                                     : dbTplRes.rows[0].components;
+                            }
+                        } else {
+                            // Fetch live template definition directly from Meta Graph API if not yet synced in local DB!
+                            const wabaId = instance.metaWabaId || instance.meta_waba_id;
+                            const token = instance.metaAccessToken || instance.meta_access_token;
+                            if (wabaId && token) {
+                                console.log(`[Worker] Template '${activeTplName}' not found in local DB. Fetching live definition from Meta WABA ${wabaId}...`);
+                                const metaTplRes = await fetch(`https://graph.facebook.com/v26.0/${wabaId}/message_templates?name=${encodeURIComponent(activeTplName)}`, {
+                                    headers: { 'Authorization': `Bearer ${token}` }
+                                });
+                                const metaTplData = await metaTplRes.json();
+                                if (metaTplData.data && metaTplData.data.length > 0) {
+                                    const liveTpl = metaTplData.data[0];
+                                    exactDbLang = liveTpl.language || exactDbLang;
+                                    dbTplComps = liveTpl.components || [];
+                                    await pool.query(
+                                        `INSERT INTO meta_templates (id, instance_id, name, language, status, category, components)
+                                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                         ON CONFLICT (id) DO UPDATE SET components = $7, status = $5, language = $4`,
+                                        [`tpl_${instance.id}_${liveTpl.name}`, instance.id, liveTpl.name, liveTpl.language, liveTpl.status, liveTpl.category, JSON.stringify(dbTplComps)]
+                                    ).catch(() => {});
+                                }
                             }
                         }
                     } catch (err) {
@@ -511,38 +569,44 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                         language: { code: exactDbLang || activeTplLang || 'en' }
                     };
 
+                    let sanitizedComps = [];
                     if (options.components && Array.isArray(options.components) && options.components.length > 0) {
-                        msgData.template.components = await sanitizeMetaComponents(options.components, instance, options);
-                    } else {
-                        const comps = [];
+                        sanitizedComps = await sanitizeMetaComponents(options.components, instance, options);
+                    }
 
-                        // 1. Header Component
-                        const dbHeader = Array.isArray(dbTplComps) ? dbTplComps.find(c => String(c.type).toUpperCase() === 'HEADER') : null;
-                        if (dbHeader) {
-                            if (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(dbHeader.format).toUpperCase())) {
-                                const mType = String(dbHeader.format).toLowerCase();
-                                const linkUrl = mediaUrl || options.mediaUrl || dbHeader.example?.header_url?.[0] || dbHeader.example?.header_handle?.[0] || 'https://dummyimage.com/600x400/25d366/ffffff.png';
-                                const mediaObj = await getMetaMediaObject(linkUrl, instance, mType);
-                                comps.push({
-                                    type: "header",
-                                    parameters: [{ type: mType, [mType]: mediaObj }]
-                                });
-                            } else if (String(dbHeader.format).toUpperCase() === 'TEXT' && dbHeader.text && /\{\{\d+\}\}/.test(dbHeader.text)) {
-                                const headerVars = options.headerVariables || activeTplVars || dbHeader.example?.header_text?.[0] || ['Header'];
-                                const hVarsArr = Array.isArray(headerVars) ? headerVars : [headerVars];
-                                comps.push({
-                                    type: "header",
-                                    parameters: hVarsArr.map(v => ({ type: "text", text: String(v) }))
-                                });
-                            }
-                        } else if (mediaUrl) {
-                            const mType = (mediaType || 'image').toLowerCase();
-                            const mediaObj = await getMetaMediaObject(mediaUrl, instance, mType);
+                    const comps = [];
+
+                    // 1. Header Component
+                    const dbHeader = Array.isArray(dbTplComps) ? dbTplComps.find(c => String(c.type).toUpperCase() === 'HEADER') : null;
+                    const existingHeader = sanitizedComps.find(c => String(c.type).toLowerCase() === 'header');
+
+                    if (existingHeader && existingHeader.parameters && existingHeader.parameters.length > 0) {
+                        comps.push(existingHeader);
+                    } else if (dbHeader) {
+                        if (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(dbHeader.format).toUpperCase())) {
+                            const mType = String(dbHeader.format).toLowerCase();
+                            const linkUrl = mediaUrl || options.mediaUrl || dbHeader.example?.header_url?.[0] || dbHeader.example?.header_handle?.[0] || 'https://dummyimage.com/600x400/25d366/ffffff.png';
+                            const mediaObj = await getMetaMediaObject(linkUrl, instance, mType);
                             comps.push({
                                 type: "header",
                                 parameters: [{ type: mType, [mType]: mediaObj }]
                             });
+                        } else if (String(dbHeader.format).toUpperCase() === 'TEXT' && dbHeader.text && /\{\{\d+\}\}/.test(dbHeader.text)) {
+                            const headerVars = options.headerVariables || activeTplVars || dbHeader.example?.header_text?.[0] || ['Header'];
+                            const hVarsArr = Array.isArray(headerVars) ? headerVars : [headerVars];
+                            comps.push({
+                                type: "header",
+                                parameters: hVarsArr.map(v => ({ type: "text", text: String(v) }))
+                            });
                         }
+                    } else if (mediaUrl && (!dbTplComps || dbTplComps.length === 0)) {
+                        const mType = (mediaType || 'image').toLowerCase();
+                        const mediaObj = await getMetaMediaObject(mediaUrl, instance, mType);
+                        comps.push({
+                            type: "header",
+                            parameters: [{ type: mType, [mType]: mediaObj }]
+                        });
+                    }
 
                         // 2. Body Component
                         const dbBody = Array.isArray(dbTplComps) ? dbTplComps.find(c => String(c.type).toUpperCase() === 'BODY') : null;
