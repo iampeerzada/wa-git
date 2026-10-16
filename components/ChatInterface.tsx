@@ -4,9 +4,9 @@ import {
   X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye,
   Mic, Square, ExternalLink, Clock, AlertTriangle, FileText, Image, Film, Music, 
   Download, Bell, BellOff, Info, RefreshCw, Volume2, ShieldCheck, HelpCircle, Sparkles,
-  CheckCircle2, ClipboardList, ChevronDown, ChevronUp
+  CheckCircle2, ClipboardList, ChevronDown, ChevronUp, Folder
 } from 'lucide-react';
-import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel } from '../types';
+import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel, MediaAsset } from '../types';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 
@@ -221,9 +221,10 @@ interface ChatInterfaceProps {
   currentUser: AppUser;
   apiBase: string;
   templates?: any[];
+  mediaAssets?: MediaAsset[];
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, apiBase, templates: propTemplates = [] }) => {
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, apiBase, templates: propTemplates = [], mediaAssets = [] }) => {
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(() => {
     const saved = localStorage.getItem('wa_chat_selected_instance');
     if (saved && instances.some(i => i.id === saved)) return saved;
@@ -378,8 +379,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     }
   };
 
+  // Media Library Selection State
+  const [showMediaLibraryPicker, setShowMediaLibraryPicker] = useState(false);
+  const [mediaLibraryFilter, setMediaLibraryFilter] = useState<'all' | 'image' | 'video' | 'document'>('all');
+  const [selectedMediaAsset, setSelectedMediaAsset] = useState<MediaAsset | null>(null);
+
+  // Active Template Mode in Popover ('meta' or 'regular')
+  const [activeTemplateTab, setActiveTemplateTab] = useState<'meta' | 'regular'>(isMetaInstance ? 'meta' : 'regular');
+
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
   };
 
   useEffect(() => {
@@ -829,15 +838,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!newMessage.trim() && !selectedFile) || !selectedSession || !selectedInstanceId) return;
+    if ((!newMessage.trim() && !selectedFile && !selectedMediaAsset) || !selectedSession || !selectedInstanceId) return;
 
     const text = newMessage;
     const file = selectedFile;
     const fileUrl = previewUrl;
+    const mediaAsset = selectedMediaAsset;
     const quoteId = replyingTo?.id;
     
     setNewMessage('');
     clearFile();
+    setSelectedMediaAsset(null);
     setReplyingTo(null); // Clear reply state
     setShowEmojiPicker(false);
 
@@ -850,7 +861,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         quotedMsgId: quoteId
       };
 
-      if (file && fileUrl) {
+      if (mediaAsset) {
+        payload.media = mediaAsset.url;
+        payload.type = mediaAsset.type;
+        payload.fileName = mediaAsset.name;
+      } else if (file && fileUrl) {
         payload.media = fileUrl; // Base64 string
         payload.type = file.type.startsWith('image/') ? 'image' : 
                        file.type.startsWith('video/') ? 'video' : 
@@ -869,7 +884,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       });
 
       if (!res.ok) {
-        console.error('Failed to send message');
+        const errData = await res.json().catch(() => ({}));
+        const errMsg = errData.error || 'Failed to send message';
+        console.error('Failed to send message:', errMsg);
+        alert(`Message Delivery Notice: ${errMsg}`);
       }
     } catch (err) {
       console.error('Send error', err);
@@ -2013,7 +2031,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                       <div className="p-3 border-b border-gray-700/80 flex items-center justify-between font-semibold text-gray-200 text-xs uppercase tracking-wider bg-[#1d272d] sticky top-0 z-10">
                         <span className="flex items-center gap-1.5 truncate">
                           <LayoutTemplate size={14} className={isMetaInstance ? "text-[#25D366]" : "text-amber-400"} />
-                          <span>{isMetaInstance ? "Official Meta Templates" : "Baileys Quick Templates"}</span>
+                          <span>{isMetaInstance ? "Meta & Quick Templates" : "Baileys Quick Templates"}</span>
                         </span>
                         <div className="flex items-center gap-1 shrink-0">
                           <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border font-bold ${
@@ -2034,12 +2052,40 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         </div>
                       </div>
 
+                      {/* Meta Instance Tab Selector */}
+                      {isMetaInstance && (
+                        <div className="flex border-b border-gray-700 bg-[#111b21] sticky top-[41px] z-10">
+                          <button
+                            type="button"
+                            onClick={() => setActiveTemplateTab('meta')}
+                            className={`flex-1 py-1.5 text-[11px] font-bold border-b-2 transition-colors ${
+                              activeTemplateTab === 'meta'
+                                ? 'border-[#25D366] text-[#25D366] bg-[#2a3942]/40'
+                                : 'border-transparent text-gray-400 hover:text-gray-200'
+                            }`}
+                          >
+                            Meta Templates
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTemplateTab('regular')}
+                            className={`flex-1 py-1.5 text-[11px] font-bold border-b-2 transition-colors ${
+                              activeTemplateTab === 'regular'
+                                ? 'border-amber-400 text-amber-400 bg-[#2a3942]/40'
+                                : 'border-transparent text-gray-400 hover:text-gray-200'
+                            }`}
+                          >
+                            Regular Quick Replies
+                          </button>
+                        </div>
+                      )}
+
                       {isLoadingTemplates ? (
                         <div className="p-6 text-center text-gray-400 text-xs flex items-center justify-center gap-2">
                           <RefreshCw size={14} className="animate-spin text-[#25D366]" />
-                          <span>Loading {isMetaInstance ? "Meta" : "Baileys"} templates...</span>
+                          <span>Loading templates...</span>
                         </div>
-                      ) : isMetaInstance ? (
+                      ) : (isMetaInstance && activeTemplateTab === 'meta') ? (
                         /* Meta Templates List */
                         (() => {
                           const availableMetaTemplates = (metaTemplatesList && metaTemplatesList.length > 0)
@@ -2049,7 +2095,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                           if (availableMetaTemplates.length === 0) {
                             return (
                               <div className="p-4 text-center text-gray-400 text-xs">
-                                No Meta templates found for this instance. Sync templates in the Meta Templates tab.
+                                No Meta templates found for this instance. Sync templates in Meta Templates tab.
                               </div>
                             );
                           }
@@ -2065,7 +2111,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                 key={t.id || t.name || idx}
                                 type="button"
                                 onClick={() => {
-                                  // Insert template placeholder or resolved content
                                   setNewMessage(bodyContent || `[Template: ${t.name}]`);
                                   setShowTemplates(false);
                                 }}
@@ -2088,17 +2133,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                           });
                         })()
                       ) : (
-                        /* Baileys Templates List */
+                        /* Regular Quick Replies List (Usable when 24h window is open) */
                         (() => {
-                          if (!Array.isArray(templates) || templates.length === 0) {
-                            return (
-                              <div className="p-4 text-center text-gray-400 text-xs">
-                                No Baileys templates found. Create quick replies in Baileys Templates tab.
-                              </div>
-                            );
-                          }
+                          const quickReplyTemplates = (Array.isArray(propTemplates) && propTemplates.length > 0)
+                            ? propTemplates
+                            : (Array.isArray(templates) && templates.length > 0 ? templates : DEFAULT_BAILEYS_TEMPLATES);
 
-                          return templates.map((t: any) => {
+                          return quickReplyTemplates.map((t: any) => {
                             const templateText = t.content || t.body || t.text || '';
                             return (
                               <button 
@@ -2122,8 +2163,27 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
               {/* Attachment Picker Menu Popover */}
               {showAttachmentMenu && (
-                <div className="absolute bottom-16 left-12 z-50 bg-[#202c33] border border-gray-700 rounded-2xl shadow-2xl p-2 w-60 space-y-1 animate-in fade-in zoom-in-95 duration-150">
-                  <div className="px-2 py-1 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Send Media</div>
+                <div className="absolute bottom-16 left-12 z-50 bg-[#202c33] border border-gray-700 rounded-2xl shadow-2xl p-2 w-64 space-y-1 animate-in fade-in zoom-in-95 duration-150">
+                  <div className="px-2 py-1 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Send Attachment / Media</div>
+                  
+                  {/* Media Library Shortcut */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachmentMenu(false);
+                      setShowMediaLibraryPicker(true);
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs text-gray-200 hover:bg-[#111b21] hover:text-white transition-colors bg-purple-500/10 border border-purple-500/20 my-1"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center shrink-0">
+                      <Folder size={16} />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-bold text-purple-300">Media Library</div>
+                      <div className="text-[10px] text-gray-400">Select stored files & assets</div>
+                    </div>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
@@ -2190,6 +2250,117 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                       <div className="font-medium text-white">Voice Note</div>
                       <div className="text-[10px] text-gray-400">Record from microphone</div>
                     </div>
+                  </button>
+                </div>
+              )}
+
+              {/* Media Library Selection Modal */}
+              {showMediaLibraryPicker && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                  <div className="bg-[#202c33] border border-gray-700 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[80vh]">
+                    <div className="p-4 border-b border-gray-700 flex items-center justify-between bg-[#111b21]">
+                      <div className="flex items-center gap-2 text-white font-bold text-sm">
+                        <Folder className="text-[#25D366]" size={18} />
+                        <span>Select Media from Library</span>
+                      </div>
+                      <button
+                        onClick={() => setShowMediaLibraryPicker(false)}
+                        className="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-gray-800 transition-colors"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+
+                    {/* Filters */}
+                    <div className="p-3 border-b border-gray-800 flex items-center gap-2 bg-[#182229]">
+                      <button
+                        onClick={() => setMediaLibraryFilter('all')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold ${mediaLibraryFilter === 'all' ? 'bg-[#25D366] text-[#0b141a]' : 'bg-[#202c33] text-gray-400 hover:text-white'}`}
+                      >
+                        All ({mediaAssets.length})
+                      </button>
+                      <button
+                        onClick={() => setMediaLibraryFilter('image')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold ${mediaLibraryFilter === 'image' ? 'bg-[#25D366] text-[#0b141a]' : 'bg-[#202c33] text-gray-400 hover:text-white'}`}
+                      >
+                        Images
+                      </button>
+                      <button
+                        onClick={() => setMediaLibraryFilter('video')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold ${mediaLibraryFilter === 'video' ? 'bg-[#25D366] text-[#0b141a]' : 'bg-[#202c33] text-gray-400 hover:text-white'}`}
+                      >
+                        Videos
+                      </button>
+                      <button
+                        onClick={() => setMediaLibraryFilter('document')}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold ${mediaLibraryFilter === 'document' ? 'bg-[#25D366] text-[#0b141a]' : 'bg-[#202c33] text-gray-400 hover:text-white'}`}
+                      >
+                        Documents
+                      </button>
+                    </div>
+
+                    {/* Media Grid */}
+                    <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {mediaAssets.filter(m => mediaLibraryFilter === 'all' || m.type === mediaLibraryFilter).length === 0 ? (
+                        <div className="col-span-full text-center py-12 text-gray-500 text-xs">
+                          No media files found in Media Library. Upload files in Media Library tab first.
+                        </div>
+                      ) : (
+                        mediaAssets.filter(m => mediaLibraryFilter === 'all' || m.type === mediaLibraryFilter).map(asset => (
+                          <div
+                            key={asset.id}
+                            onClick={() => {
+                              setSelectedMediaAsset(asset);
+                              setSelectedFile(null);
+                              setPreviewUrl(null);
+                              setShowMediaLibraryPicker(false);
+                            }}
+                            className={`group relative bg-[#111b21] border rounded-xl overflow-hidden cursor-pointer hover:border-[#25D366] transition-all p-2 flex flex-col items-center justify-center text-center ${
+                              selectedMediaAsset?.id === asset.id ? 'border-[#25D366] ring-2 ring-[#25D366]/30' : 'border-gray-700'
+                            }`}
+                          >
+                            {asset.type === 'image' ? (
+                              <img src={asset.url} alt={asset.name} className="w-full h-24 object-cover rounded-lg mb-2" />
+                            ) : asset.type === 'video' ? (
+                              <div className="w-full h-24 bg-black/40 rounded-lg flex items-center justify-center mb-2 text-amber-400">
+                                <Film size={28} />
+                              </div>
+                            ) : (
+                              <div className="w-full h-24 bg-black/40 rounded-lg flex items-center justify-center mb-2 text-blue-400">
+                                <FileText size={28} />
+                              </div>
+                            )}
+                            <span className="text-xs font-medium text-white truncate w-full px-1" title={asset.name}>
+                              {asset.name}
+                            </span>
+                            <span className="text-[10px] text-gray-500 uppercase font-mono mt-0.5">{asset.type}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Selected Media Asset Preview */}
+              {selectedMediaAsset && (
+                <div className="absolute bottom-16 left-16 z-50 bg-[#2a3942] p-2 rounded-xl border border-gray-700 shadow-xl flex items-center gap-3">
+                  {selectedMediaAsset.type === 'image' ? (
+                    <img src={selectedMediaAsset.url} alt="Preview" className="w-14 h-14 rounded-lg object-cover" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-lg bg-gray-800 flex items-center justify-center text-[#25D366]">
+                      <FileText size={20} />
+                    </div>
+                  )}
+                  <div className="text-left max-w-[180px]">
+                    <div className="text-xs font-bold text-white truncate">{selectedMediaAsset.name}</div>
+                    <span className="text-[10px] text-emerald-400 font-mono uppercase">Media Library</span>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedMediaAsset(null)}
+                    className="bg-red-500 text-white rounded-full p-1 hover:bg-red-600 shadow-md ml-1"
+                  >
+                    <X size={12} />
                   </button>
                 </div>
               )}

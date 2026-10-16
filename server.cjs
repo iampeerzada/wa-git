@@ -1141,28 +1141,30 @@ app.get('/api/meta/webhook', (req, res) => {
 app.post('/api/meta/webhook', async (req, res) => {
     const body = req.body;
     if (body.object) {
-        if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.statuses && body.entry[0].changes[0].value.statuses[0]) {
-            const statusObj = body.entry[0].changes[0].value.statuses[0];
-            const msgId = statusObj.id;
-            const status = statusObj.status; // 'sent', 'delivered', 'read', 'failed'
-            const error = statusObj.errors ? JSON.stringify(statusObj.errors) : null;
-            
-            console.log(`[Meta Webhook] Status update for ${msgId}: ${status}`);
-            if (error) console.error(`[Meta Webhook] Error info for ${msgId}: ${error}`);
+        if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.statuses) {
+            const statuses = body.entry[0].changes[0].value.statuses;
+            for (const statusObj of statuses) {
+                const msgId = statusObj.id;
+                const status = statusObj.status; // 'sent', 'delivered', 'read', 'failed'
+                const errorObj = statusObj.errors ? statusObj.errors[0] : null;
+                const errorMsg = errorObj ? (errorObj.message || errorObj.title || JSON.stringify(errorObj)) : null;
 
-            try {
-                // Update message logs (bulk sender)
-                if (error) {
-                    await pool.query('UPDATE message_logs SET status = $1, error = $2 WHERE message_id = $3', [status, error, msgId]);
-                } else {
-                    await pool.query('UPDATE message_logs SET status = $1 WHERE message_id = $2', [status, msgId]);
+                console.log(`[Meta Webhook] Status update for ${msgId}: ${status}${errorMsg ? ` (Error: ${errorMsg})` : ''}`);
+
+                try {
+                    // Update message logs (bulk sender)
+                    if (errorMsg) {
+                        await pool.query('UPDATE message_logs SET status = $1, error = $2 WHERE message_id = $3', [status, errorMsg, msgId]);
+                    } else {
+                        await pool.query('UPDATE message_logs SET status = $1 WHERE message_id = $2', [status, msgId]);
+                    }
+                    // Update chat messages (chat interface)
+                    await pool.query('UPDATE chat_messages SET status = $1 WHERE id = $2', [status, msgId]);
+                    
+                    io.emit('message_status', { id: msgId, msgId: msgId, status, error: errorMsg });
+                } catch (e) {
+                    console.error('[Meta Webhook Status DB Error]', e.message);
                 }
-                // Update chat messages (chat interface)
-                await pool.query('UPDATE chat_messages SET status = $1 WHERE id = $2', [status, msgId]);
-                
-                io.emit('message_status', { id: msgId, msgId: msgId, status });
-            } catch (e) {
-                console.error('[Meta Webhook Status DB Error]', e.message);
             }
         }
 
@@ -5191,7 +5193,11 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
         let msgId;
         
         if (instance.provider === 'meta') {
-            const jid = remoteJid.replace(/[^0-9]/g, '');
+            let jid = remoteJid.replace(/[^0-9]/g, '');
+            if (jid.length === 10 && /^[6789]/.test(jid)) {
+                jid = '91' + jid; // Default India 91 prefix for 10-digit mobile numbers
+            }
+
             let msgData = {
                 messaging_product: "whatsapp",
                 recipient_type: "individual",
@@ -5227,7 +5233,13 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             
             const metaJson = await metaRes.json();
             if (!metaRes.ok || metaJson.error) {
-                throw new Error(metaJson.error?.message || 'Meta API Error');
+                const errObj = metaJson.error || {};
+                let errMsg = errObj.message || 'Meta API Error';
+                if (errObj.code === 131047 || errMsg.includes('24 hours')) {
+                    errMsg = 'Meta 24-Hour Service Window is closed for this recipient. Please send an approved Meta Template to re-open the session.';
+                }
+                console.error(`[Meta Direct Send Error] ${errMsg}`, errObj);
+                return res.status(400).json({ error: errMsg });
             }
             msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
         } else {
