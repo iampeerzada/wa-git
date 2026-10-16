@@ -3395,7 +3395,7 @@ app.get('/api/campaigns/active', authenticate, async (req, res) => {
             if (pool) {
                 const metricsRes = await pool.query(`
                     SELECT 
-                        COUNT(CASE WHEN status = 'sent' THEN 1 END) as sent_count,
+                        COUNT(CASE WHEN status IN ('sent', 'delivered', 'success', 'read', 'resolved_sent') THEN 1 END) as sent_count,
                         COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_count
                     FROM message_logs 
                     WHERE campaign_id = $1
@@ -3411,7 +3411,7 @@ app.get('/api/campaigns/active', authenticate, async (req, res) => {
             const pending = Math.max(0, total - sentCount - failedCount);
 
             let status = r.status || 'processing';
-            if (status === 'processing' && (sentCount + failedCount >= total) && total > 0) {
+            if ((status === 'processing' || status === 'scheduled') && (sentCount + failedCount >= total || pending === 0) && total > 0) {
                 status = 'completed';
                 if (pool) {
                     pool.query("UPDATE scheduled_campaigns SET status = 'completed' WHERE id = $1", [r.id]).catch(() => {});
@@ -3476,7 +3476,7 @@ app.get('/api/campaigns/:id/status', authenticate, async (req, res) => {
             logs = logsRes.rows;
         }
 
-        const sentCount = logs.filter(l => l.status === 'sent').length;
+        const sentCount = logs.filter(l => ['sent', 'delivered', 'success', 'read', 'resolved_sent'].includes(l.status)).length;
         const failedCount = logs.filter(l => l.status === 'failed').length;
         const total = parseInt(campaign.total_recipients, 10) || 0;
 

@@ -197,6 +197,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       const data = await res.json();
       if (res.ok) {
         addLog(isRunning ? `Campaign ${id} stopped by user.` : `Campaign ${id} cancelled.`, 'warning');
+        fetchRunningCampaigns();
         fetchScheduledCampaigns();
       } else {
         alert(data.error || 'Failed to cancel campaign');
@@ -227,6 +228,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         setProgress(p => ({ ...p, queued: 0 }));
         addLog(`Campaign stopped immediately. ${data.clearedJobs !== undefined ? data.clearedJobs + ' queued messages dropped.' : 'Outbound queue cleared.'}`, 'warning');
         alert('Campaign execution stopped successfully!');
+        fetchRunningCampaigns();
         fetchScheduledCampaigns();
         fetchHistory();
       } else {
