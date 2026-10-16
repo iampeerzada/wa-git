@@ -13,9 +13,10 @@ interface BulkSenderProps {
   mediaAssets: MediaAsset[];
   hiddenModules: string[];
   initialViewMode?: 'sender' | 'history' | 'scheduled';
+  initialNumbers?: string[] | string;
 }
 
-const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, contactGroups, currentUser, plans, mediaAssets, hiddenModules, initialViewMode }) => {
+const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, contactGroups, currentUser, plans, mediaAssets, hiddenModules, initialViewMode, initialNumbers }) => {
   const [selectedInstance, setSelectedInstance] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('');
   const [selectedMedia, setSelectedMedia] = useState('');
@@ -83,6 +84,20 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       setViewMode(initialViewMode);
     }
   }, [initialViewMode]);
+
+  useEffect(() => {
+    if (initialNumbers) {
+      if (Array.isArray(initialNumbers)) {
+        if (initialNumbers.length > 0) {
+          setNumbers(initialNumbers.join('\n'));
+          setViewMode('sender');
+        }
+      } else if (typeof initialNumbers === 'string' && initialNumbers.trim().length > 0) {
+        setNumbers(initialNumbers.trim());
+        setViewMode('sender');
+      }
+    }
+  }, [initialNumbers]);
 
   useEffect(() => {
       if (viewMode === 'history') {
@@ -381,6 +396,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       params.append('status', 'failed');
       params.append('limit', '1000');
 
+      // Fetch failed logs
       const res = await fetch(`${apiBase}/api/message-logs?${params.toString()}`, {
         headers: {
           'X-User-ID': currentUser.id,
@@ -389,21 +405,44 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       });
       const data = await res.json();
       let logsList = Array.isArray(data) ? data : (data.logs || []);
-      
+
+      // Fetch success logs to filter out numbers that were re-sent successfully
+      const successParams = new URLSearchParams();
+      if (historyInstanceFilter && historyInstanceFilter !== 'all') {
+        successParams.append('instanceId', historyInstanceFilter);
+      }
+      successParams.append('status', 'delivered');
+      successParams.append('limit', '1000');
+
+      const successRes = await fetch(`${apiBase}/api/message-logs?${successParams.toString()}`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'X-Role': currentUser.role
+        }
+      });
+      const successData = await successRes.json();
+      let successList = Array.isArray(successData) ? successData : (successData.logs || []);
+
+      const successfulNumbers = new Set(
+        successList
+          .filter((l: any) => l.recipient && (l.status === 'sent' || l.status === 'delivered' || l.status === 'success' || l.status === 'resolved_sent'))
+          .map((l: any) => l.recipient.replace(/\D/g, ''))
+      );
+
       const failedNumbers = logsList
-        .filter((l: any) => l.recipient)
+        .filter((l: any) => l.recipient && l.status === 'failed')
         .map((l: any) => l.recipient.replace(/\D/g, ''))
-        .filter(Boolean);
+        .filter((num: string) => num && !successfulNumbers.has(num));
 
       const uniqueFailed = Array.from(new Set(failedNumbers));
       if (uniqueFailed.length === 0) {
-        alert('No failed recipient numbers found for the selected filters.');
+        alert('No un-resolved failed recipient numbers found for the selected filters.');
         return;
       }
 
       setNumbers(uniqueFailed.join('\n'));
       setViewMode('sender');
-      addLog(`Extracted ${uniqueFailed.length} failed recipient numbers from Campaign History.`, 'warning');
+      addLog(`Extracted ${uniqueFailed.length} un-resolved failed recipient numbers from Campaign History.`, 'warning');
       alert(`Extracted ${uniqueFailed.length} failed recipient numbers and loaded them into Bulk Sender!\n\nYou can now review your message and click Launch Campaign.`);
     } catch (e: any) {
       alert('Failed to extract failed numbers: ' + e.message);
@@ -429,20 +468,43 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       });
       const data = await res.json();
       let logsList = Array.isArray(data) ? data : (data.logs || []);
-      
+
+      // Fetch success logs to filter out resolved numbers
+      const successParams = new URLSearchParams();
+      if (historyInstanceFilter && historyInstanceFilter !== 'all') {
+        successParams.append('instanceId', historyInstanceFilter);
+      }
+      successParams.append('status', 'delivered');
+      successParams.append('limit', '1000');
+
+      const successRes = await fetch(`${apiBase}/api/message-logs?${successParams.toString()}`, {
+        headers: {
+          'X-User-ID': currentUser.id,
+          'X-Role': currentUser.role
+        }
+      });
+      const successData = await successRes.json();
+      let successList = Array.isArray(successData) ? successData : (successData.logs || []);
+
+      const successfulNumbers = new Set(
+        successList
+          .filter((l: any) => l.recipient && (l.status === 'sent' || l.status === 'delivered' || l.status === 'success' || l.status === 'resolved_sent'))
+          .map((l: any) => l.recipient.replace(/\D/g, ''))
+      );
+
       const failedNumbers = logsList
-        .filter((l: any) => l.recipient)
+        .filter((l: any) => l.recipient && l.status === 'failed')
         .map((l: any) => l.recipient.replace(/\D/g, ''))
-        .filter(Boolean);
+        .filter((num: string) => num && !successfulNumbers.has(num));
 
       const uniqueFailed = Array.from(new Set(failedNumbers));
       if (uniqueFailed.length === 0) {
-        alert('No failed recipient numbers found.');
+        alert('No un-resolved failed recipient numbers found.');
         return;
       }
 
       navigator.clipboard.writeText(uniqueFailed.join('\n'));
-      alert(`Copied ${uniqueFailed.length} failed recipient numbers to clipboard!`);
+      alert(`Copied ${uniqueFailed.length} un-resolved failed recipient numbers to clipboard!`);
     } catch (e: any) {
       alert('Error copying failed numbers: ' + e.message);
     }

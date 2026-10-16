@@ -886,6 +886,19 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                 [userId, instanceId, number, 'sent', msgId, finalMessage || options?.templateName, activeCampaignId || null]
             );
 
+            // Clean up previous failed status for this recipient so restarted campaign numbers are resolved
+            try {
+                const cleanDigits = String(number).replace(/\D/g, '');
+                await pool.query(
+                    `UPDATE message_logs 
+                     SET status = 'resolved_sent' 
+                     WHERE user_id = $1 AND (recipient = $2 OR REPLACE(recipient, '+', '') LIKE '%' || $3) AND status = 'failed'`,
+                    [userId, number, cleanDigits]
+                );
+            } catch (resolveErr) {
+                console.warn('[Worker] Resolve failed logs notice:', resolveErr.message);
+            }
+
             // Also save into chat_messages for Direct Chat
             try {
                 const cleanRemoteJid = (instance.provider === 'meta')

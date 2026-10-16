@@ -13,13 +13,20 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
   const [isAdding, setIsAdding] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [tagFilter, setTagFilter] = useState<'all' | 'regular_template' | 'image' | 'video' | 'document'>('all');
   
-  // Fix: Explicitly type the formData state to allow 'image', 'video', or 'document' 
-  // to avoid "Type '"image" | "video" | "document"' is not assignable to type '"image"'" errors.
-  const [formData, setFormData] = useState<{ name: string; url: string; type: 'image' | 'video' | 'document' }>({ 
+  const [formData, setFormData] = useState<{ 
+    name: string; 
+    url: string; 
+    type: 'image' | 'video' | 'document';
+    caption: string;
+    tag: string;
+  }>({ 
     name: '', 
     url: '', 
-    type: 'image' 
+    type: 'image',
+    caption: '',
+    tag: 'Regular template'
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -85,7 +92,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
 
   const handleAddAsset = async () => {
     if (!formData.name || !formData.url) {
-      alert("Please fill in all fields or upload a file");
+      alert("Please fill in name and upload/provide media URL");
       return;
     }
 
@@ -94,6 +101,8 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
       name: formData.name,
       url: formData.url,
       type: formData.type,
+      caption: formData.caption.trim() || undefined,
+      tag: formData.tag || undefined,
       userId: currentUser.id,
       createdAt: new Date().toISOString()
     };
@@ -112,7 +121,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
       if (res.ok) {
         setMediaAssets(prev => [newAsset, ...prev]);
         setIsAdding(false);
-        setFormData({ name: '', url: '', type: 'image' });
+        setFormData({ name: '', url: '', type: 'image', caption: '', tag: 'Regular template' });
         console.log("[Media] Asset persisted to database successfully.");
       } else {
         const err = await res.json();
@@ -146,11 +155,23 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
   };
 
   const filteredAssets = useMemo(() => {
-    return (mediaAssets || []).filter(a => 
-      (currentUser.role === 'superadmin' || a.userId === currentUser.id) &&
-      (a.name.toLowerCase().includes(searchQuery.toLowerCase()) || a.url.toLowerCase().includes(searchQuery.toLowerCase()))
-    );
-  }, [mediaAssets, currentUser.role, currentUser.id, searchQuery]);
+    return (mediaAssets || []).filter(a => {
+      const matchesSearch = (currentUser.role === 'superadmin' || a.userId === currentUser.id) &&
+        (a.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+         a.url.toLowerCase().includes(searchQuery.toLowerCase()) ||
+         (a.caption && a.caption.toLowerCase().includes(searchQuery.toLowerCase())));
+
+      if (!matchesSearch) return false;
+
+      if (tagFilter === 'regular_template') {
+        return a.tag === 'Regular template' || (a.caption && a.caption.trim().length > 0);
+      }
+      if (tagFilter === 'image' || tagFilter === 'video' || tagFilter === 'document') {
+        return a.type === tagFilter;
+      }
+      return true;
+    });
+  }, [mediaAssets, currentUser.role, currentUser.id, searchQuery, tagFilter]);
 
   return (
     <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6 pb-12 p-3 sm:p-6">
@@ -159,7 +180,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
           <input 
             type="text"
-            placeholder="Search media library..."
+            placeholder="Search media library, captions, templates..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-[#111b21] border border-gray-800 rounded-xl pl-9 pr-3.5 py-2 text-xs sm:text-sm focus:ring-1 ring-[#25D366]/50 outline-none transition-all text-white placeholder-gray-500"
@@ -171,6 +192,51 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
         >
           <Plus size={16} />
           <span>Add Media</span>
+        </button>
+      </div>
+
+      {/* Tag Filters Bar */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none text-xs">
+        <button
+          onClick={() => setTagFilter('all')}
+          className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${
+            tagFilter === 'all' ? 'bg-[#25D366] text-[#0b141a]' : 'bg-[#111b21] text-gray-400 border border-gray-800 hover:text-white'
+          }`}
+        >
+          All Media ({mediaAssets.length})
+        </button>
+        <button
+          onClick={() => setTagFilter('regular_template')}
+          className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${
+            tagFilter === 'regular_template' ? 'bg-purple-500 text-white' : 'bg-[#111b21] text-purple-400 border border-purple-500/30 hover:bg-purple-500/10'
+          }`}
+        >
+          <span className="w-2 h-2 rounded-full bg-purple-400"></span>
+          Regular Templates ({mediaAssets.filter(a => a.tag === 'Regular template' || (a.caption && a.caption.trim().length > 0)).length})
+        </button>
+        <button
+          onClick={() => setTagFilter('image')}
+          className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${
+            tagFilter === 'image' ? 'bg-blue-500 text-white' : 'bg-[#111b21] text-gray-400 border border-gray-800 hover:text-white'
+          }`}
+        >
+          Images
+        </button>
+        <button
+          onClick={() => setTagFilter('video')}
+          className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${
+            tagFilter === 'video' ? 'bg-amber-500 text-white' : 'bg-[#111b21] text-gray-400 border border-gray-800 hover:text-white'
+          }`}
+        >
+          Videos
+        </button>
+        <button
+          onClick={() => setTagFilter('document')}
+          className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${
+            tagFilter === 'document' ? 'bg-emerald-600 text-white' : 'bg-[#111b21] text-gray-400 border border-gray-800 hover:text-white'
+          }`}
+        >
+          Documents
         </button>
       </div>
 
@@ -211,7 +277,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
                 type="text"
                 value={formData.name}
                 onChange={(e) => setFormData(p => ({ ...p, name: e.target.value }))}
-                placeholder="e.g. Product Catalog"
+                placeholder="e.g. Navratri Special Offer"
                 className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none focus:ring-1 ring-[#25D366]/30"
               />
             </div>
@@ -228,18 +294,50 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
               </select>
             </div>
             <div>
-              <label className="block text-[11px] sm:text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Direct URL</label>
-              <input 
-                type="text"
-                value={formData.url}
-                onChange={(e) => setFormData(p => ({ ...p, url: e.target.value }))}
-                placeholder="https://example.com/file.jpg"
-                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none focus:ring-1 ring-[#25D366]/30"
-              />
+              <label className="block text-[11px] sm:text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Tag / Category</label>
+              <select 
+                value={formData.tag}
+                onChange={(e) => setFormData(p => ({ ...p, tag: e.target.value }))}
+                className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none"
+              >
+                <option value="Regular template">Regular template</option>
+                <option value="General media">General media</option>
+                <option value="Marketing">Marketing</option>
+                <option value="Utility">Utility</option>
+              </select>
             </div>
           </div>
+
+          <div>
+            <label className="block text-[11px] sm:text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Direct URL</label>
+            <input 
+              type="text"
+              value={formData.url}
+              onChange={(e) => setFormData(p => ({ ...p, url: e.target.value }))}
+              placeholder="https://example.com/file.jpg"
+              className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none focus:ring-1 ring-[#25D366]/30 font-mono"
+            />
+          </div>
+
+          {/* Caption Composer for Regular Templates */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] sm:text-xs font-bold text-purple-400 uppercase tracking-wider">
+                Caption / Template Message Composer
+              </label>
+              <span className="text-[10px] text-gray-500">Supports multiline formatting, links, and emojis</span>
+            </div>
+            <textarea
+              rows={4}
+              value={formData.caption}
+              onChange={(e) => setFormData(p => ({ ...p, caption: e.target.value }))}
+              placeholder={`🎉 NAVRATRI SPECIAL OFFER – iFastX 🎉\n🚀 RESERVE YOUR RATE PERMANENTLY!\n\nManage 2 EPON OLTs for just ₹399/month!\n✅ 45+ Features Enabled\n\n👉 Register today: https://ifastx.in`}
+              className="w-full bg-[#202c33] border border-gray-700 rounded-xl px-3 py-2.5 text-xs sm:text-sm text-white outline-none focus:ring-1 ring-purple-500/50 font-sans resize-y leading-relaxed"
+            />
+          </div>
+
           <div className="flex justify-end gap-2.5 pt-2">
-            <button onClick={() => { setIsAdding(false); setFormData({name:'', url:'', type:'image'}); }} className="px-4 py-2 text-gray-400 hover:text-white font-bold text-xs sm:text-sm transition-all cursor-pointer">Cancel</button>
+            <button onClick={() => { setIsAdding(false); setFormData({name:'', url:'', type:'image', caption:'', tag:'Regular template'}); }} className="px-4 py-2 text-gray-400 hover:text-white font-bold text-xs sm:text-sm transition-all cursor-pointer">Cancel</button>
             <button 
               onClick={handleAddAsset} 
               disabled={isUploading}
@@ -255,7 +353,7 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
         {filteredAssets.length === 0 ? (
           <div className="col-span-full py-12 text-center bg-[#111b21] rounded-2xl border border-dashed border-gray-800">
             <ImageIcon size={36} className="mx-auto text-gray-600 mb-2" />
-            <p className="text-xs sm:text-sm text-gray-400 font-medium">Your media library is empty.</p>
+            <p className="text-xs sm:text-sm text-gray-400 font-medium">No media files found matching your filters.</p>
           </div>
         ) : (
           filteredAssets.map(asset => (
@@ -268,6 +366,14 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
                 ) : (
                   <FileText size={32} className="text-gray-400/50" />
                 )}
+
+                {/* Tag Badge */}
+                {(asset.tag === 'Regular template' || (asset.caption && asset.caption.trim().length > 0)) && (
+                  <div className="absolute top-2 left-2 z-10 px-2 py-0.5 rounded-md bg-purple-600/90 text-white text-[9px] font-bold uppercase tracking-wider backdrop-blur-xs shadow-md border border-purple-400/30">
+                    Regular Template
+                  </div>
+                )}
+
                 <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
                   <a href={asset.url} target="_blank" rel="noopener noreferrer" className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white backdrop-blur-md transition-all" title="View Full">
                     <ExternalLink size={14} />
@@ -292,6 +398,11 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
                        return new Date(utcDateStr).toLocaleDateString();
                      })() : 'N/A'}</span>
                   </div>
+                  {asset.caption && (
+                    <div className="mt-1.5 p-1.5 bg-black/30 rounded-lg border border-gray-800 text-[10px] text-gray-300 line-clamp-2 leading-relaxed whitespace-pre-wrap">
+                      {asset.caption}
+                    </div>
+                  )}
                 </div>
                 <div className="pt-1">
                   <code className="block text-[9px] sm:text-[10px] text-gray-400 truncate bg-black/30 p-1 sm:p-1.5 rounded-md border border-gray-800/60 font-mono" title={asset.url}>

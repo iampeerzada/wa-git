@@ -222,9 +222,10 @@ interface ChatInterfaceProps {
   apiBase: string;
   templates?: any[];
   mediaAssets?: MediaAsset[];
+  onExtractActiveNumbers?: (numbers: string[]) => void;
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, apiBase, templates: propTemplates = [], mediaAssets = [] }) => {
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, apiBase, templates: propTemplates = [], mediaAssets = [], onExtractActiveNumbers }) => {
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>(() => {
     const saved = localStorage.getItem('wa_chat_selected_instance');
     if (saved && instances.some(i => i.id === saved)) return saved;
@@ -1125,6 +1126,39 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     return id;
   };
 
+  const handleExtract24hActiveNumbers = () => {
+    const activeSessions = sessions.filter(s => {
+      if (!s.remoteJid || s.remoteJid.includes('status@broadcast') || s.remoteJid.endsWith('@g.us')) return false;
+      if (!isMetaInstance) return true;
+      
+      let isActive = false;
+      if (s.lastInboundTimestamp) {
+        const inboundMs = new Date(s.lastInboundTimestamp).getTime();
+        const diff = currentTimeTick - inboundMs;
+        isActive = diff < 24 * 60 * 60 * 1000 && diff >= 0;
+      }
+      return isActive || Boolean(s.isWindowActive);
+    });
+
+    const activeNumbers = activeSessions
+      .map(s => getCleanPhone(s.remoteJid))
+      .filter(Boolean);
+
+    const uniqueNumbers = Array.from(new Set(activeNumbers));
+
+    if (uniqueNumbers.length === 0) {
+      alert("No active 24-hour window recipient numbers found in Direct Chat.");
+      return;
+    }
+
+    if (onExtractActiveNumbers) {
+      onExtractActiveNumbers(uniqueNumbers);
+    } else {
+      navigator.clipboard.writeText(uniqueNumbers.join('\n'));
+      alert(`Extracted ${uniqueNumbers.length} active 24-hour window recipient numbers and copied to clipboard!\n\nYou can now paste them in Bulk Sender.`);
+    }
+  };
+
   const groupMessagesByDate = (msgs: ChatMessage[]) => {
     const groups: { [key: string]: ChatMessage[] } = {};
     msgs.forEach(msg => {
@@ -1305,6 +1339,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           >
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
             24h Active ({activeWindowCount})
+          </button>
+          <button
+            type="button"
+            onClick={handleExtract24hActiveNumbers}
+            className="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30 transition-colors flex items-center gap-1 cursor-pointer"
+            title="Extract all recipient phone numbers with active 24-hour windows for Bulk Sender"
+          >
+            <Download size={11} className="shrink-0 text-purple-400" />
+            Extract 24h Active ({activeWindowCount})
           </button>
           <button
             onClick={() => setChatFilter('window_expired')}
@@ -2311,6 +2354,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                             key={asset.id}
                             onClick={() => {
                               setSelectedMediaAsset(asset);
+                              if (asset.caption && asset.caption.trim()) {
+                                setNewMessage(asset.caption);
+                              }
                               setSelectedFile(null);
                               setPreviewUrl(null);
                               setShowMediaLibraryPicker(false);

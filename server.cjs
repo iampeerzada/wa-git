@@ -3530,9 +3530,14 @@ app.post('/api/upload', authenticate, async (req, res) => {
     
 
 app.post('/api/media', authenticate, async (req, res) => {
-    const { id, name, url, type } = req.body;
+    const { id, name, url, type, caption, tag } = req.body;
     try {
-        await pool.query('INSERT INTO media_assets (id, user_id, name, url, type) VALUES ($1, $2, $3, $4, $5)', [id, req.user.id, name, url, type]);
+        await pool.query(
+            `INSERT INTO media_assets (id, user_id, name, url, type, caption, tag) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, url = EXCLUDED.url, type = EXCLUDED.type, caption = EXCLUDED.caption, tag = EXCLUDED.tag`,
+            [id, req.user.id, name, url, type, caption || null, tag || null]
+        );
         io.emit('media_updated', { userId: req.user.id });
         res.json({ success: true });
     } catch (e) {
@@ -3554,6 +3559,8 @@ app.get('/api/media', authenticate, async (req, res) => {
             name: row.name,
             url: row.url,
             type: row.type,
+            caption: row.caption || null,
+            tag: row.tag || null,
             createdAt: row.created_at ? new Date(row.created_at).toISOString() : null
         }));
         res.json(mapped);
@@ -5529,6 +5536,18 @@ async function startup() {
                 error TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS media_assets (
+                id VARCHAR(100) PRIMARY KEY,
+                user_id VARCHAR(50),
+                name VARCHAR(255),
+                url TEXT,
+                type VARCHAR(50),
+                caption TEXT,
+                tag VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS caption TEXT;
+            ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS tag VARCHAR(50);
         `);
     } catch (e) {
         console.warn("[iFastX] Startup Schema Update Notice:", e.message);

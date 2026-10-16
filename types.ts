@@ -106,6 +106,8 @@ export interface MediaAsset {
   name: string;
   url: string;
   type: 'image' | 'video' | 'document';
+  caption?: string;
+  tag?: string;
   userId: string;
   createdAt: string;
 }

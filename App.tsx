@@ -185,6 +185,7 @@ const App: React.FC = () => {
     return (localStorage.getItem('wa_active_tab') as any) || 'dashboard';
   });
   const [bulkInitialMode, setBulkInitialMode] = useState<'sender' | 'history'>('sender');
+  const [bulkInitialNumbers, setBulkInitialNumbers] = useState<string[]>([]);
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
@@ -982,14 +983,14 @@ const App: React.FC = () => {
           {activeTab === 'users' && <UserManagement users={visibleUsers} currentUser={currentUser} setUsers={setUsers} plans={plans} apiBase={API_BASE} />}
           {activeTab === 'billing' && <BillingManager currentUser={currentUser} plans={plans} setPlans={setPlans} users={users} setUsers={setUsers} instances={visibleInstances} apiBase={API_BASE} onUpdateUser={(updated) => setCurrentUser(prev => ({ ...prev, ...updated }))} />}
           {activeTab === 'api-docs' && <ApiDocumentation instances={instances} currentUser={currentUser} apiBase={API_BASE} />}
-          {activeTab === 'bulk' && <BulkSender instances={visibleInstances} apiBase={API_BASE} templates={templates} contactGroups={contactGroups} currentUser={currentUser} plans={plans} mediaAssets={mediaAssets} hiddenModules={hiddenModules} initialViewMode={bulkInitialMode} />}
+          {activeTab === 'bulk' && <BulkSender instances={visibleInstances} apiBase={API_BASE} templates={templates} contactGroups={contactGroups} currentUser={currentUser} plans={plans} mediaAssets={mediaAssets} hiddenModules={hiddenModules} initialViewMode={bulkInitialMode} initialNumbers={bulkInitialNumbers} />}
           {activeTab === 'templates' && <MessageTemplates templates={templates} setTemplates={setTemplates} mediaAssets={mediaAssets} />}
           {activeTab === 'meta-templates' && <Templates instances={instances} currentUser={currentUser} apiBase={API_BASE} mediaAssets={mediaAssets} />}
           {activeTab === 'meta-automations' && <MetaAutomations instances={instances} currentUser={currentUser} apiBase={API_BASE} mediaAssets={mediaAssets} />}
           {activeTab === 'contacts' && <ContactManager contactGroups={contactGroups} setContactGroups={setContactGroups} currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'media-library' && <MediaLibrary currentUser={currentUser} mediaAssets={mediaAssets} setMediaAssets={setMediaAssets} apiBase={API_BASE} />}
           {activeTab === 'auto-responder' && <AutoResponderManager instances={visibleInstances} currentUser={currentUser} mediaAssets={mediaAssets} apiBase={API_BASE} />}
-          {activeTab === 'chat' && <ChatInterface instances={visibleInstances} currentUser={currentUser} apiBase={API_BASE} templates={templates} mediaAssets={mediaAssets} />}
+          {activeTab === 'chat' && <ChatInterface instances={visibleInstances} currentUser={currentUser} apiBase={API_BASE} templates={templates} mediaAssets={mediaAssets} onExtractActiveNumbers={(extractedNums) => { setBulkInitialNumbers(extractedNums); setBulkInitialMode('sender'); setActiveTab('bulk'); }} />}
           {activeTab === 'team' && <TeamManager currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'visibility' && <VisibilityManager currentUser={currentUser} hiddenModules={hiddenModules} setHiddenModules={setHiddenModules} apiBase={API_BASE} />}
           {activeTab === 'code' && <CodeSnippets />}
