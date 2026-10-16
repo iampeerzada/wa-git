@@ -4894,7 +4894,7 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
             pool.query(`
                 SELECT remote_jid, MAX(timestamp) as last_inbound_timestamp
                 FROM chat_messages
-                WHERE instance_id = $1 AND from_me = false
+                WHERE instance_id = $1 AND (from_me = false OR text LIKE '[Template:%' OR text LIKE '%[Template%' OR media_type = 'template' OR media_type = 'flow_response')
                 GROUP BY remote_jid
             `, [instanceId]),
             pool.query(`

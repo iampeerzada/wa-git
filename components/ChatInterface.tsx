@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Search, Send, User, MoreVertical, Phone, Video, Smile, Paperclip, Check, CheckCheck, 
   X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye,
@@ -283,6 +283,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [newLabelName, setNewLabelName] = useState('');
   const [newLabelColor, setNewLabelColor] = useState('#25D366');
   const [showChatLabelModal, setShowChatLabelModal] = useState(false);
+
+  // Virtual Windowing for High-Performance Rendering (20,000+ chats support)
+  const [visibleCount, setVisibleCount] = useState<number>(80);
+
+  // Reset windowing limit on filter or instance change
+  useEffect(() => {
+    setVisibleCount(80);
+  }, [searchTerm, selectedLabelFilter, chatFilter, selectedInstanceId]);
 
   // New WhatsApp Web & 24-Hour Features
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -953,7 +961,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   };
 
   const getWindowCountdown = (lastInbound?: string | null) => {
-    if (!lastInbound) return { isActive: false, label: 'No Inbound', remainingFormatted: '', isExpiringSoon: false };
+    if (!isMetaInstance) {
+      return {
+        isActive: true,
+        label: 'Active',
+        remainingFormatted: 'Open',
+        isExpiringSoon: false
+      };
+    }
+
+    if (!lastInbound) return { isActive: false, label: 'No Activity', remainingFormatted: 'Inactive', isExpiringSoon: false };
     const inboundMs = new Date(lastInbound).getTime();
     const diff = currentTimeTick - inboundMs;
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
@@ -984,31 +1001,79 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     };
   };
 
-  const unreadCount = sessions.filter(s => s.unreadCount > 0).length;
-  const activeWindowCount = sessions.filter(s => getWindowCountdown(s.lastInboundTimestamp).isActive).length;
-  const expiredWindowCount = sessions.filter(s => s.lastInboundTimestamp && !getWindowCountdown(s.lastInboundTimestamp).isActive).length;
+  const { unreadCount, activeWindowCount, expiredWindowCount } = useMemo(() => {
+    let unread = 0;
+    let active = 0;
+    let expired = 0;
+    const now = currentTimeTick;
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
-  const filteredSessions = sessions.filter(s => {
-    const matchesSearch = !s.remoteJid.includes('status@broadcast') && // Hide status updates
-    (s.remoteJid.toLowerCase().includes(searchTerm.toLowerCase()) ||
-     (s.contactName && s.contactName.toLowerCase().includes(searchTerm.toLowerCase())) ||
-     s.lastMessage?.text?.toLowerCase().includes(searchTerm.toLowerCase()));
-
-    const matchesLabel = selectedLabelFilter ? s.labels?.some(l => l.id === selectedLabelFilter) : true;
-
-    let matchesType = true;
-    if (chatFilter === 'direct') matchesType = s.remoteJid.endsWith('@s.whatsapp.net');
-    else if (chatFilter === 'groups') matchesType = s.remoteJid.endsWith('@g.us');
-    else if (chatFilter === 'unread') matchesType = s.unreadCount > 0;
-    else if (chatFilter === 'window_active') {
-      matchesType = getWindowCountdown(s.lastInboundTimestamp).isActive;
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i];
+      if (s.unreadCount > 0) unread++;
+      if (s.lastInboundTimestamp) {
+        const inboundMs = new Date(s.lastInboundTimestamp).getTime();
+        const diff = now - inboundMs;
+        if (diff < TWENTY_FOUR_HOURS && diff >= 0) {
+          active++;
+        } else {
+          expired++;
+        }
+      }
     }
-    else if (chatFilter === 'window_expired') {
-      matchesType = Boolean(s.lastInboundTimestamp && !getWindowCountdown(s.lastInboundTimestamp).isActive);
-    }
+    return { unreadCount: unread, activeWindowCount: active, expiredWindowCount: expired };
+  }, [sessions, currentTimeTick]);
 
-    return matchesSearch && matchesLabel && matchesType;
-  });
+  const filteredSessions = useMemo(() => {
+    const cleanSearchDigits = searchTerm.replace(/\D/g, '');
+    const searchLower = searchTerm.toLowerCase().trim();
+    const now = currentTimeTick;
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+
+    return sessions.filter(s => {
+      if (!s.remoteJid || s.remoteJid.includes('status@broadcast')) return false;
+
+      // 1. Search filter matching (Name, Message text, or Phone number digits)
+      if (searchLower) {
+        const jidLower = s.remoteJid.toLowerCase();
+        const nameLower = s.contactName ? s.contactName.toLowerCase() : '';
+        const msgLower = s.lastMessage?.text ? s.lastMessage.text.toLowerCase() : '';
+        const cleanPhone = getCleanPhone(s.remoteJid);
+
+        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || msgLower.includes(searchLower);
+        const matchesDigits = Boolean(cleanSearchDigits && (
+          cleanPhone.includes(cleanSearchDigits) ||
+          (cleanSearchDigits.length >= 3 && cleanPhone.endsWith(cleanSearchDigits)) ||
+          (cleanSearchDigits.startsWith('0') && cleanPhone.endsWith(cleanSearchDigits.slice(1))) ||
+          (cleanSearchDigits.startsWith('91') && cleanPhone.endsWith(cleanSearchDigits.slice(2)))
+        ));
+
+        if (!matchesText && !matchesDigits) return false;
+      }
+
+      // 2. Label filter matching
+      if (selectedLabelFilter && !s.labels?.some(l => l.id === selectedLabelFilter)) {
+        return false;
+      }
+
+      // 3. Category/Type filter
+      if (chatFilter === 'direct' && !s.remoteJid.endsWith('@s.whatsapp.net')) return false;
+      if (chatFilter === 'groups' && !s.remoteJid.endsWith('@g.us')) return false;
+      if (chatFilter === 'unread' && s.unreadCount <= 0) return false;
+      if (chatFilter === 'window_active' || chatFilter === 'window_expired') {
+        let isActive = false;
+        if (s.lastInboundTimestamp) {
+          const inboundMs = new Date(s.lastInboundTimestamp).getTime();
+          const diff = now - inboundMs;
+          if (diff < TWENTY_FOUR_HOURS && diff >= 0) isActive = true;
+        }
+        if (chatFilter === 'window_active' && !isActive) return false;
+        if (chatFilter === 'window_expired' && (!s.lastInboundTimestamp || isActive)) return false;
+      }
+
+      return true;
+    });
+  }, [sessions, searchTerm, selectedLabelFilter, chatFilter, currentTimeTick]);
 
   const formatTime = (timestamp: string) => {
     const dateStr = String(timestamp).trim();
@@ -1067,6 +1132,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   };
 
   const groupedMessages = groupMessagesByDate(messages);
+
+  const handleSessionsScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, clientHeight, scrollHeight } = e.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight < 300) {
+      if (visibleCount < filteredSessions.length) {
+        setVisibleCount(prev => Math.min(prev + 80, filteredSessions.length));
+      }
+    }
+  };
 
   return (
     <div className="flex h-full bg-[#0b141a] overflow-hidden border-t border-gray-800">
@@ -1176,7 +1250,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         </div>
 
         {/* Filter Tabs */}
-        <div className="flex items-center gap-1.5 px-3 pb-3 overflow-x-auto no-scrollbar">
+        <div className="flex items-center gap-1.5 px-3 pb-2 overflow-x-auto no-scrollbar">
           <button
             onClick={() => setChatFilter('all')}
             className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
@@ -1237,14 +1311,47 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           </button>
         </div>
 
-        {/* Sessions List */}
-        <div className="flex-1 overflow-y-auto overscroll-y-contain">
+        {/* Interactive Label Chips Bar */}
+        {labels.length > 0 && (
+          <div className="flex items-center gap-1.5 px-3 pb-3 overflow-x-auto no-scrollbar border-b border-gray-800/40">
+            <span className="text-[10px] uppercase font-bold text-gray-400 shrink-0 flex items-center gap-1">
+              <Tag size={10} /> Labels:
+            </span>
+            {selectedLabelFilter && (
+              <button
+                onClick={() => setSelectedLabelFilter('')}
+                className="px-2 py-0.5 rounded text-[10px] font-medium bg-[#2a3942] text-gray-300 hover:text-white flex items-center gap-1 shrink-0"
+              >
+                Clear <X size={10} />
+              </button>
+            )}
+            {labels.map(l => {
+              const isSelected = selectedLabelFilter === l.id;
+              return (
+                <button
+                  key={l.id}
+                  onClick={() => setSelectedLabelFilter(isSelected ? '' : l.id)}
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap flex items-center gap-1 transition-all shrink-0 ${
+                    isSelected ? 'ring-2 ring-white scale-105 shadow-md' : 'opacity-80 hover:opacity-100'
+                  }`}
+                  style={{ backgroundColor: l.color, color: '#0b141a' }}
+                >
+                  <span>{l.name}</span>
+                  {isSelected && <Check size={10} />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Sessions List with Infinite Virtual Windowing for High Performance */}
+        <div className="flex-1 overflow-y-auto overscroll-y-contain" onScroll={handleSessionsScroll}>
           {filteredSessions.length === 0 ? (
             <div className="p-8 text-center text-gray-500 text-sm">
               No conversations found in this view
             </div>
           ) : (
-            filteredSessions.map((session) => {
+            filteredSessions.slice(0, visibleCount).map((session) => {
               const win = getWindowCountdown(session.lastInboundTimestamp);
               return (
                 <div
@@ -1353,12 +1460,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       </div>
 
       {/* Chat Area */}
-      <div className={`flex-1 min-w-0 flex-col bg-[#0b141a] relative ${!selectedSession ? "hidden md:flex" : "flex"}`}>
+      <div className={`flex-1 min-w-0 flex flex-col h-full max-h-full overflow-hidden bg-[#0b141a] relative ${!selectedSession ? "hidden md:flex" : "flex"}`}>
 
         {selectedSession ? (
           <>
             {/* Header */}
-            <div className="h-16 bg-[#202c33] flex items-center justify-between px-3 md:px-4 border-b border-gray-800 gap-2">
+            <div className="h-16 min-h-[64px] shrink-0 bg-[#202c33] flex items-center justify-between px-3 md:px-4 border-b border-gray-800 gap-2 z-10">
               <div className="flex items-center gap-3 min-w-0">
                 <button onClick={() => setSelectedSession(null)} className="md:hidden p-1 -ml-1 text-gray-400 hover:text-white"><ArrowLeft size={20} /></button>
                 <div className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-gray-300 overflow-hidden shrink-0 relative">
@@ -1474,7 +1581,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
             {/* Messages */}
             <div 
-              className="flex-1 overflow-y-auto p-4 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70fcded21.png')] bg-repeat opacity-90"
+              className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70fcded21.png')] bg-repeat opacity-90"
               style={{ backgroundSize: '400px' }}
             >
               <div className="flex flex-col space-y-2">
@@ -1899,7 +2006,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             )}
 
             {/* Input Container */}
-            <div className="bg-[#202c33] p-3 flex items-center gap-2 md:gap-3 relative">
+            <div className="bg-[#202c33] border-t border-gray-800 p-3 flex items-center gap-2 md:gap-3 relative shrink-0 z-20">
               {/* Templates Modal - Renders as per active instance type */}
               {showTemplates && (
                   <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-xl shadow-2xl border border-gray-700 w-80 max-h-80 overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
@@ -2196,13 +2303,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     title={isMetaInstance ? "Official Meta Quick Templates" : "Baileys Quick Reply Templates"}
                   />
                   
-                  <form onSubmit={handleSendMessage} className="flex-1">
-                    <input
-                      type="text"
-                      placeholder="Type a message..."
+                  <form onSubmit={handleSendMessage} className="flex-1 flex items-center">
+                    <textarea
+                      placeholder="Type a message... (Shift+Enter for line breaks)"
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
-                      className="w-full bg-[#2a3942] text-gray-200 px-4 py-2 rounded-lg text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366]"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendMessage(e);
+                        }
+                      }}
+                      rows={Math.min(5, Math.max(1, (newMessage.match(/\n/g) || []).length + 1))}
+                      className="w-full bg-[#2a3942] text-gray-200 px-4 py-2 rounded-xl text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366] resize-none whitespace-pre-wrap leading-normal transition-all max-h-36 overflow-y-auto"
                     />
                   </form>
                   
