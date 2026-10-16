@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { WhatsAppInstance, InstanceStatus, MessageTemplate, ContactGroup, User, UserRole, Plan, MediaAsset, InteractiveButton, ScheduledCampaign } from '../types';
+import { WhatsAppInstance, InstanceStatus, MessageTemplate, ContactGroup, User, UserRole, Plan, MediaAsset, InteractiveButton, ScheduledCampaign, normalizePhoneNumber } from '../types';
 import { Send, Users, Clock, ShieldCheck, Play, Pause, RotateCcw, CheckCircle2, XCircle, AlertTriangle, FileText, ChevronDown, ChevronUp, Maximize2, Copy, Check, Lock, Layers, Image as ImageIcon, Eye, Smartphone, MoreVertical, Paperclip, Smile, ExternalLink, Phone, Reply, Zap, Activity, ShieldAlert, History, ChevronLeft, ChevronRight, Filter, Calendar, X, Trash2, RefreshCw, Square, OctagonAlert } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from 'recharts';
 
@@ -89,11 +89,13 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     if (initialNumbers) {
       if (Array.isArray(initialNumbers)) {
         if (initialNumbers.length > 0) {
-          setNumbers(initialNumbers.join('\n'));
+          const cleaned = initialNumbers.map(n => normalizePhoneNumber(n)).filter(Boolean);
+          setNumbers(cleaned.join('\n'));
           setViewMode('sender');
         }
       } else if (typeof initialNumbers === 'string' && initialNumbers.trim().length > 0) {
-        setNumbers(initialNumbers.trim());
+        const cleaned = initialNumbers.split(/[\n,]+/).map(n => normalizePhoneNumber(n)).filter(Boolean);
+        setNumbers(cleaned.join('\n'));
         setViewMode('sender');
       }
     }
@@ -426,12 +428,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       const successfulNumbers = new Set(
         successList
           .filter((l: any) => l.recipient && (l.status === 'sent' || l.status === 'delivered' || l.status === 'success' || l.status === 'resolved_sent'))
-          .map((l: any) => l.recipient.replace(/\D/g, ''))
+          .map((l: any) => normalizePhoneNumber(l.recipient))
       );
 
       const failedNumbers = logsList
         .filter((l: any) => l.recipient && l.status === 'failed')
-        .map((l: any) => l.recipient.replace(/\D/g, ''))
+        .map((l: any) => normalizePhoneNumber(l.recipient))
         .filter((num: string) => num && !successfulNumbers.has(num));
 
       const uniqueFailed = Array.from(new Set(failedNumbers));
@@ -489,12 +491,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       const successfulNumbers = new Set(
         successList
           .filter((l: any) => l.recipient && (l.status === 'sent' || l.status === 'delivered' || l.status === 'success' || l.status === 'resolved_sent'))
-          .map((l: any) => l.recipient.replace(/\D/g, ''))
+          .map((l: any) => normalizePhoneNumber(l.recipient))
       );
 
       const failedNumbers = logsList
         .filter((l: any) => l.recipient && l.status === 'failed')
-        .map((l: any) => l.recipient.replace(/\D/g, ''))
+        .map((l: any) => normalizePhoneNumber(l.recipient))
         .filter((num: string) => num && !successfulNumbers.has(num));
 
       const uniqueFailed = Array.from(new Set(failedNumbers));
@@ -539,7 +541,10 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     const group = contactGroups.find(g => g.id === groupId);
     if (group) {
       const contacts = group.contacts || [];
-      const verifiedNumbers = contacts.filter(c => c.exists).map(c => c.number);
+      const verifiedNumbers = contacts
+        .filter(c => c.exists)
+        .map(c => normalizePhoneNumber(c.number))
+        .filter(Boolean);
       setNumbers(verifiedNumbers.join('\n'));
       addLog(`Loaded ${verifiedNumbers.length} verified numbers from "${group.name}"`, 'info');
     }
@@ -555,8 +560,11 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   };
 
   const handleStartBulk = async () => {
-    if (!selectedInstance || !numbers || !message) {
-      alert("Please fill all required fields");
+    const selectedMediaAsset = mediaAssets.find(a => a.url === selectedMedia);
+    const effectiveMessage = message.trim() || selectedMediaAsset?.caption || '';
+
+    if (!selectedInstance || !numbers || (!effectiveMessage && !selectedMedia)) {
+      alert("Please fill all required fields: select an instance, enter recipient numbers, and enter message text or attach media.");
       return;
     }
 
@@ -565,7 +573,10 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         return;
     }
 
-    const numberList = numbers.split(/[\n,]+/).map(n => n.trim()).filter(n => n.length > 5);
+    const numberList = numbers
+      .split(/[\n,]+/)
+      .map(n => normalizePhoneNumber(n))
+      .filter(n => n.length >= 7);
     if (numberList.length === 0) {
       alert("No valid numbers found");
       return;
@@ -591,7 +602,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
           instanceId: selectedInstance,
           name: campaignName.trim() || `Campaign ${targetDate.toLocaleDateString()}`,
           numbers: numberList,
-          message,
+          message: effectiveMessage,
           buttons: activeButtons.length > 0 ? activeButtons : undefined,
           scheduledAt: targetDate.toISOString(),
           options: {
@@ -663,7 +674,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         const payload: any = {
             instanceId: selectedInstance,
             numbers: numberList,
-            message,
+            message: effectiveMessage,
             buttons: activeButtons.length > 0 ? activeButtons : undefined,
             options: {
                 delayMin: isMetaInstance ? 0 : delayMin,
@@ -721,8 +732,15 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
   };
 
   const loadTemplate = (tpl: MessageTemplate) => {
-    setMessage(tpl.content);
-    if (tpl.mediaUrl) setSelectedMedia(tpl.mediaUrl);
+    let tplMsg = tpl.content || '';
+    if (tpl.mediaUrl) {
+      setSelectedMedia(tpl.mediaUrl);
+      const matchingAsset = mediaAssets.find(a => a.url === tpl.mediaUrl);
+      if (matchingAsset && matchingAsset.caption && (!tplMsg || tplMsg.trim() === '')) {
+        tplMsg = matchingAsset.caption;
+      }
+    }
+    setMessage(tplMsg);
     if (tpl.buttons) setActiveButtons(tpl.buttons);
     else setActiveButtons([]);
     setShowTemplates(false);
@@ -856,25 +874,40 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                       <ChevronDown size={12} className={`transition-transform ${showMediaLib ? 'rotate-180' : ''}`} />
                     </button>
                     {showMediaLib && (
-                      <div className="absolute right-0 mt-2 w-64 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-                        <div className="p-2.5 border-b border-gray-700 bg-black/20 text-[10px] font-bold uppercase text-gray-400 tracking-wider">
-                          My Media Library
+                      <div className="absolute right-0 mt-2 w-72 bg-[#202c33] border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                        <div className="p-2.5 border-b border-gray-700 bg-black/20 text-[10px] font-bold uppercase text-gray-400 tracking-wider flex items-center justify-between">
+                          <span>My Media Library</span>
+                          <span className="text-[9px] text-[#25D366] font-mono">({mediaAssets.filter(a => a.userId === currentUser.id).length})</span>
                         </div>
-                        <div className="max-h-56 overflow-y-auto">
+                        <div className="max-h-64 overflow-y-auto">
                           <button onClick={() => {setSelectedMedia(''); setShowMediaLib(false);}} className="w-full text-left p-2.5 hover:bg-[#2a3942] border-b border-gray-700/50 transition-all text-xs text-red-400 font-bold cursor-pointer">
                              [ Clear Attachment ]
                           </button>
                           {mediaAssets.filter(a => a.userId === currentUser.id).length === 0 ? (
-                            <div className="p-3 text-xs text-gray-500 italic text-center">Library empty.</div>
+                            <div className="p-3 text-xs text-gray-500 italic text-center">Library empty. Add media in Media Library tab first.</div>
                           ) : (
                             mediaAssets.filter(a => a.userId === currentUser.id).map(asset => (
-                              <button key={asset.id} onClick={() => {setSelectedMedia(asset.url); setShowMediaLib(false);}} className={`w-full text-left p-2.5 hover:bg-[#2a3942] border-b border-gray-700/50 last:border-0 transition-all flex items-center gap-2.5 cursor-pointer ${selectedMedia === asset.url ? 'bg-blue-500/10' : ''}`}>
+                              <button 
+                                key={asset.id} 
+                                onClick={() => {
+                                  setSelectedMedia(asset.url);
+                                  if (asset.caption && asset.caption.trim()) {
+                                    setMessage(asset.caption);
+                                  }
+                                  setShowMediaLib(false);
+                                  addLog(`Attached Media "${asset.name}"${asset.caption ? ' with saved caption' : ''}`, 'info');
+                                }} 
+                                className={`w-full text-left p-2.5 hover:bg-[#2a3942] border-b border-gray-700/50 last:border-0 transition-all flex items-center gap-2.5 cursor-pointer ${selectedMedia === asset.url ? 'bg-blue-500/10' : ''}`}
+                              >
                                 <div className="w-8 h-8 bg-black/20 rounded flex items-center justify-center shrink-0 overflow-hidden">
                                   {asset.type === 'image' ? <img src={asset.url} className="w-full h-full object-cover" /> : <FileText size={14} className="text-gray-500" />}
                                 </div>
-                                <div className="truncate">
+                                <div className="min-w-0 flex-1">
                                   <div className="text-xs font-bold text-white truncate">{asset.name}</div>
-                                  <div className="text-[9px] text-gray-400 uppercase">{asset.type}</div>
+                                  <div className="text-[9px] text-gray-400 uppercase flex items-center gap-1">
+                                    <span>{asset.type}</span>
+                                    {asset.caption && <span className="text-[#25D366] font-semibold">· Has Caption</span>}
+                                  </div>
                                 </div>
                               </button>
                             ))
@@ -1024,16 +1057,33 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
 
               {selectedMedia && (
                 <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-xl flex items-center justify-between flex-wrap gap-2 animate-in fade-in slide-in-from-left-2">
-                   <div className="flex items-center gap-2">
+                   <div className="flex items-center gap-2 min-w-0">
                      <ImageIcon className="text-blue-400 shrink-0" size={16} />
                      <div className="min-w-0">
-                       <p className="text-[9px] text-gray-400 uppercase font-bold">Attachment Active</p>
+                       <p className="text-[9px] text-gray-400 uppercase font-bold">Media Attachment Active</p>
                        <p className="text-xs text-white font-mono truncate max-w-xs">{selectedMedia}</p>
+                       {currentMediaAsset?.caption && (
+                         <p className="text-[10px] text-emerald-400 font-sans truncate italic max-w-xs mt-0.5">
+                           Saved Caption: "{currentMediaAsset.caption.substring(0, 60)}{currentMediaAsset.caption.length > 60 ? '...' : ''}"
+                         </p>
+                       )}
                      </div>
                    </div>
-                   <button onClick={() => setSelectedMedia('')} className="text-gray-400 hover:text-red-400 transition-colors cursor-pointer">
-                     <XCircle size={16} />
-                   </button>
+                   <div className="flex items-center gap-2">
+                     {currentMediaAsset?.caption && message !== currentMediaAsset.caption && (
+                       <button 
+                         type="button" 
+                         onClick={() => setMessage(currentMediaAsset.caption || '')}
+                         className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded text-[10px] font-bold transition-all cursor-pointer shrink-0"
+                         title="Insert saved media caption into message composer"
+                       >
+                         Fill Saved Caption
+                       </button>
+                     )}
+                     <button onClick={() => setSelectedMedia('')} className="text-gray-400 hover:text-red-400 transition-colors cursor-pointer shrink-0" title="Remove attachment">
+                       <XCircle size={16} />
+                     </button>
+                   </div>
                 </div>
               )}
 

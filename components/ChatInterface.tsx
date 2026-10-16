@@ -6,7 +6,7 @@ import {
   Download, Bell, BellOff, Info, RefreshCw, Volume2, ShieldCheck, HelpCircle, Sparkles,
   CheckCircle2, ClipboardList, ChevronDown, ChevronUp, Folder
 } from 'lucide-react';
-import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel, MediaAsset } from '../types';
+import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel, MediaAsset, normalizePhoneNumber } from '../types';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 
@@ -1141,7 +1141,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     });
 
     const activeNumbers = activeSessions
-      .map(s => getCleanPhone(s.remoteJid))
+      .map(s => normalizePhoneNumber(getCleanPhone(s.remoteJid)))
       .filter(Boolean);
 
     const uniqueNumbers = Array.from(new Set(activeNumbers));

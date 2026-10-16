@@ -340,6 +340,9 @@ const MessageTemplates: React.FC<MessageTemplatesProps> = ({ templates, setTempl
               </div>
               <div className="flex-1 space-y-2">
                 <div className="flex flex-wrap gap-1">
+                  <div className="flex items-center gap-1 px-1.5 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded text-[8px] text-emerald-400 font-bold uppercase tracking-wider">
+                    <FileText size={9} /> Regular Template
+                  </div>
                   {tpl.mediaUrl && (
                     <div className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-500/10 border border-blue-500/20 rounded text-[8px] text-blue-400 font-bold uppercase">
                       <ImageIcon size={9} /> Media

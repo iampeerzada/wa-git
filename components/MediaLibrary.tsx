@@ -71,11 +71,12 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
               if (file.type.startsWith('image/')) detectedType = 'image';
               else if (file.type.startsWith('video/')) detectedType = 'video';
 
-              setFormData({
+              setFormData(prev => ({
+                ...prev,
                 name: file.name,
                 url: data.url,
                 type: detectedType
-              });
+              }));
               console.log("[Media] File processed and URL generated.");
             } else {
               alert("Upload failed: " + (data.error || "Server error"));
@@ -101,8 +102,8 @@ const MediaLibrary: React.FC<MediaLibraryProps> = ({ currentUser, mediaAssets, s
       name: formData.name,
       url: formData.url,
       type: formData.type,
-      caption: formData.caption.trim() || undefined,
-      tag: formData.tag || undefined,
+      caption: (formData.caption || '').trim() || undefined,
+      tag: formData.tag || 'Regular template',
       userId: currentUser.id,
       createdAt: new Date().toISOString()
     };

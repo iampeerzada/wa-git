@@ -19,6 +19,82 @@ pool.on('error', (err) => {
 
 const metaMediaCache = new Map();
 
+function normalizePhoneNumber(input) {
+  if (!input) return '';
+  let digits = String(input).trim().replace(/\D/g, '');
+  if (!digits) return '';
+
+  if (digits.startsWith('00')) {
+    digits = digits.substring(2);
+  }
+
+  // 1. Bangladesh numbers (CC: 880)
+  if (digits.startsWith('880') && digits.length >= 12) {
+    return digits;
+  }
+  if (digits.length === 11 && /^01[3-9]/.test(digits)) {
+    return '880' + digits.substring(1);
+  }
+  if (digits.length === 10 && /^1[3-9]/.test(digits)) {
+    return '880' + digits;
+  }
+
+  // 2. India numbers (CC: 91)
+  if (digits.startsWith('91') && digits.length === 12) {
+    return digits;
+  }
+  if (digits.length === 10 && /^[6-9]/.test(digits)) {
+    return '91' + digits;
+  }
+  if (digits.length === 11 && /^0[6-9]/.test(digits)) {
+    return '91' + digits.substring(1);
+  }
+
+  // 3. UAE numbers (CC: 971)
+  if (digits.startsWith('971') && digits.length >= 11) {
+    return digits;
+  }
+  if (digits.length === 10 && /^05/.test(digits)) {
+    return '971' + digits.substring(1);
+  }
+
+  // 4. Saudi Arabia numbers (CC: 966)
+  if (digits.startsWith('966') && digits.length >= 11) {
+    return digits;
+  }
+  if (digits.length === 10 && /^05/.test(digits)) {
+    return '966' + digits.substring(1);
+  }
+
+  // 5. Pakistan numbers (CC: 92)
+  if (digits.startsWith('92') && digits.length >= 11) {
+    return digits;
+  }
+  if (digits.length === 11 && /^03/.test(digits)) {
+    return '92' + digits.substring(1);
+  }
+
+  // 6. US / Canada (CC: 1)
+  if (digits.startsWith('1') && digits.length === 11) {
+    return digits;
+  }
+
+  // 7. UK (CC: 44)
+  if (digits.startsWith('44') && digits.length >= 11) {
+    return digits;
+  }
+
+  // 8. Other international numbers (length >= 11)
+  if (digits.length >= 11) {
+    if (digits.startsWith('0')) {
+      return digits.substring(1);
+    }
+    return digits;
+  }
+
+  return digits;
+}
+
 // --- ANTI-BAN UTILS ---
 const getMetaMediaObject = async (linkUrl, instance, mType = 'image') => {
     const DEFAULT_IMAGE = 'https://dummyimage.com/600x400/25d366/ffffff.png';
@@ -798,23 +874,15 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                     throw new Error('WhatsApp instance is offline or disconnected');
                 }
 
-                let targetJid = toJid(number);
+                let normalizedNum = normalizePhoneNumber(number);
+                let targetJid = toJid(normalizedNum);
 
-                // Smart onWhatsApp validation with country code candidates
-                let rawCleaned = String(number || '').replace(/\D/g, '');
-                if (rawCleaned.startsWith('00')) rawCleaned = rawCleaned.substring(2);
-                else if (rawCleaned.startsWith('0') && rawCleaned.length > 10) rawCleaned = rawCleaned.substring(1);
-
-                if (rawCleaned) {
-                    let candidates = [];
-                    if (rawCleaned.length === 10 && /^[6-9]/.test(rawCleaned)) {
-                        candidates.push(`91${rawCleaned}`);
-                        candidates.push(rawCleaned);
-                    } else {
-                        candidates.push(rawCleaned);
-                        if (!rawCleaned.startsWith('91') && rawCleaned.length === 10) {
-                            candidates.push(`91${rawCleaned}`);
-                        }
+                if (normalizedNum) {
+                    let candidates = [normalizedNum];
+                    if (normalizedNum.startsWith('91') && normalizedNum.length === 12) {
+                        candidates.push(normalizedNum.substring(2));
+                    } else if (normalizedNum.startsWith('880') && normalizedNum.length === 13) {
+                        candidates.push('0' + normalizedNum.substring(3));
                     }
 
                     try {
@@ -828,8 +896,8 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                         }
                         if (waCheck && waCheck.exists && waCheck.jid) {
                             targetJid = waCheck.jid;
-                        } else if (rawCleaned.length === 10 && /^[6-9]/.test(rawCleaned)) {
-                            targetJid = `91${rawCleaned}@s.whatsapp.net`;
+                        } else {
+                            targetJid = `${normalizedNum}@s.whatsapp.net`;
                         }
                     } catch (waErr) {
                         console.error('[Worker onWhatsApp] Validation notice:', waErr.message);

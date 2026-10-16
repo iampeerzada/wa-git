@@ -23,7 +23,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
         { id: 'chat', icon: MessageSquare, label: 'Direct Chat', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.VIEW_CHATS },
         { id: 'bulk', icon: Send, label: 'Bulk Sender', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.SEND_BULK },
         { id: 'contacts', icon: Users, label: 'Contacts', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_CONTACTS },
-        { id: 'media-library', icon: ImageIcon, label: 'Media Library', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER] },
+        { id: 'media-library', icon: ImageIcon, label: 'Media Library', badgeText: 'REGULAR', badgeStyle: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER] },
       ]
     },
     {
@@ -37,7 +37,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
     {
       title: 'Baileys / QR API',
       items: [
-        { id: 'templates', icon: FileText, label: 'Baileys Templates', badgeText: 'QR', badgeStyle: 'bg-amber-500/15 text-amber-400 border-amber-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_TEMPLATES },
+        { id: 'templates', icon: FileText, label: 'Regular Templates', badgeText: 'REGULAR', badgeStyle: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_TEMPLATES },
         { id: 'auto-responder', icon: MessageCircleCode, label: 'Baileys Auto Responder', badgeText: 'QR', badgeStyle: 'bg-amber-500/15 text-amber-400 border-amber-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_AUTO_RESPONDER },
       ]
     },

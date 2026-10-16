@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo } from 'react';
-import { ContactGroup, Contact, User } from '../types';
+import { ContactGroup, Contact, User, normalizePhoneNumber } from '../types';
 import { Users, Plus, Trash2, Search, Upload, FileText, CheckCircle2, XCircle, AlertCircle, Save, Loader2 } from 'lucide-react';
 
 interface ContactManagerProps {
@@ -46,7 +46,7 @@ const ContactManager: React.FC<ContactManagerProps> = ({ contactGroups, setConta
     // Prepare local object
     const importedContacts: Contact[] = uniqueLines.map(num => ({
       id: `c_${Math.random().toString(36).substring(7)}_${Date.now()}`,
-      number: num.replace(/\D/g, ''),
+      number: normalizePhoneNumber(num),
       original: num,
       isVerified: true,
       exists: true // Default to true for imported verified lists

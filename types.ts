@@ -218,3 +218,85 @@ export interface ScheduledCampaign {
   executedAt?: string;
   error?: string;
 }
+
+export const normalizePhoneNumber = (input: string): string => {
+  if (!input) return '';
+  let digits = String(input).trim().replace(/\D/g, '');
+  if (!digits) return '';
+
+  if (digits.startsWith('00')) {
+    digits = digits.substring(2);
+  }
+
+  // 1. Bangladesh numbers (CC: 880)
+  // Full CC: 88013xxxxxxx .. 88019xxxxxxx (13 digits starting with 88013..88019)
+  if (digits.startsWith('880') && digits.length >= 12) {
+    return digits;
+  }
+  // Local BD 11 digits: 013xxxxxxx .. 019xxxxxxx
+  if (digits.length === 11 && /^01[3-9]/.test(digits)) {
+    return '880' + digits.substring(1);
+  }
+  // Local BD 10 digits: 13xxxxxxx .. 19xxxxxxx
+  if (digits.length === 10 && /^1[3-9]/.test(digits)) {
+    return '880' + digits;
+  }
+
+  // 2. India numbers (CC: 91)
+  // Full CC: 916xxxxxxxxx .. 919xxxxxxxxx (12 digits starting with 91)
+  if (digits.startsWith('91') && digits.length === 12) {
+    return digits;
+  }
+  // Local India 10 digits starting with 6, 7, 8, 9
+  if (digits.length === 10 && /^[6-9]/.test(digits)) {
+    return '91' + digits;
+  }
+  // Local India 11 digits starting with 06, 07, 08, 09
+  if (digits.length === 11 && /^0[6-9]/.test(digits)) {
+    return '91' + digits.substring(1);
+  }
+
+  // 3. UAE numbers (CC: 971)
+  if (digits.startsWith('971') && digits.length >= 11) {
+    return digits;
+  }
+  if (digits.length === 10 && /^05/.test(digits)) {
+    return '971' + digits.substring(1);
+  }
+
+  // 4. Saudi Arabia numbers (CC: 966)
+  if (digits.startsWith('966') && digits.length >= 11) {
+    return digits;
+  }
+  if (digits.length === 10 && /^05/.test(digits)) {
+    return '966' + digits.substring(1);
+  }
+
+  // 5. Pakistan numbers (CC: 92)
+  if (digits.startsWith('92') && digits.length >= 11) {
+    return digits;
+  }
+  if (digits.length === 11 && /^03/.test(digits)) {
+    return '92' + digits.substring(1);
+  }
+
+  // 6. US / Canada (CC: 1)
+  if (digits.startsWith('1') && digits.length === 11) {
+    return digits;
+  }
+
+  // 7. UK (CC: 44)
+  if (digits.startsWith('44') && digits.length >= 11) {
+    return digits;
+  }
+
+  // 8. Other international numbers (length >= 11)
+  if (digits.length >= 11) {
+    if (digits.startsWith('0')) {
+      return digits.substring(1);
+    }
+    return digits;
+  }
+
+  return digits;
+};
