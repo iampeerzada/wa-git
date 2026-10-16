@@ -451,75 +451,177 @@ const setupWorker = (instancesMap, saveMessage, io) => {
     let lastError = null;
     let sent = false;
 
+    // =========================================================================
+    // META OFFICIAL API WALLET DEDUCTION ARCHITECTURE & RULES:
+    // -------------------------------------------------------------------------
+    // 1. BAILEYS INSTANCES:
+    //    - Uses subscription plan daily limits (free quota).
+    //    - If messages_sent_today >= daily_limit, it enters 'overage' mode
+    //      and charges wallet via 'baileys_credit_cost' (requiresWallet = true).
+    //
+    // 2. META CLOUD API INSTANCES:
+    //    - CRITICAL: NEVER bypasses wallet billing! Meta Official Cloud API messages
+    //      incur real wholesale API costs from Meta (WhatsApp Cloud API).
+    //    - ALWAYS requiresWallet = true regardless of subscription daily_limit!
+    //    - Rates are determined based on Meta conversation category:
+    //        * MARKETING: 'meta_marketing_credit_cost' (default: 1.00 INR)
+    //        * UTILITY: 'meta_utility_credit_cost' (default: 0.50 INR)
+    //        * AUTHENTICATION: 'meta_authentication_credit_cost' (default: 0.40 INR)
+    //        * REGULAR / SERVICE / DIRECT SEND: 'meta_regular_credit_cost' (default: 0.50 INR)
+    //    - Wallet balance MUST be verified BEFORE calling Meta Graph API.
+    //    - Wallet balance is ATOMICALLY DEBITED immediately after successful send,
+    //      and logged in 'wallet_transactions' with status 'completed'.
+    //    - Emits 'wallet_updated' event via socket to refresh UI balances in real-time.
+    // =========================================================================
+
+    // 1. Determine if this job targets a Meta Cloud API instance
+    let isMeta = Boolean(options?.isMeta);
+    let instObj = (typeof instancesMap !== 'undefined' && instancesMap) ? instancesMap.get(instanceId) : null;
+    if (!instObj || !instObj.provider) {
+        try {
+            const instDbRes = await pool.query(
+                'SELECT provider, meta_access_token, meta_phone_number_id, meta_waba_id, name, user_id FROM instances WHERE id = $1',
+                [instanceId]
+            );
+            if (instDbRes.rows.length > 0) {
+                const dbInst = instDbRes.rows[0];
+                if (dbInst.provider === 'meta') {
+                    instObj = {
+                        status: 'open',
+                        phone: dbInst.meta_phone_number_id,
+                        provider: 'meta',
+                        metaAccessToken: dbInst.meta_access_token,
+                        metaPhoneNumberId: dbInst.meta_phone_number_id,
+                        metaWabaId: dbInst.meta_waba_id,
+                        name: dbInst.name,
+                        userId: dbInst.user_id
+                    };
+                    if (instancesMap) instancesMap.set(instanceId, instObj);
+                }
+            }
+        } catch (dbInstErr) {
+            console.error('[Worker] Error loading instance details:', dbInstErr.message);
+        }
+    }
+    if (instObj?.provider === 'meta') {
+        isMeta = true;
+    }
+
+    // 2. Identify Meta Template Name (from options or spintax/syntax)
+    let activeTplName = options?.templateName || options?.template_name || null;
+    const finalMsgPreview = solveSpintax(message || '');
+    if (finalMsgPreview && finalMsgPreview.trim().startsWith('[META TEMPLATE]')) {
+        const rawTplStr = finalMsgPreview.trim().replace('[META TEMPLATE]', '').trim();
+        const parts = rawTplStr.split('|').map(s => s.trim());
+        if (parts.length > 0 && parts[0]) {
+            activeTplName = parts[0];
+        }
+    } else if (finalMsgPreview && finalMsgPreview.trim().startsWith('[Template:')) {
+        activeTplName = finalMsgPreview.replace(/^\[Template:\s*|\].*$/gi, '').trim();
+    }
+
+    // 3. Determine Category & Cost Type
+    let metaCategory = 'REGULAR';
+    let costType = isMeta ? 'meta_regular_credit_cost' : 'baileys_credit_cost';
+
+    if (isMeta) {
+        // Direct Send explicit category parameter support (e.g. 'utility' or 'authentication')
+        if (options?.category) {
+            metaCategory = String(options.category).toUpperCase();
+        }
+
+        // If template is specified, look up official category from meta_templates table
+        if (activeTplName) {
+            try {
+                const tplRes = await pool.query(
+                    'SELECT category FROM meta_templates WHERE name = $1 AND (instance_id = $2 OR instance_id IS NULL) LIMIT 1',
+                    [activeTplName, instanceId]
+                );
+                if (tplRes.rows.length > 0 && tplRes.rows[0].category) {
+                    metaCategory = tplRes.rows[0].category.toUpperCase();
+                } else {
+                    metaCategory = 'UTILITY'; // Standard default category for approved Meta templates
+                }
+            } catch (tplErr) {
+                console.error('[Worker] Template Category Lookup Error:', tplErr.message);
+                metaCategory = 'UTILITY';
+            }
+        }
+
+        // Map Category to pricing key in system_settings
+        if (metaCategory === 'MARKETING') costType = 'meta_marketing_credit_cost';
+        else if (metaCategory === 'AUTHENTICATION') costType = 'meta_authentication_credit_cost';
+        else if (metaCategory === 'UTILITY') costType = 'meta_utility_credit_cost';
+        else costType = 'meta_regular_credit_cost';
+    }
+
+    // 4. Determine requiresWallet (Meta ALWAYS requires wallet deduction; Baileys checks daily limits)
     let requiresWallet = false;
     let limitData = null;
 
-    // Check Daily Limit Before Sending
-    try {
-        const limitRes = await pool.query(`
-            SELECT 
-                CASE 
-                    WHEN s.last_reset_date < CURRENT_DATE THEN 0 
-                    ELSE s.messages_sent_today 
-                END as messages_sent_today,
-                s.custom_daily_limit, p.daily_limit 
-            FROM subscriptions s 
-            LEFT JOIN plans p ON s.plan_id = p.id 
-            WHERE s.user_id = $1
-        `, [userId]);
+    if (isMeta) {
+        // MANDATORY: Meta Cloud API messages ALWAYS require wallet deduction per message
+        requiresWallet = true;
+    } else {
+        // Baileys WhatsApp Web instances check daily plan limits
+        try {
+            const limitRes = await pool.query(`
+                SELECT 
+                    CASE 
+                        WHEN s.last_reset_date < CURRENT_DATE THEN 0 
+                        ELSE s.messages_sent_today 
+                    END as messages_sent_today,
+                    s.custom_daily_limit, p.daily_limit 
+                FROM subscriptions s 
+                LEFT JOIN plans p ON s.plan_id = p.id 
+                WHERE s.user_id = $1
+            `, [userId]);
 
-        if (limitRes.rows.length > 0) {
-            limitData = limitRes.rows[0];
-            const maxDaily = limitData.custom_daily_limit !== null ? limitData.custom_daily_limit : (limitData.daily_limit || 0);
-            if (maxDaily > 0 && limitData.messages_sent_today >= maxDaily) {
-                requiresWallet = true;
-            }
-        }
-    } catch (err) {
-        console.error('[Worker] Limit Check Error:', err.message);
-    }
-
-    let cost = 1;
-    let balance = 0;
-    let costType = 'baileys_credit_cost';
-
-    const instObj = (typeof instancesMap !== 'undefined' && instancesMap) ? instancesMap.get(instanceId) : null;
-    if (instObj && instObj.provider === 'meta') {
-        if (options?.templateName) {
-            costType = 'meta_utility_credit_cost'; // Default
-            try {
-                const tplRes = await pool.query('SELECT category FROM meta_templates WHERE name = $1 AND instance_id = $2', [options.templateName, instanceId]);
-                if (tplRes.rows.length > 0) {
-                    const cat = (tplRes.rows[0].category || '').toUpperCase();
-                    if (cat === 'MARKETING') costType = 'meta_marketing_credit_cost';
-                    else if (cat === 'AUTHENTICATION') costType = 'meta_authentication_credit_cost';
-                    else if (cat === 'UTILITY') costType = 'meta_utility_credit_cost';
+            if (limitRes.rows.length > 0) {
+                limitData = limitRes.rows[0];
+                const maxDaily = limitData.custom_daily_limit !== null ? limitData.custom_daily_limit : (limitData.daily_limit || 0);
+                if (maxDaily > 0 && limitData.messages_sent_today >= maxDaily) {
+                    requiresWallet = true;
                 }
-            } catch(e) {
-                console.error('[Worker] Template Category Lookup Error:', e.message);
             }
-        } else {
-            costType = 'meta_regular_credit_cost';
+        } catch (err) {
+            console.error('[Worker] Limit Check Error:', err.message);
         }
     }
 
+    // 5. Fetch accurate cost from system_settings with safe default fallbacks
+    let cost = 1.0;
+    const defaultMetaCost = (metaCategory === 'MARKETING') ? 1.00 : (metaCategory === 'AUTHENTICATION' ? 0.40 : 0.50);
     try {
-        const settingsRes = await pool.query('SELECT key, value FROM system_settings WHERE key = $1', [costType]);
+        const settingsRes = await pool.query('SELECT value FROM system_settings WHERE key = $1', [costType]);
         if (settingsRes.rows.length > 0 && settingsRes.rows[0].value) {
-            cost = parseFloat(settingsRes.rows[0].value) || 1;
+            cost = parseFloat(settingsRes.rows[0].value) || (isMeta ? defaultMetaCost : 1.0);
+        } else {
+            cost = isMeta ? defaultMetaCost : 1.0;
         }
+    } catch (e) {
+        cost = isMeta ? defaultMetaCost : 1.0;
+    }
 
+    // 6. Check wallet balance before sending
+    let balance = 0;
+    try {
         const walletRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
         if (walletRes.rows.length > 0) {
             balance = parseFloat(walletRes.rows[0].wallet_balance) || 0;
         }
 
         if (requiresWallet && balance < cost) {
+            const failReason = isMeta
+                ? `Insufficient wallet balance for Meta Official API ${metaCategory} message (requires ₹${cost.toFixed(2)}, available balance: ₹${balance.toFixed(2)}). Please recharge wallet.`
+                : `Insufficient wallet balance for overage message (requires ₹${cost.toFixed(2)}, available balance: ₹${balance.toFixed(2)}). Please recharge wallet.`;
+            
+            console.warn(`[Worker Wallet Check] Aborting message: ${failReason}`);
             await pool.query(
-                'INSERT INTO message_logs (user_id, instance_id, recipient, status, error, content) VALUES ($1, $2, $3, $4, $5, $6)',
-                [userId, instanceId, number, 'failed', `Insufficient wallet balance (requires ₹${cost}, available balance: ₹${balance})`, message || options?.templateName]
+                'INSERT INTO message_logs (user_id, instance_id, recipient, status, error, content, campaign_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                [userId, instanceId, number, 'failed', failReason, message || options?.templateName || activeTplName, activeCampaignId || null]
             );
-            return; // Stop processing this message
+            return; // Abort job immediately without sending to Meta
         }
     } catch (err) {
         console.error('[Worker] Wallet Check Error:', err.message);
@@ -538,7 +640,28 @@ const setupWorker = (instancesMap, saveMessage, io) => {
                  }
             }
 
-            const instance = instancesMap.get(instanceId);
+            let instance = instancesMap.get(instanceId);
+            if (!instance && pool) {
+                try {
+                    const instDbRes = await pool.query('SELECT provider, meta_access_token, meta_phone_number_id, meta_waba_id, name, user_id FROM instances WHERE id = $1', [instanceId]);
+                    if (instDbRes.rows.length > 0) {
+                        const row = instDbRes.rows[0];
+                        if (row.provider === 'meta') {
+                            instance = {
+                                status: 'open',
+                                phone: row.meta_phone_number_id,
+                                provider: 'meta',
+                                metaAccessToken: row.meta_access_token,
+                                metaPhoneNumberId: row.meta_phone_number_id,
+                                metaWabaId: row.meta_waba_id,
+                                name: row.name,
+                                userId: row.user_id
+                            };
+                            instancesMap.set(instanceId, instance);
+                        }
+                    }
+                } catch(e) {}
+            }
             if (!instance || instance.status !== 'open') {
               throw new Error(`Instance ${instanceId} is offline.`);
             }
@@ -1031,15 +1154,30 @@ const setupWorker = (instancesMap, saveMessage, io) => {
             );
             
             if (requiresWallet) {
+                // 1. Deduct wallet balance from users table
                 await pool.query(
                     'UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE id = $2',
                     [cost, userId]
                 );
                 
+                // 2. Format clear descriptive message for transaction ledger
+                const txDescription = isMeta
+                    ? `Meta Cloud API ${metaCategory} Message to ${number}${activeTplName ? ` [Template: ${activeTplName}]` : ''}`
+                    : `Overage Message to ${number} (${costType})`;
+
+                // 3. Insert into wallet_transactions ledger with status 'completed'
                 await pool.query(
                     'INSERT INTO wallet_transactions (user_id, amount, type, description, message_number, message_id, status) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-                    [userId, cost, 'debit', `Overage Message to ${number} (${costType})`, number, msgId, 'sent']
+                    [userId, cost, 'debit', txDescription, number, msgId, 'completed']
                 );
+
+                console.log(`[Worker Wallet] Debited ₹${cost} from user ${userId} for ${txDescription}. Message ID: ${msgId}`);
+
+                // 4. Real-time emit to connected UI components (HeaderWallet, WalletManager)
+                if (io) {
+                    io.emit('wallet_updated', { userId, amount: cost, type: 'debit', messageId: msgId });
+                    io.emit('wallet_update', { userId, balance: Math.max(0, balance - cost), amount: cost });
+                }
             }
             // 3. POST-SEND COOL DOWN
             if (options?.complianceMode) {

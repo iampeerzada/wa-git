@@ -287,7 +287,16 @@ pool.connect(async (err, client, release) => {
         `);
         
         try {
-            await client.query("INSERT INTO system_settings (key, value) VALUES ('baileys_credit_cost', '1'), ('meta_template_credit_cost', '2'), ('meta_regular_credit_cost', '1') ON CONFLICT DO NOTHING;");
+            await client.query(`
+                INSERT INTO system_settings (key, value) VALUES 
+                    ('baileys_credit_cost', '1.00'), 
+                    ('meta_template_credit_cost', '1.00'), 
+                    ('meta_regular_credit_cost', '0.50'),
+                    ('meta_utility_credit_cost', '0.50'),
+                    ('meta_marketing_credit_cost', '1.00'),
+                    ('meta_authentication_credit_cost', '0.40')
+                ON CONFLICT (key) DO NOTHING;
+            `);
         } catch(e) {}
 
     } catch (dbErr) {
@@ -4530,7 +4539,20 @@ app.get('/api/meta/details/:instanceId', authenticate, async (req, res) => {
     }
 });
 
-// --- SUPERADMIN META BILLING & INSIGHTS API ---
+// =========================================================================
+// META OFFICIAL API USAGE & BILLING INSIGHTS ARCHITECTURE & RULES:
+// -------------------------------------------------------------------------
+// 1. REVENUE TRACKING:
+//    - Tracks all 'debit' transactions in wallet_transactions specifically for
+//      Meta messages (filtered by description ILIKE '%Meta%' or meta_% keys).
+// 2. MESSAGE METRICS:
+//    - Sent count includes all active delivered states: 'sent', 'delivered',
+//      'read', 'success', 'resolved_sent' for instances where provider = 'meta'.
+// 3. WHOLESALE COST ESTIMATION:
+//    - Meta charges approximately ₹0.50 avg wholesale rate per conversation.
+// 4. GROSS PROFIT MARGIN:
+//    - Margin = totalPlatformRevenueCollected - estimatedMetaWholesaleCost.
+// =========================================================================
 app.get('/api/superadmin/meta-insights', authenticate, async (req, res) => {
     if (req.user.role !== 'superadmin') {
         return res.status(403).json({ error: 'Access denied. Superadmin only.' });
@@ -4540,26 +4562,26 @@ app.get('/api/superadmin/meta-insights', authenticate, async (req, res) => {
         const metaInstancesRes = await pool.query("SELECT * FROM instances WHERE provider = 'meta'");
         const metaInstances = metaInstancesRes.rows;
 
-        // Fetch wallet transaction totals
+        // Fetch wallet transaction totals specifically debited for Meta Official API messages
         const walletStatsRes = await pool.query(`
             SELECT 
                 COALESCE(SUM(amount), 0) as total_charged,
                 COUNT(*) as total_transactions
             FROM wallet_transactions 
-            WHERE type = 'debit'
+            WHERE type = 'debit' AND (description ILIKE '%Meta%' OR description ILIKE '%meta_%')
         `);
 
-        // Fetch category message breakdown from message_logs
+        // Fetch category message breakdown from message_logs for Meta instances
         const logStatsRes = await pool.query(`
             SELECT 
-                COUNT(*) FILTER (WHERE ml.status != 'failed') as total_sent,
+                COUNT(*) FILTER (WHERE ml.status IN ('sent', 'delivered', 'read', 'success', 'resolved_sent')) as total_sent,
                 COUNT(*) FILTER (WHERE ml.status = 'failed') as total_failed
             FROM message_logs ml
             JOIN instances i ON ml.instance_id = i.id
             WHERE i.provider = 'meta'
         `);
 
-        // Fetch rate settings
+        // Fetch rate settings for Meta categories
         const settingsRes = await pool.query("SELECT key, value FROM system_settings WHERE key LIKE 'meta_%'");
         const rates = {};
         settingsRes.rows.forEach(r => rates[r.key] = parseFloat(r.value) || 0);
@@ -4588,24 +4610,25 @@ app.get('/api/superadmin/meta-insights', authenticate, async (req, res) => {
                 }
             }
 
-            // DB usage for this instance
+            // DB message logs usage for this specific Meta instance
             const instLogRes = await pool.query(`
                 SELECT 
-                    COUNT(*) FILTER (WHERE status != 'failed') as sent,
+                    COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'read', 'success', 'resolved_sent')) as sent,
                     COUNT(*) FILTER (WHERE status = 'failed') as failed
                 FROM message_logs WHERE instance_id = $1
             `, [inst.id]);
 
+            // DB wallet revenue collected specifically for this user's Meta transactions
             const instWalletRes = await pool.query(`
                 SELECT COALESCE(SUM(amount), 0) as wallet_debit
                 FROM wallet_transactions 
-                WHERE user_id = $1 AND type = 'debit'
+                WHERE user_id = $1 AND type = 'debit' AND (description ILIKE '%Meta%' OR description ILIKE '%meta_%')
             `, [inst.user_id]);
 
             const sentCount = parseInt(instLogRes.rows[0]?.sent || 0, 10);
             const revenue = parseFloat(instWalletRes.rows[0]?.wallet_debit || 0);
             // Estimated wholesale cost (~ ₹0.50 avg Meta charge)
-            const wholesaleCost = sentCount * 0.50;
+            const wholesaleCost = Math.round(sentCount * 0.50 * 100) / 100;
 
             instanceBreakdown.push({
                 id: inst.id,
@@ -4615,9 +4638,9 @@ app.get('/api/superadmin/meta-insights', authenticate, async (req, res) => {
                 userId: inst.user_id,
                 totalSent: sentCount,
                 totalFailed: parseInt(instLogRes.rows[0]?.failed || 0, 10),
-                platformRevenueCollected: revenue,
+                platformRevenueCollected: Math.round(revenue * 100) / 100,
                 estimatedMetaCost: wholesaleCost,
-                estimatedMargin: revenue - wholesaleCost,
+                estimatedMargin: Math.round((revenue - wholesaleCost) * 100) / 100,
                 metaGraphAnalytics,
                 metaError
             });
@@ -4627,21 +4650,21 @@ app.get('/api/superadmin/meta-insights', authenticate, async (req, res) => {
         const totalSent = parseInt(logStatsRes.rows[0]?.total_sent || 0, 10);
         const totalFailed = parseInt(logStatsRes.rows[0]?.total_failed || 0, 10);
 
-        const estimatedMetaCost = totalSent * 0.50;
-        const estimatedMargin = totalPlatformRevenue - estimatedMetaCost;
+        const estimatedMetaCost = Math.round(totalSent * 0.50 * 100) / 100;
+        const estimatedMargin = Math.round((totalPlatformRevenue - estimatedMetaCost) * 100) / 100;
 
         res.json({
             summary: {
                 totalMetaInstances: metaInstances.length,
                 totalMessagesSent: totalSent,
                 totalMessagesFailed: totalFailed,
-                totalPlatformRevenueCollected: totalPlatformRevenue,
-                estimatedMetaWholesaleCost: Math.round(estimatedMetaCost * 100) / 100,
-                estimatedPlatformGrossProfit: Math.round(estimatedMargin * 100) / 100,
+                totalPlatformRevenueCollected: Math.round(totalPlatformRevenue * 100) / 100,
+                estimatedMetaWholesaleCost: estimatedMetaCost,
+                estimatedPlatformGrossProfit: estimatedMargin,
                 platformRates: {
                     marketing: rates.meta_marketing_credit_cost || 1.0,
                     utility: rates.meta_utility_credit_cost || 0.5,
-                    authentication: rates.meta_authentication_credit_cost || 0.25,
+                    authentication: rates.meta_authentication_credit_cost || 0.40,
                     regular: rates.meta_regular_credit_cost || 0.5
                 }
             },
@@ -5205,6 +5228,26 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
                 jid = '91' + jid; // Default India 91 prefix for 10-digit mobile numbers
             }
 
+            // -------------------------------------------------------------
+            // META OFFICIAL API WALLET BALANCE PRE-CHECK
+            // -------------------------------------------------------------
+            let metaCost = 0.50;
+            try {
+                const costRes = await pool.query("SELECT value FROM system_settings WHERE key = 'meta_regular_credit_cost'");
+                if (costRes.rows.length > 0 && costRes.rows[0].value) {
+                    metaCost = parseFloat(costRes.rows[0].value) || 0.50;
+                }
+            } catch (e) {}
+
+            const userBalRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [req.user.id]);
+            const walletBalance = userBalRes.rows.length > 0 ? (parseFloat(userBalRes.rows[0].wallet_balance) || 0) : 0;
+
+            if (walletBalance < metaCost) {
+                return res.status(402).json({ 
+                    error: `Insufficient wallet balance for Meta Direct Chat message (requires ₹${metaCost.toFixed(2)}, available balance: ₹${walletBalance.toFixed(2)}). Please recharge wallet.` 
+                });
+            }
+
             let msgData = {
                 messaging_product: "whatsapp",
                 recipient_type: "individual",
@@ -5249,6 +5292,36 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
                 return res.status(400).json({ error: errMsg });
             }
             msgId = metaJson.messages?.[0]?.id || `meta_${Date.now()}`;
+
+            // -------------------------------------------------------------
+            // META OFFICIAL API WALLET DEBIT ON SUCCESSFUL SEND
+            // -------------------------------------------------------------
+            try {
+                await pool.query(
+                    'UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE id = $2',
+                    [metaCost, req.user.id]
+                );
+
+                await pool.query(
+                    'INSERT INTO wallet_transactions (user_id, amount, type, description, message_number, message_id, status) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                    [req.user.id, metaCost, 'debit', `Meta Cloud API Direct Chat to ${jid}`, jid, msgId, 'completed']
+                );
+
+                await pool.query(
+                    'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ($1, $2, $3, $4, $5, $6)',
+                    [req.user.id, instance.id, jid, 'sent', msgId, message || (media ? '[Media]' : 'Direct Chat')]
+                );
+
+                await pool.query(
+                    'UPDATE subscriptions SET messages_sent_today = CASE WHEN last_reset_date < CURRENT_DATE THEN 1 ELSE messages_sent_today + 1 END, messages_sent_this_month = COALESCE(messages_sent_this_month, 0) + 1, messages_sent_this_year = COALESCE(messages_sent_this_year, 0) + 1, last_reset_date = CURRENT_DATE WHERE user_id = $1',
+                    [req.user.id]
+                );
+
+                io.emit('wallet_updated', { userId: req.user.id, amount: metaCost, type: 'debit', messageId: msgId });
+                console.log(`[Meta Direct Chat] Debited ₹${metaCost} from user ${req.user.id} for message ${msgId}`);
+            } catch (deductErr) {
+                console.error('[Meta Direct Chat Wallet Notice]', deductErr.message);
+            }
         } else {
             if (media) {
                 let mediaBuffer;

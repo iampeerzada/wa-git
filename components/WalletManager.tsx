@@ -58,6 +58,9 @@ const WalletManager: React.FC<WalletManagerProps> = ({ apiBase, currentUser, use
 
   useEffect(() => {
     fetchData();
+    const handleRefresh = () => fetchData();
+    window.addEventListener('wallet_refresh', handleRefresh);
+    return () => window.removeEventListener('wallet_refresh', handleRefresh);
   }, [selectedUserId]);
 
   const handleAddFunds = async (e: React.FormEvent) => {

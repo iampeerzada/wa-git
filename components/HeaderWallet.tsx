@@ -34,8 +34,13 @@ export const HeaderWallet = ({ currentUser, apiBase }: { currentUser: User, apiB
     useEffect(() => {
         if (!currentUser?.id) return;
         fetchLedger();
+        const handleRefresh = () => fetchLedger();
+        window.addEventListener('wallet_refresh', handleRefresh);
         const interval = setInterval(fetchLedger, 30000); // Check every 30s
-        return () => clearInterval(interval);
+        return () => {
+            window.removeEventListener('wallet_refresh', handleRefresh);
+            clearInterval(interval);
+        };
     }, [currentUser?.id]);
 
     const handleProceed = async () => {

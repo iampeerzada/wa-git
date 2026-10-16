@@ -405,7 +405,14 @@ const App: React.FC = () => {
 
     socket.on('wallet_update', (data) => {
         if (currentUser && data.userId === currentUser.id) {
-            setCurrentUser(prev => prev ? ({ ...prev, walletBalance: data.balance }) : prev);
+            setCurrentUser(prev => prev ? ({ ...prev, walletBalance: data.balance !== undefined ? data.balance : prev.walletBalance }) : prev);
+            window.dispatchEvent(new CustomEvent('wallet_refresh'));
+        }
+    });
+
+    socket.on('wallet_updated', (data) => {
+        if (currentUser && data.userId === currentUser.id) {
+            window.dispatchEvent(new CustomEvent('wallet_refresh'));
         }
     });
 
