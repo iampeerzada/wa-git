@@ -170,7 +170,7 @@ pool.connect(async (err, client, release) => {
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id VARCHAR(100) PRIMARY KEY,
                 instance_id VARCHAR(50),
-                remote_jid VARCHAR(50),
+                remote_jid VARCHAR(100),
                 from_me BOOLEAN DEFAULT FALSE,
                 text TEXT,
                 media_url TEXT,
@@ -179,6 +179,25 @@ pool.connect(async (err, client, release) => {
             )
         `);
         console.log('[Database] chat_messages table verified.');
+
+        // Create LID mapping table for WhatsApp multi-device LID resolution
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS chat_lid_mappings (
+                instance_id VARCHAR(50) NOT NULL,
+                lid VARCHAR(100) NOT NULL,
+                phone_jid VARCHAR(100) NOT NULL,
+                push_name VARCHAR(255),
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (instance_id, lid)
+            )
+        `);
+        console.log('[Database] chat_lid_mappings table verified.');
+
+        try {
+            await client.query('ALTER TABLE chat_messages ALTER COLUMN remote_jid TYPE VARCHAR(100);');
+            await client.query('CREATE INDEX IF NOT EXISTS idx_chat_lid_lookup ON chat_lid_mappings(instance_id, lid);');
+            await client.query('CREATE INDEX IF NOT EXISTS idx_chat_lid_phone ON chat_lid_mappings(instance_id, phone_jid);');
+        } catch (e) {}
 
         // High-performance database indexes for instant chatbox loading
         try {
@@ -1092,17 +1111,55 @@ async function connectToWhatsApp(instanceId) {
             }
         });
 
+        // --- CONTACTS & LID RESOLUTION LISTENER ---
+        sock.ev.on('contacts.upsert', async (contacts) => {
+            for (const c of contacts) {
+                try {
+                    const jid = c.id;
+                    const lid = c.lid;
+                    const name = c.name || c.notify || c.verifiedName;
+                    if (lid && jid) {
+                        await pool.query(
+                            'INSERT INTO chat_lid_mappings (instance_id, lid, phone_jid, push_name) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id, lid) DO UPDATE SET phone_jid = EXCLUDED.phone_jid, push_name = COALESCE(EXCLUDED.push_name, chat_lid_mappings.push_name)',
+                            [instanceId, lid, jid, name || null]
+                        ).catch(() => {});
+                    }
+                    if (jid && name) {
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = COALESCE(EXCLUDED.push_name, chat_contacts.push_name)',
+                            [instanceId, jid, name]
+                        ).catch(() => {});
+                    }
+                } catch (e) {}
+            }
+        });
+
+        sock.ev.on('contacts.update', async (contacts) => {
+            for (const c of contacts) {
+                try {
+                    const jid = c.id;
+                    const lid = c.lid;
+                    const name = c.name || c.notify || c.verifiedName;
+                    if (lid && jid) {
+                        await pool.query(
+                            'INSERT INTO chat_lid_mappings (instance_id, lid, phone_jid, push_name) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id, lid) DO UPDATE SET phone_jid = EXCLUDED.phone_jid, push_name = COALESCE(EXCLUDED.push_name, chat_lid_mappings.push_name)',
+                            [instanceId, lid, jid, name || null]
+                        ).catch(() => {});
+                    }
+                } catch (e) {}
+            }
+        });
+
         // --- PRESENCE UPDATES (Typing / Online) ---
         sock.ev.on('presence.update', (update) => {
             const { id, presences } = update;
-            // presences is a map of user JID -> { lastKnownPresence: 'available' | 'unavailable' | 'composing' | 'recording' }
             if (presences) {
                 Object.keys(presences).forEach(jid => {
                     const presence = presences[jid];
                     io.emit('presence_update', {
                         instanceId,
-                        remoteJid: id, // The chat JID (could be group or user)
-                        userJid: jid,  // The specific user (same as remoteJid for DM)
+                        remoteJid: id,
+                        userJid: jid,
                         status: presence.lastKnownPresence
                     });
                 });
@@ -1111,145 +1168,186 @@ async function connectToWhatsApp(instanceId) {
 
         // --- AUTO RESPONDER & CHAT LISTENER ---
         sock.ev.on('messages.upsert', async (m) => {
-            if (m.type !== 'notify') return;
-            const msg = m.messages[0];
-            if (!msg || !msg.message) return;
+            if (m.type !== 'notify' && m.type !== 'append') return;
+            const messagesList = Array.isArray(m.messages) ? m.messages : [m.messages];
 
-            saveMessage(msg.key, msg.message);
+            for (const msg of messagesList) {
+                if (!msg || !msg.message) continue;
 
-            const from = msg.key.remoteJid;
-            const fromMe = msg.key.fromMe;
-            const pushName = msg.pushName;
-            
-            // Capture Metadata (PushName / Group Name)
-            try {
-                if (from.endsWith('@g.us')) {
-                    // Check if we need to fetch group name
-                    const existing = await pool.query('SELECT group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2', [instanceId, from]);
-                    if (existing.rows.length === 0 || !existing.rows[0].group_name) {
-                        const meta = await sock.groupMetadata(from);
-                        if (meta && meta.subject) {
-                            await pool.query(
-                                'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = $3',
-                                [instanceId, from, meta.subject]
-                            );
-                        }
-                    }
-                } else if (pushName) {
-                    await pool.query(
-                        'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = $3',
-                        [instanceId, from, pushName]
-                    );
-                }
-            } catch (metaErr) {
-                // Silent fail for metadata fetch to not block message processing
-            }
-            
-            // Extract Text Content
-            let text = msg.message.conversation || 
-                         msg.message.extendedTextMessage?.text || 
-                         msg.message.imageMessage?.caption || 
-                         msg.message.videoMessage?.caption || 
-                         msg.message.documentMessage?.caption || 
-                         msg.message.buttonsResponseMessage?.selectedDisplayText || 
-                         msg.message.listResponseMessage?.title || '';
+                saveMessage(msg.key, msg.message);
 
-            if (msg.message.interactiveResponseMessage?.nativeFlowResponseMessage) {
-                try {
-                    const rawParams = msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson;
-                    const params = typeof rawParams === 'string' ? JSON.parse(rawParams) : rawParams;
-                    let flowSummary = '📋 [Flow Response Received]\n';
-                    if (typeof params === 'object' && params !== null) {
-                        Object.entries(params).forEach(([k, v]) => {
-                            if (k !== 'flow_token') {
-                                const cleanKey = k.replace(/screen_\d+_/i, '').replace(/_\d+$/, '').replace(/_/g, ' ');
-                                const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
-                                flowSummary += `• ${cleanKey}: ${valStr}\n`;
-                            }
-                        });
-                        if (params.flow_token) {
-                            flowSummary += `\n(Token: ${params.flow_token})`;
-                        }
-                        text = flowSummary.trim();
+                let from = msg.key.remoteJid;
+                const fromMe = Boolean(msg.key.fromMe);
+                const pushName = msg.pushName;
+
+                if (!from || from === 'status@broadcast') continue;
+
+                // Resolve LID (@lid) to Phone Number JID
+                if (from.endsWith('@lid')) {
+                    const phoneJid = msg.key.senderPn || msg.key.participantPn;
+                    if (phoneJid) {
+                        await pool.query(
+                            'INSERT INTO chat_lid_mappings (instance_id, lid, phone_jid, push_name) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id, lid) DO UPDATE SET phone_jid = EXCLUDED.phone_jid',
+                            [instanceId, from, phoneJid, pushName || null]
+                        ).catch(() => {});
+                        from = phoneJid;
                     } else {
-                        text = params.id || rawParams || text;
-                    }
-                    mediaType = 'flow_response';
-                } catch (e) {
-                    text = msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || text;
-                    mediaType = 'flow_response';
-                }
-            }
-            
-            // Extract Media Content
-            let mediaUrl = null;
-            let mediaType = null;
-
-            try {
-                if (msg.message.imageMessage) {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
-                    mediaUrl = `data:image/jpeg;base64,${buffer.toString('base64')}`;
-                    mediaType = 'image';
-                } else if (msg.message.videoMessage) {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
-                    const isGif = msg.message.videoMessage.gifPlayback;
-                    mediaUrl = `data:video/mp4;base64,${buffer.toString('base64')}`;
-                    mediaType = isGif ? 'gif' : 'video'; // Frontend handles 'video', but we can distinguish if needed
-                } else if (msg.message.documentMessage) {
-                    // For documents, we might not want to download huge files automatically, but for now let's do it for consistency
-                    // Or maybe just store metadata? Let's skip heavy download for docs unless requested
-                    mediaType = 'document';
-                    mediaUrl = null; // Placeholder or handle download on demand
-                } else if (msg.message.stickerMessage) {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
-                    mediaUrl = `data:image/webp;base64,${buffer.toString('base64')}`;
-                    mediaType = 'image'; // Treat sticker as image for simple display
-                }
-            } catch (mediaErr) {
-                console.error('[Media Download Error]', mediaErr.message);
-            }
-
-            // Extract Quoted Message
-            let quotedMsgId = null;
-            let quotedMsgJson = null;
-            try {
-                const contextInfo = msg.message.extendedTextMessage?.contextInfo || 
-                                    msg.message.imageMessage?.contextInfo || 
-                                    msg.message.videoMessage?.contextInfo;
-                if (contextInfo && contextInfo.stanzaId) {
-                    quotedMsgId = contextInfo.stanzaId;
-                    // Store minimal quoted content
-                    const qMsg = contextInfo.quotedMessage;
-                    if (qMsg) {
-                        const qText = qMsg.conversation || qMsg.extendedTextMessage?.text || '';
-                        const qType = qMsg.imageMessage ? 'image' : qMsg.videoMessage ? 'video' : 'text';
-                        quotedMsgJson = JSON.stringify({ text: qText, mediaType: qType });
+                        const dbMap = await pool.query('SELECT phone_jid FROM chat_lid_mappings WHERE instance_id = $1 AND lid = $2', [instanceId, from]).catch(() => ({ rows: [] }));
+                        if (dbMap.rows.length > 0 && dbMap.rows[0].phone_jid) {
+                            from = dbMap.rows[0].phone_jid;
+                        }
                     }
                 }
-            } catch (e) {}
 
-            // Store message in DB
-            try {
-                const msgId = msg.key.id;
-                await pool.query(
-                    'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id, quoted_msg_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING',
-                    [msgId, instanceId, from, fromMe, text, mediaUrl, mediaType, new Date(msg.messageTimestamp * 1000), 'delivered', quotedMsgId, quotedMsgJson]
-                );
+                // Capture Metadata (PushName / Group Name)
+                try {
+                    if (from.endsWith('@g.us')) {
+                        const existing = await pool.query('SELECT group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2', [instanceId, from]);
+                        if (existing.rows.length === 0 || !existing.rows[0].group_name) {
+                            const meta = await sock.groupMetadata(from);
+                            if (meta && meta.subject) {
+                                await pool.query(
+                                    'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = $3',
+                                    [instanceId, from, meta.subject]
+                                );
+                            }
+                        }
+                    } else if (pushName) {
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = $3',
+                            [instanceId, from, pushName]
+                        );
+                    }
+                } catch (metaErr) {}
 
-                // Emit to Socket.io
-                io.emit('new_message', {
-                    id: msgId,
-                    instanceId,
-                    remoteJid: from,
-                    fromMe,
-                    text,
-                    mediaUrl,
-                    mediaType,
-                    timestamp: new Date(msg.messageTimestamp * 1000).toISOString(),
-                    status: 'delivered',
-                    quotedMsgId,
-                    quotedMsg: quotedMsgJson ? JSON.parse(quotedMsgJson) : null
-                });
+                // Unwrap ViewOnce & Ephemeral message wrappers safely
+                let realMsg = msg.message;
+                while (realMsg.viewOnceMessage || realMsg.viewOnceMessageV2 || realMsg.ephemeralMessage || realMsg.documentWithCaptionMessage || realMsg.viewOnceMessageV2Extension) {
+                    realMsg = (realMsg.viewOnceMessage || realMsg.viewOnceMessageV2 || realMsg.ephemeralMessage || realMsg.documentWithCaptionMessage || realMsg.viewOnceMessageV2Extension).message;
+                }
+
+                // Extract Text Content
+                let text = realMsg.conversation || 
+                             realMsg.extendedTextMessage?.text || 
+                             realMsg.imageMessage?.caption || 
+                             realMsg.videoMessage?.caption || 
+                             realMsg.documentMessage?.caption || 
+                             realMsg.buttonsResponseMessage?.selectedDisplayText || 
+                             realMsg.listResponseMessage?.title || '';
+
+                let mediaType = null;
+
+                if (realMsg.interactiveResponseMessage?.nativeFlowResponseMessage) {
+                    try {
+                        const rawParams = realMsg.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson;
+                        const params = typeof rawParams === 'string' ? JSON.parse(rawParams) : rawParams;
+                        let flowSummary = '📋 [Flow Response Received]\n';
+                        if (typeof params === 'object' && params !== null) {
+                            Object.entries(params).forEach(([k, v]) => {
+                                if (k !== 'flow_token') {
+                                    const cleanKey = k.replace(/screen_\d+_/i, '').replace(/_\d+$/, '').replace(/_/g, ' ');
+                                    const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                                    flowSummary += `• ${cleanKey}: ${valStr}\n`;
+                                }
+                            });
+                            if (params.flow_token) {
+                                flowSummary += `\n(Token: ${params.flow_token})`;
+                            }
+                            text = flowSummary.trim();
+                        } else {
+                            text = params.id || rawParams || text;
+                        }
+                        mediaType = 'flow_response';
+                    } catch (e) {
+                        text = realMsg.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || text;
+                        mediaType = 'flow_response';
+                    }
+                }
+
+                // Extract Media Content (Images, Videos, Audio Notes, Documents, Stickers)
+                let mediaUrl = null;
+
+                try {
+                    let ext = null;
+                    let isMedia = false;
+
+                    if (realMsg.imageMessage) {
+                        mediaType = 'image';
+                        ext = 'jpg';
+                        isMedia = true;
+                    } else if (realMsg.videoMessage) {
+                        mediaType = realMsg.videoMessage.gifPlayback ? 'gif' : 'video';
+                        ext = 'mp4';
+                        isMedia = true;
+                    } else if (realMsg.audioMessage) {
+                        mediaType = realMsg.audioMessage.ptt ? 'voice' : 'audio';
+                        ext = (realMsg.audioMessage.mimetype && realMsg.audioMessage.mimetype.includes('ogg')) ? 'ogg' : 'mp3';
+                        isMedia = true;
+                    } else if (realMsg.documentMessage) {
+                        mediaType = 'document';
+                        const docName = realMsg.documentMessage.fileName || `doc_${Date.now()}.pdf`;
+                        ext = docName.split('.').pop() || 'pdf';
+                        isMedia = true;
+                    } else if (realMsg.stickerMessage) {
+                        mediaType = 'image';
+                        ext = 'webp';
+                        isMedia = true;
+                    }
+
+                    if (isMedia) {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
+                        if (buffer && buffer.length > 0) {
+                            const uploadsDir = path.join(process.cwd(), 'uploads');
+                            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+                            const savedFileName = `media_${msg.key.id}_${Date.now()}.${ext}`;
+                            fs.writeFileSync(path.join(uploadsDir, savedFileName), buffer);
+                            mediaUrl = `/uploads/${savedFileName}`;
+                        }
+                    }
+                } catch (mediaErr) {
+                    console.error('[Media Download Error]', mediaErr.message);
+                }
+
+                // Extract Quoted Message
+                let quotedMsgId = null;
+                let quotedMsgJson = null;
+                try {
+                    const contextInfo = realMsg.extendedTextMessage?.contextInfo || 
+                                        realMsg.imageMessage?.contextInfo || 
+                                        realMsg.videoMessage?.contextInfo ||
+                                        realMsg.audioMessage?.contextInfo;
+                    if (contextInfo && contextInfo.stanzaId) {
+                        quotedMsgId = contextInfo.stanzaId;
+                        const qMsg = contextInfo.quotedMessage;
+                        if (qMsg) {
+                            const qText = qMsg.conversation || qMsg.extendedTextMessage?.text || '';
+                            const qType = qMsg.imageMessage ? 'image' : qMsg.videoMessage ? 'video' : qMsg.audioMessage ? 'audio' : 'text';
+                            quotedMsgJson = JSON.stringify({ text: qText, mediaType: qType });
+                        }
+                    }
+                } catch (e) {}
+
+                // Store message in DB
+                try {
+                    const msgId = msg.key.id;
+                    await pool.query(
+                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id, quoted_msg_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING',
+                        [msgId, instanceId, from, fromMe, text, mediaUrl, mediaType, new Date((msg.messageTimestamp || Date.now() / 1000) * 1000), 'delivered', quotedMsgId, quotedMsgJson]
+                    );
+
+                    io.emit('new_message', {
+                        id: msgId,
+                        instanceId,
+                        remoteJid: from,
+                        fromMe,
+                        text,
+                        mediaUrl,
+                        mediaType,
+                        timestamp: new Date((msg.messageTimestamp || Date.now() / 1000) * 1000).toISOString(),
+                        status: 'delivered',
+                        quotedMsgId,
+                        quotedMsg: quotedMsgJson ? JSON.parse(quotedMsgJson) : null
+                    });
 
                 // Send Webhook if configured
                 try {
@@ -1436,6 +1534,7 @@ async function connectToWhatsApp(instanceId) {
                 }
             } catch (err) {
                 console.error('[AutoResponder Error]', err.message);
+            }
             }
         });
 
@@ -5557,37 +5656,40 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
     try {
         const { instanceId } = req.params;
 
-        // 1. Fetch latest distinct messages, unread counts, inbound timestamps, and labels concurrently
+        // Fetch latest distinct messages, unread counts, inbound timestamps, and labels concurrently
         const [sessionsRes, unreadRes, inboundRes, labelsRes] = await Promise.all([
             pool.query(`
-                SELECT DISTINCT ON (m.remote_jid)
+                SELECT DISTINCT ON (COALESCE(clm.phone_jid, m.remote_jid))
                     m.id,
                     m.instance_id,
-                    m.remote_jid,
+                    COALESCE(clm.phone_jid, m.remote_jid) AS remote_jid,
                     m.from_me,
                     m.text,
                     m.media_url,
                     m.media_type,
                     m.status,
                     m.timestamp,
-                    COALESCE(cc.group_name, cc.push_name) AS contact_name,
-                    cc.push_name
+                    COALESCE(cc.group_name, cc.push_name, clm.push_name) AS contact_name,
+                    COALESCE(cc.push_name, clm.push_name) AS push_name
                 FROM chat_messages m
                 LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND cc.jid = m.remote_jid
+                LEFT JOIN chat_lid_mappings clm ON clm.instance_id = m.instance_id AND clm.lid = m.remote_jid
                 WHERE m.instance_id = $1
-                ORDER BY m.remote_jid, m.timestamp DESC
+                ORDER BY COALESCE(clm.phone_jid, m.remote_jid), m.timestamp DESC
             `, [instanceId]),
             pool.query(`
-                SELECT remote_jid, COUNT(*) as count
-                FROM chat_messages
-                WHERE instance_id = $1 AND from_me = false AND status != 'read'
-                GROUP BY remote_jid
+                SELECT COALESCE(clm.phone_jid, m.remote_jid) AS remote_jid, COUNT(*) as count
+                FROM chat_messages m
+                LEFT JOIN chat_lid_mappings clm ON clm.instance_id = m.instance_id AND clm.lid = m.remote_jid
+                WHERE m.instance_id = $1 AND m.from_me = false AND m.status != 'read'
+                GROUP BY COALESCE(clm.phone_jid, m.remote_jid)
             `, [instanceId]),
             pool.query(`
-                SELECT remote_jid, MAX(timestamp) as last_inbound_timestamp
-                FROM chat_messages
-                WHERE instance_id = $1 AND (from_me = false OR text LIKE '[Template:%' OR text LIKE '%[Template%' OR media_type = 'template' OR media_type = 'flow_response')
-                GROUP BY remote_jid
+                SELECT COALESCE(clm.phone_jid, m.remote_jid) AS remote_jid, MAX(m.timestamp) as last_inbound_timestamp
+                FROM chat_messages m
+                LEFT JOIN chat_lid_mappings clm ON clm.instance_id = m.instance_id AND clm.lid = m.remote_jid
+                WHERE m.instance_id = $1 AND m.from_me = false
+                GROUP BY COALESCE(clm.phone_jid, m.remote_jid)
             `, [instanceId]),
             pool.query(`
                 SELECT sl.remote_jid, l.id, l.name, l.color
@@ -5666,10 +5768,24 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
 app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
     try {
         const { instanceId, mediaId } = req.params;
+        const uploadsDir = path.join(process.cwd(), 'uploads');
+        if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
+        const safeId = String(mediaId).replace(/[^a-zA-Z0-9_-]/g, '');
+        const existingFiles = fs.readdirSync(uploadsDir).filter(f => f.startsWith(`meta_${safeId}.`));
+
+        if (existingFiles.length > 0) {
+            const filePath = path.join(uploadsDir, existingFiles[0]);
+            if (req.query.download === '1') {
+                return res.download(filePath, existingFiles[0]);
+            }
+            return res.sendFile(filePath);
+        }
+
         const instRes = await pool.query('SELECT meta_access_token FROM instances WHERE id = $1', [instanceId]);
         if (instRes.rows.length === 0) return res.status(404).send('Instance not found');
         const token = instRes.rows[0].meta_access_token;
-        
+
         if (mediaId.startsWith('http://') || mediaId.startsWith('https://')) {
             const mediaRes = await fetch(mediaId, {
                 headers: {
@@ -5677,36 +5793,66 @@ app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             });
-            res.setHeader('Content-Type', mediaRes.headers.get('content-type') || 'image/jpeg');
-            res.setHeader('Cache-Control', 'public, max-age=86400');
+            const cType = mediaRes.headers.get('content-type') || 'application/octet-stream';
+            let ext = 'bin';
+            if (cType.includes('image/jpeg')) ext = 'jpg';
+            else if (cType.includes('image/png')) ext = 'png';
+            else if (cType.includes('image/webp')) ext = 'webp';
+            else if (cType.includes('video/mp4')) ext = 'mp4';
+            else if (cType.includes('audio/ogg')) ext = 'ogg';
+            else if (cType.includes('audio/mpeg') || cType.includes('audio/mp3')) ext = 'mp3';
+            else if (cType.includes('pdf')) ext = 'pdf';
+
             const arrayBuf = await mediaRes.arrayBuffer();
-            return res.send(Buffer.from(arrayBuf));
+            const fileName = `meta_${safeId}.${ext}`;
+            const filePath = path.join(uploadsDir, fileName);
+            fs.writeFileSync(filePath, Buffer.from(arrayBuf));
+
+            if (req.query.download === '1') {
+                return res.download(filePath, fileName);
+            }
+            return res.sendFile(filePath);
         }
 
         const metadataRes = await fetch(`https://graph.facebook.com/v26.0/${mediaId}`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         const metadata = await metadataRes.json();
-        
+
         if (!metadata.url) {
             console.error('[Meta Media Metadata Error]', metadata);
             return res.status(404).send('Media URL not found');
         }
-        
+
         const mediaRes = await fetch(metadata.url, {
-            headers: { 
+            headers: {
                 'Authorization': `Bearer ${token}`,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         });
-        
-        res.setHeader('Content-Type', metadata.mime_type || 'application/octet-stream');
-        res.setHeader('Cache-Control', 'public, max-age=86400');
-        
-        const buffer = await mediaRes.arrayBuffer();
-        res.send(Buffer.from(buffer));
+
+        const cType = metadata.mime_type || mediaRes.headers.get('content-type') || 'application/octet-stream';
+        let ext = 'bin';
+        if (cType.includes('image/jpeg') || cType.includes('jpg')) ext = 'jpg';
+        else if (cType.includes('image/png')) ext = 'png';
+        else if (cType.includes('image/webp')) ext = 'webp';
+        else if (cType.includes('video/mp4') || cType.includes('video')) ext = 'mp4';
+        else if (cType.includes('audio/ogg') || cType.includes('ogg')) ext = 'ogg';
+        else if (cType.includes('audio/mpeg') || cType.includes('mp3')) ext = 'mp3';
+        else if (cType.includes('audio/mp4') || cType.includes('m4a')) ext = 'm4a';
+        else if (cType.includes('pdf')) ext = 'pdf';
+
+        const arrayBuf = await mediaRes.arrayBuffer();
+        const fileName = `meta_${safeId}.${ext}`;
+        const filePath = path.join(uploadsDir, fileName);
+        fs.writeFileSync(filePath, Buffer.from(arrayBuf));
+
+        if (req.query.download === '1') {
+            return res.download(filePath, fileName);
+        }
+        return res.sendFile(filePath);
     } catch (e) {
-        console.error("[Meta Media Fetch Error]", e);
+        console.error('[Meta Media Fetch Error]', e);
         res.status(500).send('Error fetching media');
     }
 });
@@ -5717,8 +5863,12 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
         const cleanNumber = remoteJid.replace(/\D/g, '');
         const candidateJids = [remoteJid];
         if (cleanNumber) {
-            candidateJids.push(cleanNumber, `${cleanNumber}@s.whatsapp.net`, `${cleanNumber}@c.us`);
+            candidateJids.push(cleanNumber, `${cleanNumber}@s.whatsapp.net`, `${cleanNumber}@c.us`, `${cleanNumber}@lid`);
         }
+
+        // Check if remoteJid corresponds to a mapped LID
+        const lidRes = await pool.query('SELECT lid FROM chat_lid_mappings WHERE instance_id = $1 AND phone_jid = $2', [instanceId, remoteJid]).catch(() => ({ rows: [] }));
+        lidRes.rows.forEach(r => candidateJids.push(r.lid));
 
         const result = await pool.query(`
             SELECT * FROM chat_messages
@@ -5789,7 +5939,7 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
 
         const mapped = result.rows.map(row => {
             let mediaUrl = row.media_url;
-            if (mediaUrl && !mediaUrl.startsWith('http') && !mediaUrl.startsWith('/')) {
+            if (mediaUrl && !mediaUrl.startsWith('http') && !mediaUrl.startsWith('/') && !mediaUrl.startsWith('data:')) {
                 mediaUrl = `/api/meta/media/${row.instance_id}/${mediaUrl}`;
             }
             let mediaType = row.media_type;
