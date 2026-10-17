@@ -23,6 +23,7 @@ import AutoResponderManager from './components/AutoResponderManager';
 import ChatInterface from './components/ChatInterface';
 import TeamManager from './components/TeamManager';
 import MetaInsightsBilling from './components/MetaInsightsBilling';
+import AiAutomationLogs from './components/AiAutomationLogs';
 import { ProfileView } from './components/ProfileView';
 import LoginPage from './components/LoginPage';
 import ProvisionInstanceModal from './components/ProvisionInstanceModal';
@@ -1001,6 +1002,7 @@ const App: React.FC = () => {
           {activeTab === 'team' && <TeamManager currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'visibility' && <VisibilityManager currentUser={currentUser} hiddenModules={hiddenModules} setHiddenModules={setHiddenModules} apiBase={API_BASE} />}
           {activeTab === 'code' && <CodeSnippets />}
+          {activeTab === 'ai-logs' && <AiAutomationLogs instances={visibleInstances} currentUser={currentUser} apiBase={API_BASE} />}
           {activeTab === 'logs' && (
             <div className="bg-black/40 p-6 rounded-xl border border-gray-800 font-mono text-sm h-full overflow-y-auto space-y-1">
               <div className="text-gray-500 border-b border-gray-800 pb-2 mb-4 uppercase tracking-widest text-[10px] font-black">System Logs - Live Hook</div>

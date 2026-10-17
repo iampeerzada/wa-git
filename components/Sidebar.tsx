@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layout, MessageSquare, Terminal, Code, Send, FileText, Users, Book, ShieldCheck, CreditCard, Image as ImageIcon, MessageCircleCode, Infinity, UserCog, LogOut, Wallet, Eye } from 'lucide-react';
+import { Layout, MessageSquare, Terminal, Code, Send, FileText, Users, Book, ShieldCheck, CreditCard, Image as ImageIcon, MessageCircleCode, Infinity, UserCog, LogOut, Wallet, Eye, Sparkles } from 'lucide-react';
 import { User, UserRole, Permission } from '../types';
 import BrandLogo from './BrandLogo';
 
@@ -51,6 +51,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
     {
       title: 'Admin & System',
       items: [
+        { id: 'ai-logs', icon: Sparkles, label: 'AI Automation Logs', badgeText: 'AI', badgeStyle: 'bg-purple-500/15 text-purple-400 border-purple-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER] },
         { id: 'team', icon: UserCog, label: 'Team Access', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN], permission: Permission.MANAGE_TEAM },
         { id: 'visibility', icon: Eye, label: 'Visibility Manager', roles: [UserRole.SUPERADMIN] },
         { id: 'users', icon: ShieldCheck, label: 'Users', roles: [UserRole.SUPERADMIN, UserRole.RESELLER] },

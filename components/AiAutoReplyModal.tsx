@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { 
   Bot, Sparkles, X, Check, Key, Shield, HelpCircle, 
   Send, AlertCircle, RefreshCw, Eye, EyeOff, Sliders, MessageSquare, 
-  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText
+  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText, History
 } from 'lucide-react';
+import io from 'socket.io-client';
 import { WhatsAppInstance, User } from '../types';
+import AiAutomationLogs from './AiAutomationLogs';
 
 interface AiAutoReplyModalProps {
   instance: WhatsAppInstance;
@@ -82,6 +84,7 @@ export default function AiAutoReplyModal({
 
   // Fallback defaults from profile
   const [hasUserKey, setHasUserKey] = useState(false);
+  const [activeModalTab, setActiveModalTab] = useState<'config' | 'logs'>('config');
 
   useEffect(() => {
     // Fetch instance detailed AI config
@@ -113,6 +116,23 @@ export default function AiAutoReplyModal({
     };
     loadConfig();
   }, [instance.id, apiBase, currentUser.id, currentUser.apiKey]);
+
+  // Real-time Socket.IO listener for key pool status updates
+  useEffect(() => {
+    const socket = io(apiBase);
+    
+    // Auto-sync status when component mounts or socket connects
+    handleSyncPool();
+
+    // Listen for live key failover or recovery events
+    socket.on('key_pool_updated', () => {
+      handleSyncPool();
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [apiBase, instance.id]);
 
   // Adjust default model if provider switches
   const handleProviderChange = (newProvider: 'gemini' | 'openai') => {
@@ -282,7 +302,7 @@ export default function AiAutoReplyModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-[#111b21] border border-gray-800 rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh] my-auto">
+      <div className="bg-[#111b21] border border-gray-800 rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh] my-auto">
         
         {/* Modal Header */}
         <div className="p-4 sm:p-5 border-b border-gray-800/80 bg-gradient-to-r from-[#111b21] via-[#1a2730] to-[#111b21] flex items-center justify-between shrink-0">
@@ -293,31 +313,68 @@ export default function AiAutoReplyModal({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-1.5">
-                  AI Auto-Reply Bot Settings
+                  AI Auto-Reply Bot
                   <Sparkles size={16} className="text-purple-400 animate-pulse" />
                 </h3>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-300 border border-purple-500/20">
-                  {instance.name}
+                  {instance.name} ({instance.provider === 'meta' ? 'META OFFICIAL' : 'BAILEYS QR'})
                 </span>
               </div>
-              <p className="text-xs text-gray-400 mt-0.5">
-                Automatically reply to WhatsApp customer messages like Autoresponder.io
-              </p>
+              
+              {/* Tab Navigation Controls */}
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveModalTab('config')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeModalTab === 'config'
+                      ? 'bg-purple-600 text-white shadow-md'
+                      : 'bg-gray-800 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <Bot size={13} />
+                  <span>Bot Settings & Failover Keys</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveModalTab('logs')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeModalTab === 'logs'
+                      ? 'bg-purple-600 text-white shadow-md'
+                      : 'bg-gray-800 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <History size={13} />
+                  <span>AI Activity Logs & Key History</span>
+                </button>
+              </div>
             </div>
           </div>
+
           <button 
             onClick={onClose}
-            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-800/80 rounded-lg transition-colors"
+            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-800/80 rounded-lg transition-colors self-start"
           >
             <X size={18} />
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm text-gray-200">
-          
-          {/* Master Enable Toggle Card */}
-          <div className={`p-4 rounded-xl border transition-all flex items-center justify-between gap-4 ${
+        {activeModalTab === 'logs' ? (
+          <div className="p-4 sm:p-6 overflow-y-auto max-h-[75vh]">
+            <AiAutomationLogs 
+              instances={[instance]} 
+              currentUser={currentUser} 
+              apiBase={apiBase} 
+              selectedInstanceId={instance.id} 
+            />
+          </div>
+        ) : (
+          <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm text-gray-200">
+            
+            {/* Master Enable Toggle Card */}
+            <div className={`p-4 rounded-xl border transition-all flex items-center justify-between gap-4 ${
             aiEnabled 
               ? 'bg-purple-950/20 border-purple-500/40 shadow-inner' 
               : 'bg-[#182229] border-gray-800'
@@ -847,6 +904,7 @@ export default function AiAutoReplyModal({
           )}
 
         </div>
+        )}
 
         {/* Modal Footer */}
         <div className="p-4 border-t border-gray-800 bg-[#182229] flex items-center justify-between shrink-0">

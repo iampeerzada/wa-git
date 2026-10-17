@@ -308,6 +308,26 @@ pool.connect(async (err, client, release) => {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
+
+        // AI Automation Activity & Failover Logs table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS ai_automation_logs (
+                id SERIAL PRIMARY KEY,
+                instance_id VARCHAR(255) NOT NULL,
+                instance_name VARCHAR(255),
+                provider VARCHAR(50) DEFAULT 'baileys',
+                remote_jid VARCHAR(255),
+                user_prompt TEXT,
+                ai_response TEXT,
+                model_used VARCHAR(100),
+                api_key_masked VARCHAR(100),
+                status VARCHAR(50) DEFAULT 'success',
+                latency_ms INT DEFAULT 0,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('[Database] ai_automation_logs table verified.');
         
         try {
             await client.query(`
@@ -644,6 +664,39 @@ function isRateLimitOrQuotaExhausted(err) {
     );
 }
 
+// Helper function to insert AI interaction logs into DB and emit real-time Socket.IO updates
+async function logAiAutomationEvent({ instanceId, instanceName, provider, remoteJid, userPrompt, aiResponse, modelUsed, apiKeyMasked, status, latencyMs, errorMessage }) {
+    try {
+        // Query to insert AI execution record into PostgreSQL ai_automation_logs
+        const res = await pool.query(
+            `INSERT INTO ai_automation_logs 
+            (instance_id, instance_name, provider, remote_jid, user_prompt, ai_response, model_used, api_key_masked, status, latency_ms, error_message)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING *`,
+            [
+                instanceId || 'unknown',
+                instanceName || 'WhatsApp Instance',
+                provider || 'baileys',
+                remoteJid || 'system',
+                userPrompt || '',
+                aiResponse || '',
+                modelUsed || 'gemini-3.8-flash',
+                apiKeyMasked || '***',
+                status || 'success',
+                latencyMs || 0,
+                errorMessage || ''
+            ]
+        );
+        // Emit socket event so UI updates live instantly
+        if (res.rows.length > 0 && io) {
+            io.emit('ai_log_created', res.rows[0]);
+        }
+    } catch (e) {
+        console.error('[AI Log DB Error]', e.message);
+    }
+}
+
+// Records key cooldown / failover status in key pool memory tracker
 function recordKeyCooldown(apiKey, errorMsg) {
     const existing = keyPoolHealth.get(apiKey) || {
         cooldownUntil: 0,
@@ -669,8 +722,19 @@ function recordKeyCooldown(apiKey, errorMsg) {
     existing.failCount = (existing.failCount || 0) + 1;
     existing.lastError = errorMsg || 'Quota or Rate Limit reached';
     keyPoolHealth.set(apiKey, existing);
+
+    // Broadcast key status update to connected UI instances
+    if (io) {
+        io.emit('key_pool_updated', {
+            apiKeyMasked: maskApiKey(apiKey),
+            status: 'cooldown',
+            cooldownUntil: existing.cooldownUntil,
+            error: existing.lastError
+        });
+    }
 }
 
+// Records successful API key usage in key pool memory tracker
 function recordKeySuccess(apiKey, latencyMs) {
     const existing = keyPoolHealth.get(apiKey) || {
         cooldownUntil: 0,
@@ -686,6 +750,15 @@ function recordKeySuccess(apiKey, latencyMs) {
     existing.lastLatencyMs = latencyMs || existing.lastLatencyMs || 0;
     existing.lastError = '';
     keyPoolHealth.set(apiKey, existing);
+
+    // Broadcast key status update to connected UI instances
+    if (io) {
+        io.emit('key_pool_updated', {
+            apiKeyMasked: maskApiKey(apiKey),
+            status: 'active',
+            latencyMs: existing.lastLatencyMs
+        });
+    }
 }
 
 // Execute single AI call with flexible token capping and fast failover
@@ -809,8 +882,9 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         return null;
     }
     try {
+        // Query instance and user configuration from DB
         const instRes = await pool.query(`
-            SELECT i.id, i.user_id, i.ai_enabled, i.ai_provider, i.ai_api_key, i.ai_model, 
+            SELECT i.id, i.name, i.provider, i.user_id, i.ai_enabled, i.ai_provider, i.ai_api_key, i.ai_model, 
                    i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups, i.ai_max_tokens,
                    u.gemini_api_key, u.openai_api_key, u.default_ai_prompt, 
                    u.default_ai_provider, u.default_ai_model
@@ -823,16 +897,19 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         if (instRes.rows.length === 0) return null;
         const inst = instRes.rows[0];
 
+        // Check if AI auto-responder is toggled ON for this instance
         if (!inst.ai_enabled) return null;
 
-        // Group chat check
+        // Skip group chats if auto-reply for groups is disabled
         if (from && from.endsWith('@g.us') && !inst.ai_auto_reply_groups) {
             return null;
         }
 
+        const instanceName = inst.name || 'WhatsApp Instance';
+        const instanceCategory = inst.provider === 'meta' ? 'meta' : 'baileys';
         const provider = (inst.ai_provider || inst.default_ai_provider || 'gemini').toLowerCase();
 
-        // 1. Gather all candidate API keys (Instance -> User Profile -> Env)
+        // Gather all candidate API keys from instance settings, user profile, and env
         const instanceKeys = parseApiKeyList(inst.ai_api_key);
         const userKeys = parseApiKeyList(provider === 'openai' ? inst.openai_api_key : inst.gemini_api_key);
         const envKeys = parseApiKeyList(provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.GEMINI_API_KEY);
@@ -840,11 +917,24 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         const allKeys = Array.from(new Set([...instanceKeys, ...userKeys, ...envKeys]));
 
         if (allKeys.length === 0) {
-            console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured in instance or user profile.`);
+            console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured.`);
+            await logAiAutomationEvent({
+                instanceId,
+                instanceName,
+                provider: instanceCategory,
+                remoteJid: from,
+                userPrompt: incomingText,
+                aiResponse: '',
+                modelUsed: inst.ai_model || 'gemini-3.8-flash',
+                apiKeyMasked: 'None Configured',
+                status: 'failed',
+                latencyMs: 0,
+                errorMessage: `No API key configured for ${provider.toUpperCase()} engine`
+            });
             return null;
         }
 
-        // 2. Prioritize Keys: Active / Healthy keys first (Round-Robin by least recently used), then cooldown keys
+        // Prioritize active healthy keys first, followed by keys in cooldown
         const now = Date.now();
         const availableKeys = allKeys.filter(k => {
             const h = keyPoolHealth.get(k);
@@ -884,18 +974,20 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
             ? Number(inst.ai_max_tokens) 
             : 1800;
 
-        // Fetch recent conversation history (limited to 4 messages for fast generation)
+        // Fetch recent 4 chat messages for context
         const historyRes = await pool.query(
             'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 4',
             [instanceId, from]
         );
         const historyRows = (historyRes.rows || []).reverse();
 
-        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} using ${provider} (${model}) with ${prioritizedKeys.length} key(s) in pool [Max Tokens: ${maxTokens}]`);
+        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} (${instanceCategory}) using ${provider} (${model}) with ${prioritizedKeys.length} key(s) in pool`);
 
         let replyText = null;
+        let successfulKeyMasked = '';
+        let successfulLatency = 0;
 
-        // 3. Loop through keys with Instant Auto-Shift Failover on Free Tier limits
+        // Loop through candidate keys with instant auto-shift failover on rate limits
         for (let i = 0; i < prioritizedKeys.length; i++) {
             const currentKey = prioritizedKeys[i];
             const masked = maskApiKey(currentKey);
@@ -916,24 +1008,57 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
                 if (replyText && replyText.trim()) {
                     const elapsed = Date.now() - startTime;
                     recordKeySuccess(currentKey, elapsed);
-                    console.log(`[AI Auto-Reply] Generated in ${elapsed}ms using key ${masked} (Key ${i+1}/${prioritizedKeys.length})`);
+                    successfulKeyMasked = masked;
+                    successfulLatency = elapsed;
+                    console.log(`[AI Auto-Reply] Success in ${elapsed}ms using key ${masked} (Key ${i+1}/${prioritizedKeys.length})`);
+
+                    // Log successful AI generation into ai_automation_logs DB
+                    await logAiAutomationEvent({
+                        instanceId,
+                        instanceName,
+                        provider: instanceCategory,
+                        remoteJid: from,
+                        userPrompt: incomingText,
+                        aiResponse: replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim(),
+                        modelUsed: model,
+                        apiKeyMasked: masked,
+                        status: 'success',
+                        latencyMs: elapsed,
+                        errorMessage: ''
+                    });
+
                     break;
                 }
             } catch (err) {
                 const isLimit = isRateLimitOrQuotaExhausted(err);
                 recordKeyCooldown(currentKey, err.message);
 
+                // Log failed key attempt in failover history logs
+                await logAiAutomationEvent({
+                    instanceId,
+                    instanceName,
+                    provider: instanceCategory,
+                    remoteJid: from,
+                    userPrompt: incomingText,
+                    aiResponse: '',
+                    modelUsed: model,
+                    apiKeyMasked: masked,
+                    status: isLimit ? 'rate_limited' : 'failed',
+                    latencyMs: 0,
+                    errorMessage: err.message || 'Key failover triggered'
+                });
+
                 if (isLimit) {
-                    console.warn(`[AI Key Pool] Key ${masked} hit Free Tier quota/limit (${err.message}). Auto-shifting immediately to next key (${prioritizedKeys.length - i - 1} remaining in pool)...`);
+                    console.warn(`[AI Key Pool] Key ${masked} hit Free Tier quota/limit (${err.message}). Auto-shifting immediately to next key (${prioritizedKeys.length - i - 1} remaining)...`);
                 } else {
-                    console.error(`[AI Key Pool] Key ${masked} failed: ${err.message}. Trying next available key...`);
+                    console.error(`[AI Key Pool] Key ${masked} failed: ${err.message}. Auto-shifting to next key...`);
                 }
             }
         }
 
         if (!replyText || !replyText.trim()) return null;
 
-        // Clean any prefixes
+        // Strip any unwanted prefixes
         replyText = replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim();
         return replyText;
     } catch (err) {
@@ -3164,6 +3289,89 @@ app.post('/api/ai/pool-status', authenticate, async (req, res) => {
             activeKeyIndex: activeKey ? activeKey.index : 1,
             autoShiftActive: poolStatus.some(k => k.status === 'cooldown')
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /api/ai/logs: Retrieve AI automation logs with filtering by instance, category, status, and search query
+app.get('/api/ai/logs', authenticate, async (req, res) => {
+    try {
+        const { instanceId, provider, status, search, limit = 50, page = 1 } = req.query;
+        const pageNum = Math.max(1, parseInt(page, 10) || 1);
+        const limitNum = Math.max(1, Math.min(200, parseInt(limit, 10) || 50));
+        const offset = (pageNum - 1) * limitNum;
+
+        let whereClauses = [];
+        let params = [];
+
+        // Restrict non-superadmin users to logs from instances they own
+        if (req.user.role !== 'superadmin') {
+            params.push(req.user.id);
+            whereClauses.push(`instance_id IN (SELECT id FROM instances WHERE user_id = $${params.length})`);
+        }
+
+        // Filter by specific instance ID
+        if (instanceId && instanceId !== 'all') {
+            params.push(instanceId);
+            whereClauses.push(`instance_id = $${params.length}`);
+        }
+
+        // Filter by provider category (meta or baileys)
+        if (provider && provider !== 'all') {
+            params.push(provider);
+            whereClauses.push(`provider = $${params.length}`);
+        }
+
+        // Filter by status (success, rate_limited, failed)
+        if (status && status !== 'all') {
+            params.push(status);
+            whereClauses.push(`status = $${params.length}`);
+        }
+
+        // Search in user prompt, AI response, remote JID, or masked key
+        if (search && search.trim()) {
+            params.push(`%${search.trim()}%`);
+            whereClauses.push(`(user_prompt ILIKE $${params.length} OR ai_response ILIKE $${params.length} OR remote_jid ILIKE $${params.length} OR api_key_masked ILIKE $${params.length})`);
+        }
+
+        const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+        // Query total count for pagination
+        const countRes = await pool.query(`SELECT COUNT(*) as total FROM ai_automation_logs ${whereSql}`, params);
+        const total = parseInt(countRes.rows[0]?.total || 0, 10);
+
+        // Fetch paginated log rows sorted newest first
+        const queryParams = [...params, limitNum, offset];
+        const logsRes = await pool.query(
+            `SELECT * FROM ai_automation_logs ${whereSql} ORDER BY created_at DESC LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
+            queryParams
+        );
+
+        res.json({
+            success: true,
+            logs: logsRes.rows,
+            total,
+            page: pageNum,
+            pages: Math.ceil(total / limitNum)
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// DELETE /api/ai/logs: Clear AI automation logs for an instance or user
+app.delete('/api/ai/logs', authenticate, async (req, res) => {
+    try {
+        const { instanceId } = req.query;
+        if (instanceId) {
+            await pool.query('DELETE FROM ai_automation_logs WHERE instance_id = $1', [instanceId]);
+        } else if (req.user.role === 'superadmin') {
+            await pool.query('DELETE FROM ai_automation_logs');
+        } else {
+            await pool.query('DELETE FROM ai_automation_logs WHERE instance_id IN (SELECT id FROM instances WHERE user_id = $1)', [req.user.id]);
+        }
+        res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }

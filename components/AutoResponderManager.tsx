@@ -1,23 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle, ChevronDown, Image as ImageIcon, Sparkles } from 'lucide-react';
+import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle, ChevronDown, Image as ImageIcon, Sparkles, Building2, History } from 'lucide-react';
 import AiAutoReplyModal from './AiAutoReplyModal';
 
+// Baileys WhatsApp Web QR Auto-Responder Manager (Strictly keeps Baileys instances in Baileys category)
 export default function AutoResponderManager({ instances = [], currentUser, apiBase, mediaAssets = [] }: any) {
   const [automations, setAutomations] = useState([]);
   const [localInstances, setLocalInstances] = useState(instances);
-  const [providerFilter, setProviderFilter] = useState<'all' | 'baileys' | 'meta'>('all');
-  const [selectedInstance, setSelectedInstance] = useState(instances[0]?.id || "");
-  const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
+  
+  // Set default provider filter strictly to 'baileys' to keep Meta instances out of Baileys categories
+  const [providerFilter, setProviderFilter] = useState<'baileys' | 'all' | 'meta'>('baileys');
 
   useEffect(() => {
     setLocalInstances(instances);
   }, [instances]);
 
+  // Filter instances so Baileys WhatsApp QR instances are isolated in Baileys category
   const filteredInstances = localInstances.filter((i: any) => {
     if (providerFilter === 'baileys') return i.provider !== 'meta';
     if (providerFilter === 'meta') return i.provider === 'meta';
-    return true;
+    return i.provider !== 'meta';
   });
+
+  const [selectedInstance, setSelectedInstance] = useState(filteredInstances[0]?.id || instances[0]?.id || "");
+  const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
 
   useEffect(() => {
     if (filteredInstances.length > 0 && !filteredInstances.some((i: any) => i.id === selectedInstance)) {
