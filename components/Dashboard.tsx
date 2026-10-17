@@ -1,7 +1,8 @@
 
-import React from 'react';
+import React, { useState } from 'react';
 import { WhatsAppInstance, InstanceStatus, User, UserRole, Permission } from '../types';
-import { QrCode, Trash2, Send, CheckCircle2, AlertCircle, RefreshCw, MessageSquare, Info, Zap, Smartphone, Edit3, Power, Lock, Eye, EyeOff, LayoutPanelLeft, Globe, BadgeCheck, Plus } from 'lucide-react';
+import { QrCode, Trash2, Send, CheckCircle2, AlertCircle, RefreshCw, MessageSquare, Info, Zap, Smartphone, Edit3, Power, Lock, Eye, EyeOff, LayoutPanelLeft, Globe, BadgeCheck, Plus, Bot, Sparkles } from 'lucide-react';
+import AiAutoReplyModal from './AiAutoReplyModal';
 
 interface DashboardProps {
   instances: WhatsAppInstance[];
@@ -25,6 +26,7 @@ const Dashboard: React.FC<DashboardProps> = ({
     instances, onDelete, onRename, onReboot, onSendTest, onSimulateConnect, onUpdateWebhook, onToggleAi, onCreateInstance, isMockMode, 
     currentUser, onToggleVisibility, hiddenModules, setHiddenModules, apiBase 
 }) => {
+  const [selectedAiInstance, setSelectedAiInstance] = useState<WhatsAppInstance | null>(null);
   const isSuper = currentUser.role === UserRole.SUPERADMIN;
   const canManage = currentUser.role === UserRole.SUPERADMIN || 
                     currentUser.role === UserRole.ADMIN || 
@@ -178,13 +180,22 @@ const Dashboard: React.FC<DashboardProps> = ({
           <Edit3 size={18} />
       </button>
   )}
-  <button 
-      onClick={() => onToggleAi && onToggleAi(instance.id, instance.aiEnabled)}
+                            <button 
+                                onClick={() => setSelectedAiInstance(instance)}
                                 disabled={instance.status === InstanceStatus.SUSPENDED}
-                                title={instance.aiEnabled ? "Disable AI Auto-Reply" : "Enable AI Auto-Reply"}
-                                className={`p-2 rounded-lg transition-all disabled:opacity-0 ${instance.aiEnabled ? 'text-purple-500 bg-purple-500/10 hover:bg-purple-500/20' : 'text-gray-500 hover:text-purple-400 hover:bg-purple-400/10'}`}
+                                title={instance.aiEnabled ? `AI Auto-Reply Bot Active (${instance.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini'}) - Click to configure` : "Configure & Enable AI Auto-Reply Bot"}
+                                className={`p-2 rounded-lg transition-all relative disabled:opacity-0 ${
+                                    instance.aiEnabled 
+                                        ? 'text-purple-300 bg-gradient-to-r from-purple-500/20 to-indigo-500/20 border border-purple-500/40 shadow-sm shadow-purple-500/20 hover:brightness-110 ring-1 ring-purple-500/30' 
+                                        : 'text-gray-400 hover:text-purple-300 hover:bg-purple-500/10 border border-transparent hover:border-purple-500/30'
+                                }`}
                             >
-                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+                                </svg>
+                                {instance.aiEnabled && (
+                                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-purple-400 ring-2 ring-[#111b21] animate-pulse" />
+                                )}
                             </button>
 
                             <button 
@@ -215,9 +226,19 @@ const Dashboard: React.FC<DashboardProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex items-center flex-wrap gap-2.5">
                 <StatusBadge status={instance.status} />
-                <span className="text-[10px] text-gray-500 font-bold">
+                {instance.aiEnabled && (
+                  <button
+                    onClick={() => setSelectedAiInstance(instance)}
+                    className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1 hover:bg-purple-500/25 transition-all"
+                    title="AI Auto-Reply Bot is Active - Click to configure"
+                  >
+                    <Sparkles size={10} className="text-purple-400 animate-pulse" />
+                    <span>AI Bot ({instance.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini'})</span>
+                  </button>
+                )}
+                <span className="text-[10px] text-gray-500 font-bold ml-auto">
                    Owner: {instance.userId}
                 </span>
               </div>
@@ -280,6 +301,23 @@ const Dashboard: React.FC<DashboardProps> = ({
           </div>
         ))}
       </div>
+
+      {/* AI Auto-Reply Configuration Modal */}
+      {selectedAiInstance && (
+        <AiAutoReplyModal
+          instance={selectedAiInstance}
+          currentUser={currentUser}
+          apiBase={apiBase}
+          isOpen={!!selectedAiInstance}
+          onClose={() => setSelectedAiInstance(null)}
+          onSaved={(updated) => {
+            if (onToggleAi && updated.aiEnabled !== undefined && updated.aiEnabled !== selectedAiInstance.aiEnabled) {
+              onToggleAi(selectedAiInstance.id, !updated.aiEnabled);
+            }
+            setSelectedAiInstance(null);
+          }}
+        />
+      )}
     </div>
   );
 };

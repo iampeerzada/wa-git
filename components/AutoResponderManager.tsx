@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle } from 'lucide-react';
-
-import { ChevronDown, Image as ImageIcon } from 'lucide-react';
+import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle, ChevronDown, Image as ImageIcon, Sparkles } from 'lucide-react';
+import AiAutoReplyModal from './AiAutoReplyModal';
 
 export default function AutoResponderManager({ instances, currentUser, apiBase, mediaAssets = [] }: any) {
   const [automations, setAutomations] = useState([]);
   const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider !== "meta")?.id || "");
+  const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
 
   useEffect(() => {
     if (instances.length > 0 && !selectedInstance) {
@@ -235,6 +235,37 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
         </div>
       </div>
 
+      {/* AI Smart Auto-Responder Banner (Autoresponder.io style) */}
+      <div className="bg-gradient-to-r from-purple-950/30 via-[#182229] to-purple-950/20 border border-purple-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl bg-purple-500/15 border border-purple-500/30 text-purple-400 shrink-0 mt-0.5">
+            <Sparkles size={20} className="animate-pulse" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="font-bold text-white text-sm">Smart AI Conversational Auto-Responder</h3>
+              <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                Autoresponder.io Style
+              </span>
+            </div>
+            <p className="text-xs text-gray-300 mt-1 leading-relaxed">
+              Use Gemini or ChatGPT with your own API key & custom prompt to automatically chat with customers in the direct chat box when no keyword rule matches.
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const inst = instances.find((i: any) => i.id === selectedInstance) || instances[0];
+            if (inst) setShowAiModalFor(inst);
+          }}
+          className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/30 shrink-0 cursor-pointer"
+        >
+          <Bot size={15} />
+          <span>Configure AI Persona</span>
+        </button>
+      </div>
+
       {isEditing && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-[#111b21] border border-gray-800 rounded-2xl w-full max-w-lg my-auto max-h-[92vh] flex flex-col shadow-2xl">
@@ -371,6 +402,17 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
             <AutomationNode key={root.id} node={root} />
           ))}
         </div>
+      )}
+
+      {showAiModalFor && (
+        <AiAutoReplyModal
+          instance={showAiModalFor}
+          currentUser={currentUser}
+          apiBase={apiBase}
+          isOpen={!!showAiModalFor}
+          onClose={() => setShowAiModalFor(null)}
+          onSaved={() => setShowAiModalFor(null)}
+        />
       )}
     </div>
   );

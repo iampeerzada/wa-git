@@ -4,11 +4,12 @@ import {
   X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye,
   Mic, Square, ExternalLink, Clock, AlertTriangle, FileText, Image, Film, Music, 
   Download, Bell, BellOff, Info, RefreshCw, Volume2, ShieldCheck, HelpCircle, Sparkles,
-  CheckCircle2, ClipboardList, ChevronDown, ChevronUp, Folder
+  CheckCircle2, ClipboardList, ChevronDown, ChevronUp, Folder, Bot
 } from 'lucide-react';
 import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel, MediaAsset, normalizePhoneNumber } from '../types';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
+import AiAutoReplyModal from './AiAutoReplyModal';
 
 const playChimeSound = () => {
   try {
@@ -302,6 +303,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [lightboxMedia, setLightboxMedia] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
   const [expandedFlowRawMap, setExpandedFlowRawMap] = useState<Record<string, boolean>>({});
   const [copiedFlowId, setCopiedFlowId] = useState<string | null>(null);
+  const [showChatAiModal, setShowChatAiModal] = useState(false);
   
   // Voice Recording State
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
@@ -1566,6 +1568,27 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
               {/* Quick Action Buttons */}
               <div className="flex items-center gap-1.5 md:gap-2 text-gray-400 shrink-0">
+                {/* AI Auto-Reply Bot Indicator & Config */}
+                {instances.find(i => i.id === selectedInstanceId) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowChatAiModal(true)}
+                    className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      instances.find(i => i.id === selectedInstanceId)?.aiEnabled
+                        ? 'bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 shadow-sm'
+                        : 'bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-purple-300'
+                    }`}
+                    title={instances.find(i => i.id === selectedInstanceId)?.aiEnabled ? `AI Auto-Reply Bot is Active (${instances.find(i => i.id === selectedInstanceId)?.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini'}) - Click to configure` : "Configure AI Auto-Reply Bot"}
+                  >
+                    {instances.find(i => i.id === selectedInstanceId)?.aiEnabled ? (
+                      <Sparkles size={13} className="text-purple-400 animate-pulse" />
+                    ) : (
+                      <Bot size={13} />
+                    )}
+                    <span>{instances.find(i => i.id === selectedInstanceId)?.aiEnabled ? `AI: ${instances.find(i => i.id === selectedInstanceId)?.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini'}` : 'AI Bot'}</span>
+                  </button>
+                )}
+
                 {/* Send Template Shortcut */}
                 <button
                   type="button"
@@ -2794,6 +2817,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             </div>
           </div>
         </div>
+      )}
+
+      {/* AI Auto-Reply Configuration Modal */}
+      {showChatAiModal && instances.find(i => i.id === selectedInstanceId) && (
+        <AiAutoReplyModal
+          instance={instances.find(i => i.id === selectedInstanceId)!}
+          currentUser={currentUser}
+          apiBase={apiBase}
+          isOpen={showChatAiModal}
+          onClose={() => setShowChatAiModal(false)}
+          onSaved={() => setShowChatAiModal(false)}
+        />
       )}
     </div>
   );

@@ -71,6 +71,11 @@ export interface User {
   createdAt: string;
   subscription: Subscription;
   permissions?: Permission[]; // New: Granular permissions
+  geminiApiKey?: string;
+  openaiApiKey?: string;
+  defaultAiPrompt?: string;
+  defaultAiProvider?: 'gemini' | 'openai';
+  defaultAiModel?: string;
 }
 
 export enum InstanceStatus {
@@ -95,6 +100,12 @@ export interface WhatsAppInstance {
   isVisible?: boolean; // New: For the hide function
   webhookUrl?: string; // New: For incoming webhooks
   aiEnabled?: boolean;
+  aiProvider?: 'gemini' | 'openai';
+  aiApiKey?: string;
+  aiModel?: string;
+  aiSystemPrompt?: string;
+  aiTemperature?: number;
+  aiAutoReplyGroups?: boolean;
   provider?: string;
   metaAccessToken?: string;
   metaPhoneNumberId?: string;

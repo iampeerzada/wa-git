@@ -211,9 +211,31 @@ pool.connect(async (err, client, release) => {
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS meta_waba_id VARCHAR(50)",
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS instance_key VARCHAR(100)",
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS qr_code TEXT",
-            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN DEFAULT FALSE"
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_provider VARCHAR(50) DEFAULT 'gemini'",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_api_key TEXT",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_model VARCHAR(100) DEFAULT 'gemini-3.8-flash'",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_system_prompt TEXT",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_temperature NUMERIC DEFAULT 0.7",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_auto_reply_groups BOOLEAN DEFAULT FALSE"
         ];
         for (const colQuery of instanceColQueries) {
+            try {
+                await client.query(colQuery);
+            } catch (e) {
+                // Column already exists or handled
+            }
+        }
+
+        // Verify users table AI columns
+        const userColQueries = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS gemini_api_key TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS openai_api_key TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS default_ai_prompt TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS default_ai_provider VARCHAR(50) DEFAULT 'gemini'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS default_ai_model VARCHAR(100) DEFAULT 'gemini-3.8-flash'"
+        ];
+        for (const colQuery of userColQueries) {
             try {
                 await client.query(colQuery);
             } catch (e) {
@@ -556,6 +578,165 @@ const authenticate = async (req, res, next) => {
     next();
 };
 
+// =========================================================================
+// AI AUTO-REPLY SMART CHAT ENGINE (Autoresponder.io style)
+// -------------------------------------------------------------------------
+// Supports:
+// 1. Google Gemini (Gemini 3.8 Flash, Gemini Flash Latest, Gemini 3.1 Flash Lite)
+// 2. OpenAI ChatGPT (GPT-4o Mini, GPT-4o, GPT-3.5 Turbo)
+// 3. Instance-specific API keys & custom system prompts
+// 4. Account-level fallback API keys & default prompts from Profile
+// 5. Multi-turn conversation context memory (from chat_messages table)
+// 6. Direct WhatsApp auto-reply with real-time UI chat synchronization
+// =========================================================================
+async function generateAiChatReply({ instanceId, from, incomingText }) {
+    if (!incomingText || typeof incomingText !== 'string' || !incomingText.trim()) {
+        return null;
+    }
+    try {
+        const instRes = await pool.query(`
+            SELECT i.id, i.user_id, i.ai_enabled, i.ai_provider, i.ai_api_key, i.ai_model, 
+                   i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups,
+                   u.gemini_api_key, u.openai_api_key, u.default_ai_prompt, 
+                   u.default_ai_provider, u.default_ai_model
+            FROM instances i
+            LEFT JOIN users u ON i.user_id = u.id
+            WHERE i.id = $1
+            LIMIT 1
+        `, [instanceId]);
+
+        if (instRes.rows.length === 0) return null;
+        const inst = instRes.rows[0];
+
+        if (!inst.ai_enabled) return null;
+
+        // Group chat check
+        if (from && from.endsWith('@g.us') && !inst.ai_auto_reply_groups) {
+            return null;
+        }
+
+        const provider = (inst.ai_provider || inst.default_ai_provider || 'gemini').toLowerCase();
+        let apiKey = '';
+        if (provider === 'openai') {
+            apiKey = inst.ai_api_key || inst.openai_api_key || process.env.OPENAI_API_KEY || '';
+        } else {
+            apiKey = inst.ai_api_key || inst.gemini_api_key || process.env.GEMINI_API_KEY || '';
+        }
+
+        if (!apiKey || !apiKey.trim()) {
+            console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured in instance or user profile.`);
+            return null;
+        }
+        apiKey = apiKey.trim();
+
+        let model = inst.ai_model || inst.default_ai_model;
+        if (!model) {
+            model = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
+        }
+
+        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 60-80 words) and suitable for direct WhatsApp chat. Never say you are an AI language model unless directly asked. Do not include prefixes like 'Assistant:' or 'Bot:'.";
+        const systemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
+                             (inst.default_ai_prompt && inst.default_ai_prompt.trim()) || 
+                             defaultPrompt;
+
+        const temperature = inst.ai_temperature !== null && inst.ai_temperature !== undefined 
+            ? parseFloat(inst.ai_temperature) 
+            : 0.7;
+
+        // Fetch recent conversation history between this instance and this remote JID
+        const historyRes = await pool.query(
+            'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 8',
+            [instanceId, from]
+        );
+        const historyRows = (historyRes.rows || []).reverse();
+
+        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} using ${provider} (${model})`);
+
+        let replyText = null;
+
+        if (provider === 'openai') {
+            const messages = [{ role: 'system', content: systemPrompt }];
+            for (const row of historyRows) {
+                if (row.text) {
+                    messages.push({
+                        role: row.from_me ? 'assistant' : 'user',
+                        content: row.text
+                    });
+                }
+            }
+            const lastRow = historyRows[historyRows.length - 1];
+            if (!lastRow || lastRow.from_me || lastRow.text !== incomingText) {
+                messages.push({ role: 'user', content: incomingText });
+            }
+
+            const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: messages,
+                    temperature: temperature,
+                    max_tokens: 300
+                })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                replyText = data.choices?.[0]?.message?.content;
+            } else {
+                const errJson = await res.json().catch(() => ({}));
+                console.error('[OpenAI API Error]', errJson.error?.message || res.statusText);
+            }
+        } else {
+            // Google Gemini
+            try {
+                const { GoogleGenAI } = require("@google/genai");
+                const ai = new GoogleGenAI({ apiKey });
+                const historySummary = historyRows.map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
+                const fullPrompt = `${systemPrompt}\n\nRecent conversation history:\n${historySummary}\nCustomer: ${incomingText}\nAssistant:`;
+
+                const resp = await ai.models.generateContent({
+                    model: model || 'gemini-3.8-flash',
+                    contents: fullPrompt
+                });
+                replyText = resp.text;
+            } catch (sdkErr) {
+                console.warn('[Gemini SDK failed, attempting direct REST fallback]', sdkErr.message);
+                const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || 'gemini-3.8-flash')}:generateContent?key=${apiKey}`;
+                const restRes = await fetch(restUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [{ text: `${systemPrompt}\n\nCustomer: ${incomingText}\nAssistant:` }]
+                        }],
+                        generationConfig: { temperature: temperature }
+                    })
+                });
+                if (restRes.ok) {
+                    const restData = await restRes.json();
+                    replyText = restData.candidates?.[0]?.content?.parts?.[0]?.text;
+                } else {
+                    const err = await restRes.json().catch(() => ({}));
+                    console.error('[Gemini REST Error]', err.error?.message || restRes.statusText);
+                }
+            }
+        }
+
+        if (!replyText || !replyText.trim()) return null;
+
+        // Clean any prefixes
+        replyText = replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim();
+        return replyText;
+    } catch (err) {
+        console.error('[AI Auto-Reply Error]', err.message);
+        return null;
+    }
+}
+
 // --- WHATSAPP ENGINE ---
 const offlineAlerts = new Map();
 
@@ -889,45 +1070,19 @@ async function connectToWhatsApp(instanceId) {
                     console.error('[Webhook Fetch Error]', webhookErr.message);
                 }
 
-                // AI Auto-Responder Logic
+                // AI Auto-Responder Logic (Autoresponder.io style)
                 if (!fromMe && text) {
                     try {
-                        const instanceCheck = await pool.query('SELECT ai_enabled FROM instances WHERE id = $1', [instanceId]);
-                        if (instanceCheck.rows[0] && instanceCheck.rows[0].ai_enabled && process.env.GEMINI_API_KEY) {
-                            console.log('[AI] Generating reply for', from);
-                            const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-                            
-                            // Get chat history for context
-                            const historyRes = await pool.query(
-                                'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 10',
-                                [instanceId, from]
-                            );
-                            
-                            const chatHistory = historyRes.rows.reverse().map(row => 
-                                (row.from_me ? "Assistant: " : "User: ") + (row.text || '')
-                            ).join('\n');
-                            
-                            const prompt = `You are a helpful WhatsApp assistant. Reply to the user's latest message based on this recent conversation history:\n\n${chatHistory}\n\nReply nicely, concisely and accurately. Do not include prefix like "Assistant:".`;
-                            let response;
-                        try {
-                            response = await ai.models.generateContent({
-                                model: 'gemini-1.5-flash',
-                                contents: prompt
-                            });
-                        } catch (aiError) {
-                            console.error('[Meta AI Generation Error]', aiError.message);
-                            response = { text: "System: AI is currently unavailable or API key is invalid" };
-                        }
-                            
-                            if (response.text) {
-                                const sentMsg = await sock.sendMessage(from, { text: response.text });
-                                if (sentMsg && sentMsg.key && sentMsg.message) {
-                                    saveMessage(sentMsg.key, sentMsg.message);
-                                }
+                        const aiReply = await generateAiChatReply({ instanceId, from, incomingText: text });
+                        if (aiReply) {
+                            console.log(`[Baileys AI Auto-Reply] Successfully generated reply for ${from}: ${aiReply.substring(0, 50)}...`);
+                            const sentMsg = await sock.sendMessage(from, { text: aiReply });
+                            if (sentMsg && sentMsg.key && sentMsg.message) {
+                                saveMessage(sentMsg.key, sentMsg.message);
                             }
                         }
                     } catch (aiErr) {
-                        console.error('[AI Auto-Responder Error]', aiErr.message);
+                        console.error('[Baileys AI Auto-Responder Error]', aiErr.message);
                     }
                 }
             } catch (dbErr) {
@@ -1564,68 +1719,47 @@ app.post('/api/meta/webhook', async (req, res) => {
                         }
                     }
 
-                    if (instance.ai_enabled && process.env.GEMINI_API_KEY && text) {
-                        console.log('[Meta AI] Generating reply for', from);
-                        const { GoogleGenAI } = require("@google/genai");
-                        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-                        
-                        const historyRes = await pool.query(
-                            'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 10',
-                            [instanceId, from]
-                        );
-                        
-                        const chatHistory = historyRes.rows.reverse().map(row => 
-                            (row.from_me ? "Assistant: " : "User: ") + (row.text || '')
-                        ).join('\n');
-                        
-                        const prompt = `You are a helpful WhatsApp assistant. Reply to the user's latest message based on this recent conversation history:\n\n${chatHistory}\n\nReply nicely, concisely and accurately. Do not include prefix like "Assistant:".`;
-
-                        let response;
-                            try {
-                                response = await ai.models.generateContent({
-                                    model: 'gemini-1.5-flash',
-                                    contents: prompt
-                                });
-                            } catch (aiError) {
-                                console.error('[Baileys AI Generation Error]', aiError.message);
-                                response = { text: "System: AI is currently unavailable or API key is invalid" };
+                    // AI Auto-Responder Logic for Meta WABA (Autoresponder.io style)
+                    if (text) {
+                        try {
+                            const aiReply = await generateAiChatReply({ instanceId, from, incomingText: text });
+                            if (aiReply) {
+                                console.log(`[Meta AI Auto-Reply] Successfully sending reply to ${from}: ${aiReply.substring(0, 50)}...`);
+                                const toNum = from.replace(/[^0-9]/g, '');
+                                fetch(`https://graph.facebook.com/v26.0/${phoneNumberId}/messages`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Authorization': `Bearer ${instance.meta_access_token}`,
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        messaging_product: "whatsapp",
+                                        recipient_type: "individual",
+                                        to: toNum,
+                                        type: "text",
+                                        text: { body: aiReply }
+                                    })
+                                }).then(res => res.json()).then(async metaJson => {
+                                    if (metaJson.messages && metaJson.messages[0]) {
+                                        const msgId = metaJson.messages[0].id;
+                                        await pool.query(
+                                            'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
+                                            [msgId, instanceId, from, true, aiReply, new Date(), 'sent']
+                                        );
+                                        io.emit('new_message', {
+                                            id: msgId,
+                                            instanceId,
+                                            remoteJid: from,
+                                            fromMe: true,
+                                            text: aiReply,
+                                            timestamp: new Date().toISOString(),
+                                            status: 'sent'
+                                        });
+                                    }
+                                }).catch(e => console.error('[Meta AI Reply Send Error]', e.message));
                             }
-                        
-                        if (response.text) {
-                            const aiText = response.text;
-                            // Clean the 'to' number (remove non-digits, optional +)
-                            const toNum = from.replace(/[^0-9]/g, '');
-                            fetch(`https://graph.facebook.com/v26.0/${phoneNumberId}/messages`, {
-                                method: 'POST',
-                                headers: {
-                                    'Authorization': `Bearer ${instance.meta_access_token}`,
-                                    'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify({
-                                    messaging_product: "whatsapp",
-                                    recipient_type: "individual",
-                                    to: toNum,
-                                    type: "text",
-                                    text: { body: aiText }
-                                })
-                            }).then(res => res.json()).then(async metaJson => {
-                                if (metaJson.messages && metaJson.messages[0]) {
-                                    const msgId = metaJson.messages[0].id;
-                                    await pool.query(
-                                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
-                                        [msgId, instanceId, from, true, aiText, new Date(), 'sent']
-                                    );
-                                    io.emit('new_message', {
-                                        id: msgId,
-                                        instanceId,
-                                        remoteJid: from,
-                                        fromMe: true,
-                                        text: aiText,
-                                        timestamp: new Date().toISOString(),
-                                        status: 'sent'
-                                    });
-                                }
-                            }).catch(e => console.error('[Meta AI Reply Send Error]', e.message));
+                        } catch (metaAiErr) {
+                            console.error('[Meta AI Auto-Responder Error]', metaAiErr.message);
                         }
                     }
                 }
@@ -2383,7 +2517,13 @@ app.get('/api/instances', authenticate, async (req, res) => {
                 phoneNumber: live ? (live.phone || inst.phone_number) : inst.phone_number,
                 isVisible: inst.is_visible !== false, // Handle DB field
                 webhookUrl: inst.webhook_url,
-                aiEnabled: inst.ai_enabled,
+                aiEnabled: !!inst.ai_enabled,
+                aiProvider: inst.ai_provider || 'gemini',
+                aiApiKey: inst.ai_api_key || '',
+                aiModel: inst.ai_model || (inst.ai_provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash'),
+                aiSystemPrompt: inst.ai_system_prompt || '',
+                aiTemperature: inst.ai_temperature !== null && inst.ai_temperature !== undefined ? Number(inst.ai_temperature) : 0.7,
+                aiAutoReplyGroups: !!inst.ai_auto_reply_groups,
                 metaPhoneNumberId: inst.meta_phone_number_id,
                 metaWabaId: inst.meta_waba_id,
                 metaAccessToken: inst.meta_access_token
@@ -2535,6 +2675,95 @@ app.patch('/api/instance/:id/visibility', authenticate, async (req, res) => {
 });
 
 
+// Get Instance AI Configuration
+app.get('/api/instance/:id/ai-config', authenticate, async (req, res) => {
+    try {
+        const check = await pool.query(`
+            SELECT i.id, i.user_id, i.ai_enabled, i.ai_provider, i.ai_api_key, i.ai_model, 
+                   i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups,
+                   u.gemini_api_key, u.openai_api_key, u.default_ai_prompt
+            FROM instances i
+            LEFT JOIN users u ON i.user_id = u.id
+            WHERE i.id = $1
+        `, [req.params.id]);
+
+        if (check.rows.length === 0) {
+            return res.status(404).json({ error: 'Instance not found' });
+        }
+        const row = check.rows[0];
+        if (req.user.role !== 'superadmin' && row.user_id !== req.user.id) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        res.json({
+            aiEnabled: !!row.ai_enabled,
+            aiProvider: row.ai_provider || 'gemini',
+            aiApiKey: row.ai_api_key || '',
+            aiModel: row.ai_model || (row.ai_provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash'),
+            aiSystemPrompt: row.ai_system_prompt || '',
+            aiTemperature: row.ai_temperature !== null && row.ai_temperature !== undefined ? Number(row.ai_temperature) : 0.7,
+            aiAutoReplyGroups: !!row.ai_auto_reply_groups,
+            hasUserGeminiKey: !!row.gemini_api_key,
+            hasUserOpenAiKey: !!row.openai_api_key,
+            defaultAiPrompt: row.default_ai_prompt || ''
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Update Instance AI Configuration
+app.put('/api/instance/:id/ai-config', authenticate, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') {
+            const check = await pool.query('SELECT user_id FROM instances WHERE id = $1', [req.params.id]);
+            if (check.rows.length === 0 || check.rows[0].user_id !== req.user.id) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+        }
+
+        const {
+            aiEnabled,
+            aiProvider = 'gemini',
+            aiApiKey = '',
+            aiModel,
+            aiSystemPrompt = '',
+            aiTemperature = 0.7,
+            aiAutoReplyGroups = false
+        } = req.body;
+
+        const effectiveModel = aiModel || (aiProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash');
+
+        await pool.query(`
+            UPDATE instances SET 
+                ai_enabled = $1,
+                ai_provider = $2,
+                ai_api_key = $3,
+                ai_model = $4,
+                ai_system_prompt = $5,
+                ai_temperature = $6,
+                ai_auto_reply_groups = $7
+            WHERE id = $8
+        `, [
+            !!aiEnabled,
+            aiProvider,
+            aiApiKey,
+            effectiveModel,
+            aiSystemPrompt,
+            aiTemperature,
+            !!aiAutoReplyGroups,
+            req.params.id
+        ]);
+
+        io.emit('instances_updated', { instanceId: req.params.id, action: 'ai_config' });
+        res.json({ success: true });
+    } catch (e) {
+        console.error("AI CONFIG SAVE ERROR:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Quick toggle AI for instance
 app.patch('/api/instance/:id/ai', authenticate, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') {
@@ -2548,6 +2777,136 @@ app.patch('/api/instance/:id/ai', authenticate, async (req, res) => {
         res.json({ success: true });
     } catch (e) {
         console.error("SYNC ERROR:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Interactive AI Live Tester endpoint
+app.post('/api/ai/test', authenticate, async (req, res) => {
+    try {
+        const { provider = 'gemini', apiKey, model, systemPrompt, testMessage } = req.body;
+        let resolvedKey = apiKey ? apiKey.trim() : '';
+
+        // If not provided in body, check user profile settings
+        if (!resolvedKey) {
+            try {
+                const userRes = await pool.query('SELECT gemini_api_key, openai_api_key FROM users WHERE id = $1', [req.user.id]);
+                if (userRes.rows.length > 0) {
+                    resolvedKey = provider === 'openai' 
+                        ? (userRes.rows[0].openai_api_key || '')
+                        : (userRes.rows[0].gemini_api_key || '');
+                }
+            } catch (dbErr) {
+                // If DB is offline, fall through to check resolvedKey
+            }
+        }
+
+        if (!resolvedKey) {
+            return res.status(400).json({ error: `Please enter an API Key for ${provider === 'openai' ? 'OpenAI ChatGPT' : 'Google Gemini'} or save it in your Profile.` });
+        }
+
+        const userPrompt = testMessage || 'Hi, can you introduce yourself and tell me what you do?';
+        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 60-80 words) and suitable for direct WhatsApp chat.";
+        const sysPrompt = (systemPrompt && systemPrompt.trim()) || defaultPrompt;
+
+        let reply = '';
+        if (provider === 'openai') {
+            const chosenModel = model || 'gpt-4o-mini';
+            const openAiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${resolvedKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: chosenModel,
+                    messages: [
+                        { role: 'system', content: sysPrompt },
+                        { role: 'user', content: userPrompt }
+                    ],
+                    max_tokens: 250
+                })
+            });
+            const data = await openAiRes.json();
+            if (!openAiRes.ok) {
+                return res.status(400).json({ error: data.error?.message || 'Failed to authenticate with OpenAI API.' });
+            }
+            reply = data.choices?.[0]?.message?.content || 'No response returned from OpenAI.';
+        } else {
+            // Google Gemini
+            const chosenModel = model || 'gemini-3.8-flash';
+            try {
+                const { GoogleGenAI } = require("@google/genai");
+                const ai = new GoogleGenAI({ apiKey: resolvedKey });
+                const fullPrompt = `${sysPrompt}\n\nCustomer: ${userPrompt}\nAssistant:`;
+                const response = await ai.models.generateContent({
+                    model: chosenModel,
+                    contents: fullPrompt
+                });
+                reply = response.text;
+            } catch (sdkErr) {
+                const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(chosenModel)}:generateContent?key=${resolvedKey}`;
+                const restRes = await fetch(restUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: `${sysPrompt}\n\nCustomer: ${userPrompt}\nAssistant:` }] }]
+                    })
+                });
+                const restData = await restRes.json();
+                if (!restRes.ok) {
+                    return res.status(400).json({ error: restData.error?.message || 'Failed to authenticate with Google Gemini API.' });
+                }
+                reply = restData.candidates?.[0]?.content?.parts?.[0]?.text;
+            }
+        }
+
+        reply = (reply || '').replace(/^(assistant|bot|ai):\s*/i, '').trim();
+        res.json({ success: true, reply });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// User Account AI Settings (Profile defaults)
+app.get('/api/user/ai-settings', authenticate, async (req, res) => {
+    try {
+        const userRes = await pool.query('SELECT gemini_api_key, openai_api_key, default_ai_prompt, default_ai_provider, default_ai_model FROM users WHERE id = $1', [req.user.id]);
+        if (userRes.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        const u = userRes.rows[0];
+        res.json({
+            geminiApiKey: u.gemini_api_key || '',
+            openaiApiKey: u.openai_api_key || '',
+            defaultAiPrompt: u.default_ai_prompt || '',
+            defaultAiProvider: u.default_ai_provider || 'gemini',
+            defaultAiModel: u.default_ai_model || 'gemini-3.8-flash'
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/user/ai-settings', authenticate, async (req, res) => {
+    try {
+        const { geminiApiKey, openaiApiKey, defaultAiPrompt, defaultAiProvider = 'gemini', defaultAiModel = 'gemini-3.8-flash' } = req.body;
+        await pool.query(`
+            UPDATE users SET 
+                gemini_api_key = $1,
+                openai_api_key = $2,
+                default_ai_prompt = $3,
+                default_ai_provider = $4,
+                default_ai_model = $5
+            WHERE id = $6
+        `, [
+            geminiApiKey !== undefined ? geminiApiKey : null,
+            openaiApiKey !== undefined ? openaiApiKey : null,
+            defaultAiPrompt !== undefined ? defaultAiPrompt : null,
+            defaultAiProvider,
+            defaultAiModel,
+            req.user.id
+        ]);
+        res.json({ success: true });
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });

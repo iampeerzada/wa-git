@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { User, Plan, WhatsAppInstance, InstanceStatus } from '../types';
 import { 
   Shield, CreditCard, Activity, Calendar, Key, Smartphone, Copy, Check, 
-  Eye, EyeOff, User as UserIcon, Mail, Phone, Lock, Save, AlertCircle, CheckCircle2 
+  Eye, EyeOff, User as UserIcon, Mail, Phone, Lock, Save, AlertCircle, CheckCircle2,
+  Bot, Sparkles, ExternalLink, Send, RefreshCw, Sliders, MessageSquare
 } from 'lucide-react';
 
 interface ProfileViewProps {
@@ -38,6 +39,122 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
   const [passwordMsg, setPasswordMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // AI Auto-Reply Global Settings
+  const [geminiApiKey, setGeminiApiKey] = useState(currentUser.geminiApiKey || '');
+  const [openaiApiKey, setOpenaiApiKey] = useState(currentUser.openaiApiKey || '');
+  const [defaultAiPrompt, setDefaultAiPrompt] = useState(currentUser.defaultAiPrompt || '');
+  const [defaultAiProvider, setDefaultAiProvider] = useState<'gemini' | 'openai'>((currentUser.defaultAiProvider as any) || 'gemini');
+  const [defaultAiModel, setDefaultAiModel] = useState(currentUser.defaultAiModel || 'gemini-3.8-flash');
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
+  const [isSavingAi, setIsSavingAi] = useState(false);
+  const [aiMsg, setAiMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Profile Live Tester
+  const [profileTestInput, setProfileTestInput] = useState('Hi, what are your business hours and how do I order?');
+  const [isTestingProfileAi, setIsTestingProfileAi] = useState(false);
+  const [profileTestReply, setProfileTestReply] = useState<string | null>(null);
+  const [profileTestError, setProfileTestError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchAiSettings = async () => {
+      try {
+        const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+        const res = await fetch(`${apiBase}/api/user/ai-settings`, {
+          headers: {
+            'X-User-ID': currentUser.id,
+            'X-API-Key': currentUser.apiKey,
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setGeminiApiKey(data.geminiApiKey || '');
+          setOpenaiApiKey(data.openaiApiKey || '');
+          setDefaultAiPrompt(data.defaultAiPrompt || '');
+          setDefaultAiProvider(data.defaultAiProvider || 'gemini');
+          setDefaultAiModel(data.defaultAiModel || 'gemini-3.8-flash');
+        }
+      } catch (e) {
+        console.error('Failed to load user AI settings', e);
+      }
+    };
+    fetchAiSettings();
+  }, [apiBase, currentUser.id, currentUser.apiKey]);
+
+  const handleSaveAiSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingAi(true);
+    setAiMsg(null);
+    try {
+      const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+      const res = await fetch(`${apiBase}/api/user/ai-settings`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          geminiApiKey,
+          openaiApiKey,
+          defaultAiPrompt,
+          defaultAiProvider,
+          defaultAiModel
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save AI settings');
+      if (onUpdateUser) {
+        onUpdateUser({
+          geminiApiKey,
+          openaiApiKey,
+          defaultAiPrompt,
+          defaultAiProvider,
+          defaultAiModel
+        });
+      }
+      setAiMsg({ type: 'success', text: 'AI Auto-Reply settings saved successfully! All instances without their own keys will use these.' });
+      setTimeout(() => setAiMsg(null), 4000);
+    } catch (err: any) {
+      setAiMsg({ type: 'error', text: err.message || 'Error saving AI settings' });
+    } finally {
+      setIsSavingAi(false);
+    }
+  };
+
+  const handleTestProfileAi = async () => {
+    setIsTestingProfileAi(true);
+    setProfileTestReply(null);
+    setProfileTestError(null);
+    try {
+      const activeKey = defaultAiProvider === 'openai' ? openaiApiKey : geminiApiKey;
+      const res = await fetch(`${apiBase}/api/ai/test`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          provider: defaultAiProvider,
+          apiKey: activeKey,
+          model: defaultAiModel,
+          systemPrompt: defaultAiPrompt,
+          testMessage: profileTestInput
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to test AI response');
+      setProfileTestReply(data.reply);
+    } catch (err: any) {
+      setProfileTestError(err.message || 'Error executing AI test');
+    } finally {
+      setIsTestingProfileAi(false);
+    }
+  };
 
   const currentPlan = plans.find(p => p.id === currentUser.subscription?.planId);
 
@@ -364,9 +481,228 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
       </div>
 
+      {/* AI Auto-Reply Bot Settings & Global API Keys */}
+      <div className="bg-[#111b21] rounded-xl sm:rounded-2xl border border-gray-800 p-4 sm:p-5 shadow-lg space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-800 pb-3">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-purple-500/15 border border-purple-500/30 text-purple-400">
+              <Bot size={20} />
+            </div>
+            <div>
+              <h3 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                <span>AI Auto-Reply Bot Persona & API Keys</span>
+                <Sparkles size={14} className="text-purple-400 animate-pulse" />
+              </h3>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Configure your own Gemini or ChatGPT keys to auto-respond to customer chats like Autoresponder.io.
+              </p>
+            </div>
+          </div>
+          <span className="text-[10px] font-mono text-purple-300 bg-purple-500/10 px-2.5 py-1 rounded-lg border border-purple-500/30 self-start sm:self-auto">
+            Account Defaults
+          </span>
+        </div>
 
+        <form onSubmit={handleSaveAiSettings} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            
+            {/* Google Gemini Card */}
+            <div className="bg-[#182229] p-3.5 rounded-xl border border-gray-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-purple-400" />
+                  Google Gemini API Key
+                </span>
+                <a 
+                  href="https://aistudio.google.com/app/apikey" 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="text-[10px] text-[#25D366] hover:underline flex items-center gap-0.5"
+                >
+                  Get Free Key <ExternalLink size={10} />
+                </a>
+              </div>
+              <div className="relative flex items-center">
+                <input
+                  type={showGeminiKey ? 'text' : 'password'}
+                  value={geminiApiKey}
+                  onChange={e => setGeminiApiKey(e.target.value)}
+                  placeholder="AIzaSy..."
+                  className="w-full bg-[#111b21] border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono placeholder-gray-500 focus:border-purple-400 focus:outline-none pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGeminiKey(!showGeminiKey)}
+                  className="absolute right-2.5 text-gray-400 hover:text-white"
+                >
+                  {showGeminiKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-500">
+                Recommended models: <span className="text-purple-300">gemini-3.8-flash</span>, <span className="text-purple-300">gemini-flash-latest</span>
+              </p>
+            </div>
 
-      {/* WhatsApp Instances & API Keys Section */}
+            {/* OpenAI ChatGPT Card */}
+            <div className="bg-[#182229] p-3.5 rounded-xl border border-gray-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  OpenAI ChatGPT API Key
+                </span>
+                <a 
+                  href="https://platform.openai.com/api-keys" 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="text-[10px] text-[#25D366] hover:underline flex items-center gap-0.5"
+                >
+                  Get Key <ExternalLink size={10} />
+                </a>
+              </div>
+              <div className="relative flex items-center">
+                <input
+                  type={showOpenaiKey ? 'text' : 'password'}
+                  value={openaiApiKey}
+                  onChange={e => setOpenaiApiKey(e.target.value)}
+                  placeholder="sk-proj-..."
+                  className="w-full bg-[#111b21] border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono placeholder-gray-500 focus:border-emerald-400 focus:outline-none pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowOpenaiKey(!showOpenaiKey)}
+                  className="absolute right-2.5 text-gray-400 hover:text-white"
+                >
+                  {showOpenaiKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-500">
+                Recommended models: <span className="text-emerald-300">gpt-4o-mini</span>, <span className="text-emerald-300">gpt-4o</span>
+              </p>
+            </div>
+
+          </div>
+
+          {/* Default Provider & Model */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-[11px] font-bold text-gray-300">Default AI Provider</label>
+              <select
+                value={defaultAiProvider}
+                onChange={e => {
+                  const p = e.target.value as 'gemini' | 'openai';
+                  setDefaultAiProvider(p);
+                  if (p === 'openai' && defaultAiModel.includes('gemini')) setDefaultAiModel('gpt-4o-mini');
+                  if (p === 'gemini' && defaultAiModel.includes('gpt')) setDefaultAiModel('gemini-3.8-flash');
+                }}
+                className="w-full bg-[#182229] border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:border-purple-400 focus:outline-none"
+              >
+                <option value="gemini">Google Gemini (Recommended & Free Tier)</option>
+                <option value="openai">OpenAI ChatGPT</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-bold text-gray-300">Default Model</label>
+              <select
+                value={defaultAiModel}
+                onChange={e => setDefaultAiModel(e.target.value)}
+                className="w-full bg-[#182229] border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:border-purple-400 focus:outline-none"
+              >
+                {defaultAiProvider === 'openai' ? (
+                  <>
+                    <option value="gpt-4o-mini">GPT-4o Mini (Fast & Cost Effective)</option>
+                    <option value="gpt-4o">GPT-4o</option>
+                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (Fastest)</option>
+                    <option value="gemini-flash-latest">Gemini Flash Latest</option>
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
+                    <option value="gemini-4-argon">Gemini 4 Argon</option>
+                  </>
+                )}
+              </select>
+            </div>
+          </div>
+
+          {/* Default System Prompt */}
+          <div className="space-y-1.5">
+            <div className="flex justify-between items-center">
+              <label className="text-[11px] font-bold text-gray-300 flex items-center gap-1">
+                <MessageSquare size={13} className="text-purple-400" />
+                Default Business Persona / System Prompt
+              </label>
+              <span className="text-[10px] text-gray-500">Inherited by all instances</span>
+            </div>
+            <textarea
+              rows={3}
+              value={defaultAiPrompt}
+              onChange={e => setDefaultAiPrompt(e.target.value)}
+              placeholder="e.g. You are a customer support agent on WhatsApp. Answer customer inquiries politely, concisely, and accurately. Keep replies short (under 60 words)."
+              className="w-full bg-[#182229] border border-gray-700 rounded-xl p-3 text-xs text-white placeholder-gray-500 focus:border-purple-400 focus:outline-none leading-relaxed"
+            />
+          </div>
+
+          {/* Profile Tester */}
+          <div className="p-3 bg-[#0b141a] rounded-xl border border-gray-800 space-y-2">
+            <span className="text-[11px] font-bold text-purple-300 flex items-center gap-1">
+              <Sparkles size={12} className="text-purple-400" />
+              Quick API Key Verification & Test
+            </span>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={profileTestInput}
+                onChange={e => setProfileTestInput(e.target.value)}
+                placeholder="Ask a test question..."
+                className="flex-1 bg-[#182229] border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-gray-500 focus:border-purple-400 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleTestProfileAi}
+                disabled={isTestingProfileAi || (defaultAiProvider === 'openai' ? !openaiApiKey : !geminiApiKey)}
+                className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white font-semibold rounded-lg text-xs flex items-center gap-1 transition-colors shrink-0"
+              >
+                {isTestingProfileAi ? <RefreshCw size={12} className="animate-spin" /> : <Send size={12} />}
+                <span>Test</span>
+              </button>
+            </div>
+            {profileTestReply && (
+              <p className="text-xs text-gray-300 bg-purple-950/20 border border-purple-500/30 p-2 rounded-lg italic">
+                &ldquo;{profileTestReply}&rdquo;
+              </p>
+            )}
+            {profileTestError && (
+              <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 p-2 rounded-lg">
+                {profileTestError}
+              </p>
+            )}
+          </div>
+
+          {aiMsg && (
+            <div className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+              aiMsg.type === 'success' 
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
+                : 'bg-red-500/10 border-red-500/30 text-red-300'
+            }`}>
+              {aiMsg.type === 'success' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+              <span>{aiMsg.text}</span>
+            </div>
+          )}
+
+          <div className="flex justify-end pt-1">
+            <button
+              type="submit"
+              disabled={isSavingAi}
+              className="px-5 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-purple-600/30"
+            >
+              {isSavingAi ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+              <span>Save AI Bot Settings</span>
+            </button>
+          </div>
+        </form>
+      </div>
       <div className="bg-[#111b21] rounded-xl sm:rounded-2xl border border-gray-800 p-4 sm:p-5 shadow-lg space-y-3.5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-800 pb-2.5">
           <div>
