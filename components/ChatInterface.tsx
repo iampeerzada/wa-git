@@ -655,49 +655,36 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     fetchTemplatesForInstance();
   }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
 
-  // Reset active session and messages immediately when instance changes to avoid showing previous instance data
+  // Fast pre-loading of sessions from cache for instant 0ms chatbox opening
   useEffect(() => {
     if (!selectedInstanceId) return;
-
-    setSelectedSession(null);
-    setMessages([]);
-    currentActiveJidRef.current = null;
-
-    // Check in-memory cache first for 0ms load
+    
+    // Check in-memory cache first
     if (sessionsCacheRef.current[selectedInstanceId]?.length) {
       setSessions(sessionsCacheRef.current[selectedInstanceId]);
-    } else {
-      // Check sessionStorage fallback
-      try {
-        const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setSessions(parsed);
-            sessionsCacheRef.current[selectedInstanceId] = parsed;
-          } else {
-            setSessions([]);
-          }
-        } else {
-          setSessions([]);
-        }
-      } catch(e) {
-        setSessions([]);
-      }
+      return;
     }
+
+    // Check sessionStorage fallback
+    try {
+      const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setSessions(parsed);
+          sessionsCacheRef.current[selectedInstanceId] = parsed;
+        }
+      }
+    } catch(e) {}
   }, [selectedInstanceId]);
 
-  // Fetch sessions from server with race-condition & stale-instance protection
+  // Fetch sessions from server in background and seamlessly update
   useEffect(() => {
     if (!selectedInstanceId) return;
-
-    const currentInstId = selectedInstanceId;
-    const controller = new AbortController();
 
     const fetchSessions = async () => {
       try {
-        const res = await fetch(`${apiBase}/api/chat/sessions/${currentInstId}`, {
-          signal: controller.signal,
+        const res = await fetch(`${apiBase}/api/chat/sessions/${selectedInstanceId}`, {
           headers: {
             'X-User-ID': currentUser.id,
             'X-API-Key': currentUser.apiKey
@@ -705,37 +692,29 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         });
         if (res.ok) {
           const data = await res.json();
-          // Ensure we only update state if the user is still on this instance
-          if (selectedInstanceIdRef.current === currentInstId) {
-            setSessions(data);
-            sessionsCacheRef.current[currentInstId] = data;
-            try {
-              sessionStorage.setItem(`wa_cached_sessions_${currentInstId}`, JSON.stringify(data));
-            } catch(e) {}
-
-            const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
-            data.forEach((session: any) => {
-              if (session.contactName || session.pushName) {
-                initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
-              }
-            });
-            if (Object.keys(initialProfiles).length > 0) {
-              setProfileCache(prev => ({ ...initialProfiles, ...prev }));
+          setSessions(data);
+          sessionsCacheRef.current[selectedInstanceId] = data;
+          try {
+            sessionStorage.setItem(`wa_cached_sessions_${selectedInstanceId}`, JSON.stringify(data));
+          } catch(e) {}
+          
+          // Pre-populate profile cache from contact/push names in session data without N+1 HTTP spam
+          const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
+          data.forEach((session: any) => {
+            if (session.contactName || session.pushName) {
+              initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
             }
+          });
+          if (Object.keys(initialProfiles).length > 0) {
+            setProfileCache(prev => ({ ...initialProfiles, ...prev }));
           }
         }
-      } catch (err: any) {
-        if (err.name !== 'AbortError') {
-          console.error('Failed to fetch sessions', err);
-        }
+      } catch (err) {
+        console.error('Failed to fetch sessions', err);
       }
     };
 
     fetchSessions();
-
-    return () => {
-      controller.abort();
-    };
   }, [selectedInstanceId, currentUser.id, currentUser.apiKey, apiBase]);
 
   const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
@@ -1141,12 +1120,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     // Handle Users (Standard JID or LID)
     const id = jid.split('@')[0].split(':')[0];
     
-    // Format standard phone numbers (7 to 13 digits) with +
+    // If it's a number, format it with +
     if (/^\d+$/.test(id)) {
-        if (id.length >= 7 && id.length <= 13) {
-            return `+${id}`;
-        }
-        return `WhatsApp ID: ${id}`;
+        return `+${id}`;
     }
     
     return id;
@@ -1809,8 +1785,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                           </div>
                                         </div>
                                         <a 
-                                          href={msg.mediaUrl.startsWith('/api/meta/media') ? `${msg.mediaUrl}?download=1` : msg.mediaUrl} 
-                                          download={msg.fileName || `attachment_${msg.id}`} 
+                                          href={msg.mediaUrl} 
+                                          download 
                                           target="_blank" 
                                           rel="noopener noreferrer" 
                                           className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0"
@@ -2727,8 +2703,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
             <div className="absolute -top-12 right-0 flex items-center gap-3">
               <a
-                href={lightboxMedia.url.startsWith('/api/meta/media') ? `${lightboxMedia.url}?download=1` : lightboxMedia.url}
-                download={lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg'}
+                href={lightboxMedia.url}
+                download
                 target="_blank"
                 rel="noopener noreferrer"
                 className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3"

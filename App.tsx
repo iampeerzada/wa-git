@@ -29,11 +29,7 @@ import ProvisionInstanceModal from './components/ProvisionInstanceModal';
 import LandingPage from './components/LandingPage';
 
 const getApiBase = () => {
-  if (typeof window !== 'undefined') {
-    const custom = localStorage.getItem('wa_api_base');
-    if (custom) return custom;
-  }
-  return ''; // Default to relative origin to avoid cross-origin CORS fetch failures
+  return 'https://wa-api.ifastx.in'; // Localhost ko VPS se connect kar do
 };
 
 const API_BASE = getApiBase();

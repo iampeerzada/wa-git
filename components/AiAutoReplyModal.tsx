@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Bot, Sparkles, X, Check, Key, Shield, HelpCircle, 
   Send, AlertCircle, RefreshCw, Eye, EyeOff, Sliders, MessageSquare, 
-  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText, History
+  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText
 } from 'lucide-react';
 import { WhatsAppInstance, User } from '../types';
 
@@ -83,49 +83,6 @@ export default function AiAutoReplyModal({
   // Fallback defaults from profile
   const [hasUserKey, setHasUserKey] = useState(false);
 
-  // Tab state & AI Execution History Logs state
-  const [activeTab, setActiveTab] = useState<'settings' | 'logs'>('settings');
-  const [aiLogs, setAiLogs] = useState<any[]>([]);
-  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
-
-  const fetchLogs = async () => {
-    setIsLoadingLogs(true);
-    try {
-      const res = await fetch(`${apiBase}/api/ai/logs?instanceId=${instance.id}`, {
-        headers: {
-          'X-User-ID': currentUser.id,
-          'X-API-Key': currentUser.apiKey
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAiLogs(Array.isArray(data) ? data : []);
-      }
-    } catch (e) {
-      console.error('Failed to load AI logs', e);
-    } finally {
-      setIsLoadingLogs(false);
-    }
-  };
-
-  const handleClearLogs = async () => {
-    if (!window.confirm('Are you sure you want to clear AI execution logs for this instance?')) return;
-    try {
-      const res = await fetch(`${apiBase}/api/ai/logs?instanceId=${instance.id}`, {
-        method: 'DELETE',
-        headers: {
-          'X-User-ID': currentUser.id,
-          'X-API-Key': currentUser.apiKey
-        }
-      });
-      if (res.ok) {
-        setAiLogs([]);
-      }
-    } catch (e) {
-      console.error('Failed to clear AI logs', e);
-    }
-  };
-
   useEffect(() => {
     // Fetch instance detailed AI config
     const loadConfig = async () => {
@@ -155,7 +112,6 @@ export default function AiAutoReplyModal({
       }
     };
     loadConfig();
-    fetchLogs();
   }, [instance.id, apiBase, currentUser.id, currentUser.apiKey]);
 
   // Adjust default model if provider switches
@@ -360,44 +316,7 @@ export default function AiAutoReplyModal({
         {/* Modal Body */}
         <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm text-gray-200">
           
-          {/* Tab Switcher: Configuration vs Execution Logs */}
-          <div className="flex items-center gap-2 border-b border-gray-800/80 pb-3">
-            <button
-              type="button"
-              onClick={() => setActiveTab('settings')}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                activeTab === 'settings'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                  : 'bg-[#182229] text-gray-400 hover:text-white hover:bg-gray-800'
-              }`}
-            >
-              <Sliders size={14} />
-              <span>Bot Settings & Key Pool</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('logs');
-                fetchLogs();
-              }}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                activeTab === 'logs'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                  : 'bg-[#182229] text-gray-400 hover:text-white hover:bg-gray-800'
-              }`}
-            >
-              <History size={14} />
-              <span>Execution Logs & Failover History</span>
-              {aiLogs.length > 0 && (
-                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-purple-400/20 text-purple-200 border border-purple-400/30">
-                  {aiLogs.length}
-                </span>
-              )}
-            </button>
-          </div>
-
-          {activeTab === 'settings' ? (
-            <>
+          {/* Master Enable Toggle Card */}
           <div className={`p-4 rounded-xl border transition-all flex items-center justify-between gap-4 ${
             aiEnabled 
               ? 'bg-purple-950/20 border-purple-500/40 shadow-inner' 
@@ -924,139 +843,6 @@ export default function AiAutoReplyModal({
             <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
               <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
               <span>AI Auto-Reply configuration successfully saved and activated!</span>
-            </div>
-          )}
-            </>
-          ) : (
-            <div className="space-y-4">
-              <div className="p-3.5 bg-[#182229] rounded-xl border border-gray-800 flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-2">
-                  <History size={16} className="text-purple-400" />
-                  <div>
-                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">AI Execution Logs & Multi-Key Failover History</h4>
-                    <p className="text-[11px] text-gray-400">Track incoming messages, generated replies, API keys used, latency, and auto-failovers in real-time.</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={fetchLogs}
-                    disabled={isLoadingLogs}
-                    className="px-2.5 py-1 bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 rounded-lg text-xs font-semibold border border-purple-500/30 flex items-center gap-1 cursor-pointer"
-                  >
-                    <RefreshCw size={12} className={isLoadingLogs ? 'animate-spin' : ''} />
-                    <span>Refresh</span>
-                  </button>
-                  {aiLogs.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleClearLogs}
-                      className="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded-lg text-xs font-semibold border border-red-500/30 flex items-center gap-1 cursor-pointer"
-                    >
-                      <Trash2 size={12} />
-                      <span>Clear History</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {isLoadingLogs ? (
-                <div className="p-8 text-center text-gray-400 flex flex-col items-center justify-center gap-2">
-                  <RefreshCw size={24} className="animate-spin text-purple-400" />
-                  <span className="text-xs">Loading execution logs...</span>
-                </div>
-              ) : aiLogs.length === 0 ? (
-                <div className="p-8 text-center bg-[#182229] rounded-xl border border-gray-800 space-y-2">
-                  <Bot size={32} className="mx-auto text-gray-600" />
-                  <p className="text-xs font-bold text-gray-300">No AI Execution Logs Yet</p>
-                  <p className="text-[11px] text-gray-400 max-w-md mx-auto">
-                    Logs will automatically appear here when customers message your WhatsApp number. You can also run a test in the Playground to trigger a log entry!
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-3 max-h-[55vh] overflow-y-auto pr-1">
-                  {aiLogs.map((log) => {
-                    const isSuccess = log.status === 'success';
-                    const isFailover = log.status === 'failover';
-                    const dateStr = log.created_at ? new Date(log.created_at).toLocaleString() : 'Just now';
-
-                    return (
-                      <div 
-                        key={log.id} 
-                        className={`p-3.5 rounded-xl border space-y-2.5 transition-all ${
-                          isSuccess 
-                            ? 'bg-[#182229] border-gray-800 hover:border-purple-500/30' 
-                            : isFailover 
-                            ? 'bg-amber-950/20 border-amber-500/40' 
-                            : 'bg-red-950/20 border-red-500/40'
-                        }`}
-                      >
-                        {/* Top Row: Timestamp, Recipient, Status Badge */}
-                        <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
-                          <div className="flex items-center gap-2">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border flex items-center gap-1 ${
-                              isSuccess 
-                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' 
-                                : isFailover 
-                                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' 
-                                : 'bg-red-500/20 text-red-300 border-red-500/30'
-                            }`}>
-                              {isSuccess && <CheckCircle2 size={11} />}
-                              {isFailover && <Zap size={11} />}
-                              {!isSuccess && !isFailover && <AlertCircle size={11} />}
-                              <span>{isSuccess ? 'Success' : isFailover ? 'Auto-Shift Failover' : log.status || 'Failed'}</span>
-                            </span>
-
-                            <span className="text-gray-400 font-mono text-[11px] flex items-center gap-1">
-                              <Clock size={11} /> {dateStr}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-2 text-[11px] font-mono">
-                            <span className="px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 flex items-center gap-1">
-                              <Key size={10} />
-                              <span>{log.api_key_used || 'Key'} {log.key_index && log.total_keys ? `(#${log.key_index}/${log.total_keys})` : ''}</span>
-                            </span>
-                            {log.latency_ms > 0 && (
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                                ⚡ {log.latency_ms}ms
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Recipient info & Model */}
-                        <div className="text-[11px] text-gray-400 flex items-center justify-between gap-2 border-b border-gray-800/60 pb-2">
-                          <span>📱 Customer: <strong className="text-white font-mono">{log.recipient_phone || log.remote_jid || 'WhatsApp User'}</strong></span>
-                          <span>🤖 Engine: <strong className="text-purple-300 font-mono">{log.provider?.toUpperCase()} ({log.model || 'gemini-3.8-flash'})</strong></span>
-                        </div>
-
-                        {/* Question & Answer */}
-                        <div className="space-y-1.5 text-xs">
-                          {log.incoming_text && (
-                            <div className="bg-[#111b21] p-2.5 rounded-lg border border-gray-800 text-gray-300">
-                              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block mb-0.5">Customer Message:</span>
-                              <p className="leading-relaxed">&ldquo;{log.incoming_text}&rdquo;</p>
-                            </div>
-                          )}
-
-                          {log.ai_reply ? (
-                            <div className="bg-purple-950/20 p-2.5 rounded-lg border border-purple-500/30 text-purple-100">
-                              <span className="text-[10px] font-bold text-purple-400 uppercase tracking-wider block mb-0.5">AI Generated Reply:</span>
-                              <p className="leading-relaxed">{log.ai_reply}</p>
-                            </div>
-                          ) : log.error_message ? (
-                            <div className="bg-amber-950/20 p-2.5 rounded-lg border border-amber-500/30 text-amber-200 text-[11px] font-mono">
-                              <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block mb-0.5">Failover / Error Details:</span>
-                              <p>{log.error_message}</p>
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
             </div>
           )}
 
