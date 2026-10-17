@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Bot, Sparkles, X, Check, Key, Shield, HelpCircle, 
   Send, AlertCircle, RefreshCw, Eye, EyeOff, Sliders, MessageSquare, 
-  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck
+  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText
 } from 'lucide-react';
 import { WhatsAppInstance, User } from '../types';
 
@@ -62,7 +62,10 @@ export default function AiAutoReplyModal({
   const [aiSystemPrompt, setAiSystemPrompt] = useState(instance.aiSystemPrompt || '');
   const [aiTemperature, setAiTemperature] = useState(instance.aiTemperature ?? 0.7);
   const [aiAutoReplyGroups, setAiAutoReplyGroups] = useState(instance.aiAutoReplyGroups ?? false);
-  const [fastMode, setFastMode] = useState(true);
+  const [aiMaxTokens, setAiMaxTokens] = useState<number>(instance.aiMaxTokens ?? 1800);
+  const [uncappedTokens, setUncappedTokens] = useState<boolean>((instance.aiMaxTokens ?? 1800) >= 4000);
+  const [poolStatus, setPoolStatus] = useState<any[]>([]);
+  const [isSyncingPool, setIsSyncingPool] = useState(false);
 
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -100,6 +103,8 @@ export default function AiAutoReplyModal({
           setAiSystemPrompt(data.aiSystemPrompt || data.defaultAiPrompt || '');
           setAiTemperature(data.aiTemperature ?? 0.7);
           setAiAutoReplyGroups(data.aiAutoReplyGroups ?? false);
+          setAiMaxTokens(data.aiMaxTokens ? Number(data.aiMaxTokens) : 1800);
+          setUncappedTokens(data.aiMaxTokens ? Number(data.aiMaxTokens) >= 4000 : false);
           setHasUserKey(data.hasUserGeminiKey || data.hasUserOpenAiKey);
         }
       } catch (e) {
@@ -147,6 +152,34 @@ export default function AiAutoReplyModal({
     setApiKeys(apiKeys.filter((_, i) => i !== index));
   };
 
+  const handleSyncPool = async () => {
+    setIsSyncingPool(true);
+    try {
+      const serializedKeys = apiKeys.map(k => k.trim()).filter(Boolean).join('\n');
+      const res = await fetch(`${apiBase}/api/ai/pool-status`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          provider: aiProvider,
+          apiKey: serializedKeys,
+          instanceId: instance.id
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPoolStatus(data.pool || []);
+      }
+    } catch (e) {
+      console.error('Failed to sync pool status', e);
+    } finally {
+      setIsSyncingPool(false);
+    }
+  };
+
   const handleSave = async () => {
     setIsSaving(true);
     setErrorMsg(null);
@@ -154,6 +187,7 @@ export default function AiAutoReplyModal({
 
     try {
       const serializedKeys = apiKeys.map(k => k.trim()).filter(Boolean).join('\n');
+      const effectiveTokens = uncappedTokens ? 4096 : (aiMaxTokens || 1800);
 
       const res = await fetch(`${apiBase}/api/instance/${instance.id}/ai-config`, {
         method: 'PUT',
@@ -169,7 +203,8 @@ export default function AiAutoReplyModal({
           aiModel,
           aiSystemPrompt,
           aiTemperature,
-          aiAutoReplyGroups
+          aiAutoReplyGroups,
+          aiMaxTokens: effectiveTokens
         })
       });
 
@@ -186,7 +221,8 @@ export default function AiAutoReplyModal({
         aiModel,
         aiSystemPrompt,
         aiTemperature,
-        aiAutoReplyGroups
+        aiAutoReplyGroups,
+        aiMaxTokens: effectiveTokens
       });
 
       setTimeout(() => {
@@ -210,6 +246,7 @@ export default function AiAutoReplyModal({
 
     try {
       const serializedKeys = apiKeys.map(k => k.trim()).filter(Boolean).join('\n');
+      const effectiveTokens = uncappedTokens ? 4096 : (aiMaxTokens || 1800);
 
       const res = await fetch(`${apiBase}/api/ai/test`, {
         method: 'POST',
@@ -223,7 +260,8 @@ export default function AiAutoReplyModal({
           apiKey: serializedKeys,
           model: aiModel,
           systemPrompt: aiSystemPrompt,
-          testMessage: testInput
+          testMessage: testInput,
+          maxTokens: effectiveTokens
         })
       });
 
@@ -374,66 +412,94 @@ export default function AiAutoReplyModal({
                   {apiKeys.filter(k => k.trim()).length} Key{apiKeys.filter(k => k.trim()).length !== 1 ? 's' : ''} in Pool
                 </span>
               </div>
-              <a
-                href={aiProvider === 'openai' ? 'https://platform.openai.com/api-keys' : 'https://aistudio.google.com/app/apikey'}
-                target="_blank"
-                rel="noreferrer"
-                className="text-[11px] text-[#25D366] hover:underline flex items-center gap-1"
-              >
-                Get Free Gemini Key <ExternalLink size={11} />
-              </a>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSyncPool}
+                  disabled={isSyncingPool || apiKeys.filter(k => k.trim()).length === 0}
+                  className="text-[11px] text-purple-300 hover:text-white flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 transition-all cursor-pointer disabled:opacity-40"
+                  title="Check live quota and failover status of all keys in pool"
+                >
+                  <RefreshCw size={11} className={isSyncingPool ? 'animate-spin' : ''} />
+                  <span>{isSyncingPool ? 'Checking...' : 'Sync Free-Tier Status'}</span>
+                </button>
+                <a
+                  href={aiProvider === 'openai' ? 'https://platform.openai.com/api-keys' : 'https://aistudio.google.com/app/apikey'}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[11px] text-[#25D366] hover:underline flex items-center gap-1"
+                >
+                  Get Free Key <ExternalLink size={11} />
+                </a>
+              </div>
             </div>
 
             {/* Free-Tier Auto-Shift Explainer Banner */}
             <div className="p-2.5 rounded-xl bg-purple-950/30 border border-purple-500/20 flex items-start gap-2.5">
               <ShieldCheck size={16} className="text-emerald-400 shrink-0 mt-0.5" />
               <div className="text-[11px] text-gray-300 leading-relaxed">
-                <strong className="text-white">Free-Tier Quota & Limit Auto-Shift:</strong> You can add multiple free API keys (e.g. from multiple Google accounts). If Key #1 reaches Gemini&apos;s 15 RPM or daily quota, the engine <span className="text-emerald-400 font-semibold">instantly auto-shifts</span> to your backup keys with zero missed chats!
+                <strong className="text-white">Free-Tier Quota Auto-Shift Active:</strong> You can add multiple free API keys. If your active key hits Gemini&apos;s free-tier rate limits (15 RPM or daily quota), the engine <span className="text-emerald-400 font-semibold">instantly auto-shifts to your backup keys</span> with 0s downtime!
               </div>
             </div>
 
             {/* List of Keys in Pool */}
             <div className="space-y-2">
-              {apiKeys.map((key, idx) => (
-                <div key={idx} className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-gray-400 font-semibold flex items-center gap-1">
-                      <span className={`w-1.5 h-1.5 rounded-full ${idx === 0 ? 'bg-[#25D366]' : 'bg-purple-400'}`}></span>
-                      Key #{idx + 1} {idx === 0 ? '(Primary Active Key)' : '(Failover Backup Key)'}
-                    </span>
-                    {apiKeys.length > 1 && (
+              {apiKeys.map((key, idx) => {
+                const keyStatus = poolStatus.find(p => p.index === idx + 1);
+                return (
+                  <div key={idx} className="space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-gray-400 font-semibold flex items-center gap-1.5">
+                        <span className={`w-2 h-2 rounded-full ${
+                          keyStatus?.status === 'cooldown' 
+                            ? 'bg-amber-400 animate-pulse' 
+                            : idx === 0 ? 'bg-[#25D366]' : 'bg-purple-400'
+                        }`} />
+                        <span>Key #{idx + 1} {idx === 0 ? '(Primary Key)' : '(Failover Backup Key)'}</span>
+                        {keyStatus && (
+                          <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono font-bold ${
+                            keyStatus.status === 'cooldown' 
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' 
+                              : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          }`}>
+                            {keyStatus.status === 'cooldown' ? `⏳ Limit Hit (Wait ${keyStatus.cooldownRemainingSec}s)` : '✓ Ready / Active'}
+                          </span>
+                        )}
+                      </span>
+                      {apiKeys.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveKey(idx)}
+                          className="text-red-400 hover:text-red-300 flex items-center gap-1 text-[10px] cursor-pointer"
+                        >
+                          <Trash2 size={11} /> Remove
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative flex items-center">
+                      <input
+                        type={showApiKeys ? 'text' : 'password'}
+                        value={key}
+                        onChange={e => handleUpdateKey(idx, e.target.value)}
+                        placeholder={
+                          aiProvider === 'openai' 
+                            ? 'sk-proj-... (or paste multiple keys separated by commas/newlines)'
+                            : 'AIzaSy... (or paste multiple keys separated by commas/newlines)'
+                        }
+                        className="w-full bg-[#111b21] border border-gray-700 focus:border-purple-400 rounded-xl px-3 py-2 pr-10 text-xs text-white placeholder-gray-500 focus:outline-none font-mono"
+                      />
                       <button
                         type="button"
-                        onClick={() => handleRemoveKey(idx)}
-                        className="text-red-400 hover:text-red-300 flex items-center gap-1 text-[10px] cursor-pointer"
+                        onClick={() => setShowApiKeys(!showApiKeys)}
+                        className="absolute right-3 text-gray-400 hover:text-white"
+                        title={showApiKeys ? 'Hide keys' : 'Show keys'}
                       >
-                        <Trash2 size={11} /> Remove
+                        {showApiKeys ? <EyeOff size={15} /> : <Eye size={15} />}
                       </button>
-                    )}
+                    </div>
                   </div>
-                  <div className="relative flex items-center">
-                    <input
-                      type={showApiKeys ? 'text' : 'password'}
-                      value={key}
-                      onChange={e => handleUpdateKey(idx, e.target.value)}
-                      placeholder={
-                        aiProvider === 'openai' 
-                          ? 'sk-proj-... (or paste multiple keys separated by commas/newlines)'
-                          : 'AIzaSy... (or paste multiple keys separated by commas/newlines)'
-                      }
-                      className="w-full bg-[#111b21] border border-gray-700 focus:border-purple-400 rounded-xl px-3 py-2 pr-10 text-xs text-white placeholder-gray-500 focus:outline-none font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowApiKeys(!showApiKeys)}
-                      className="absolute right-3 text-gray-400 hover:text-white"
-                      title={showApiKeys ? 'Hide keys' : 'Show keys'}
-                    >
-                      {showApiKeys ? <EyeOff size={15} /> : <Eye size={15} />}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 border-t border-gray-800/60">
@@ -448,24 +514,24 @@ export default function AiAutoReplyModal({
               <p className="text-[10px] text-gray-400">
                 {hasUserKey && apiKeys.filter(k => k.trim()).length === 0
                   ? '✓ Using fallback key from Profile'
-                  : 'Keys are load-balanced and auto-shifted on 429 errors'}
+                  : 'Keys automatically shift if free tier rate limit is reached'}
               </p>
             </div>
           </div>
 
-          {/* Speed & Latency Optimization Badge */}
-          <div className="p-3 bg-gradient-to-r from-emerald-950/20 via-[#182229] to-teal-950/20 rounded-xl border border-emerald-500/30 flex items-center justify-between gap-2">
+          {/* Speed & Acceleration Info Card */}
+          <div className="p-3.5 bg-gradient-to-r from-emerald-950/25 via-[#182229] to-purple-950/25 rounded-xl border border-emerald-500/30 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5">
-              <div className="p-1.5 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-lg shrink-0">
-                <Zap size={16} className="animate-pulse" />
+              <div className="p-2 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-lg shrink-0">
+                <Zap size={18} className="animate-pulse" />
               </div>
               <div>
                 <p className="text-xs font-bold text-white flex items-center gap-1.5">
-                  Instant Response Acceleration Active
-                  <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded font-mono font-bold uppercase">~300-800ms</span>
+                  Fast Response Mode Active
+                  <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded font-mono font-bold uppercase">~200-600ms</span>
                 </p>
-                <p className="text-[11px] text-gray-300">
-                  Pre-warmed connection, 180 token cap, and instant typing indicator for WhatsApp.
+                <p className="text-[11px] text-gray-300 mt-0.5">
+                  Direct REST connection with WhatsApp &ldquo;typing...&rdquo; presence indicator and multi-key auto-failover.
                 </p>
               </div>
             </div>
@@ -474,10 +540,105 @@ export default function AiAutoReplyModal({
             </span>
           </div>
 
+          {/* Customizable Output Token Capping Section (No Half Answers) */}
+          <div className="p-4 bg-[#182229] rounded-xl border border-gray-800 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+              <div className="flex items-center gap-2">
+                <FileText size={15} className="text-purple-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Response Length & Output Token Capping
+                </span>
+                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                  {uncappedTokens ? 'Uncapped (4096)' : `${aiMaxTokens} Tokens`}
+                </span>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-purple-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={uncappedTokens}
+                  onChange={e => {
+                    setUncappedTokens(e.target.checked);
+                    if (e.target.checked) setAiMaxTokens(4096);
+                    else setAiMaxTokens(1800);
+                  }}
+                  className="rounded border-gray-700 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                />
+                <span className="font-semibold text-[11px]">No Strict Cap (Full Output)</span>
+              </label>
+            </div>
+
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Controls maximum allowed response tokens. Set to <strong className="text-white">1800 tokens</strong> (or uncapped) so that complete explanations, product catalogs, FAQ lists, and thorough answers are <span className="text-emerald-400 font-medium">never cut off midway (eliminates half-answers)</span>.
+            </p>
+
+            {/* Quick Token Preset Buttons */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                { label: '⚡ Concise', tokens: 350, desc: '~250 words' },
+                { label: '💬 Standard', tokens: 800, desc: '~600 words' },
+                { label: '📝 Full & Detailed', tokens: 1800, desc: '~1350 words (Recommended)' },
+                { label: '🚀 Comprehensive', tokens: 3000, desc: '~2250 words' }
+              ].map((preset) => {
+                const isSelected = !uncappedTokens && aiMaxTokens === preset.tokens;
+                return (
+                  <button
+                    key={preset.tokens}
+                    type="button"
+                    onClick={() => {
+                      setUncappedTokens(false);
+                      setAiMaxTokens(preset.tokens);
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      isSelected 
+                        ? 'bg-purple-500/20 border-purple-500/60 ring-1 ring-purple-500/40' 
+                        : 'bg-[#111b21] border-gray-800 hover:border-gray-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white">{preset.label}</span>
+                      {isSelected && <Check size={13} className="text-purple-400" />}
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-0.5">{preset.tokens} tokens • {preset.desc}</p>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Custom Token Number Input & Slider */}
+            {!uncappedTokens && (
+              <div className="pt-2 border-t border-gray-800/80 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-400 text-[11px]">Customize Exact Token Limit (100 - 4096):</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={100}
+                      max={4096}
+                      step={50}
+                      value={aiMaxTokens}
+                      onChange={e => setAiMaxTokens(Math.max(100, Math.min(4096, parseInt(e.target.value) || 1800)))}
+                      className="w-20 bg-[#111b21] border border-gray-700 focus:border-purple-400 rounded-lg px-2 py-1 text-xs text-white text-right font-mono focus:outline-none"
+                    />
+                    <span className="text-[11px] text-gray-400">tokens</span>
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min={200}
+                  max={4096}
+                  step={50}
+                  value={aiMaxTokens}
+                  onChange={e => setAiMaxTokens(parseInt(e.target.value))}
+                  className="w-full accent-purple-500 cursor-pointer h-1.5 bg-gray-700 rounded-lg"
+                />
+              </div>
+            )}
+          </div>
+
           {/* Model Selector & Temperature Slider */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-300">Model Selection</label>
+              <label className="text-xs font-bold text-gray-300">Model Selection (Speed & Intelligence)</label>
               <select
                 value={aiModel}
                 onChange={e => setAiModel(e.target.value)}
@@ -485,14 +646,14 @@ export default function AiAutoReplyModal({
               >
                 {aiProvider === 'openai' ? (
                   <>
-                    <option value="gpt-4o-mini">⚡ GPT-4o Mini (Fast & Cost Effective)</option>
+                    <option value="gpt-4o-mini">⚡ GPT-4o Mini (Fast ~500ms & Cost Effective)</option>
                     <option value="gpt-4o">🧠 GPT-4o (Most Intelligent - Slower)</option>
                     <option value="gpt-3.5-turbo">GPT-3.5 Turbo (Legacy)</option>
                   </>
                 ) : (
                   <>
-                    <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Ultra-Fast & Smart - Recommended)</option>
-                    <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Lowest Latency / Instant TTFT)</option>
+                    <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Lowest Latency ~200-400ms - Fastest for WhatsApp)</option>
+                    <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Ultra-Fast & Smart ~400-700ms - Recommended)</option>
                     <option value="gemini-flash-latest">Gemini Flash Latest</option>
                     <option value="gemini-4-argon">🧠 Gemini 4 Argon (Deep Reasoning - Slower)</option>
                   </>
@@ -519,7 +680,7 @@ export default function AiAutoReplyModal({
               />
               <div className="flex justify-between text-[10px] text-gray-500">
                 <span>0.1 (Strict & Factual)</span>
-                <span>1.0 (Creative & Chatty)</span>
+                <span>1.0 (Creative & Conversational)</span>
               </div>
             </div>
           </div>
@@ -616,17 +777,22 @@ export default function AiAutoReplyModal({
                     <CheckCircle2 size={13} className="text-emerald-400" />
                     <span>Bot Response Preview:</span>
                   </div>
-                  {testLatency !== null && (
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                      <Zap size={10} className="text-emerald-400" />
-                      <span>{testLatency}ms Latency (Ultra-Fast)</span>
+                  <div className="flex items-center gap-2">
+                    {testLatency !== null && (
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                        <Zap size={10} className="text-emerald-400" />
+                        <span>{testLatency}ms Latency</span>
+                      </span>
+                    )}
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      {testResponse.split(/\s+/).filter(Boolean).length} words • Complete Answer
                     </span>
-                  )}
+                  </div>
                 </div>
 
-                <p className="text-xs text-gray-200 leading-relaxed italic bg-black/30 p-2.5 rounded-lg border border-purple-500/20">
-                  &ldquo;{testResponse}&rdquo;
-                </p>
+                <div className="text-xs text-gray-200 leading-relaxed bg-black/40 p-3 rounded-lg border border-purple-500/20 whitespace-pre-wrap">
+                  {testResponse}
+                </div>
 
                 {/* Key Pool Health Breakdown */}
                 {testKeyResults.length > 0 && (

@@ -106,6 +106,7 @@ export interface WhatsAppInstance {
   aiSystemPrompt?: string;
   aiTemperature?: number;
   aiAutoReplyGroups?: boolean;
+  aiMaxTokens?: number;
   provider?: string;
   metaAccessToken?: string;
   metaPhoneNumberId?: string;

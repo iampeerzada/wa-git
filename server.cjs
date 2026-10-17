@@ -217,7 +217,8 @@ pool.connect(async (err, client, release) => {
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_model VARCHAR(100) DEFAULT 'gemini-3.8-flash'",
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_system_prompt TEXT",
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_temperature NUMERIC DEFAULT 0.7",
-            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_auto_reply_groups BOOLEAN DEFAULT FALSE"
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_auto_reply_groups BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS ai_max_tokens INTEGER DEFAULT 1800"
         ];
         for (const colQuery of instanceColQueries) {
             try {
@@ -649,43 +650,60 @@ function recordKeyCooldown(apiKey, errorMsg) {
         failCount: 0,
         successCount: 0,
         lastError: '',
+        lastLatencyMs: 0,
         lastUsed: 0
     };
-    const isDaily = (errorMsg || '').toLowerCase().includes('day') || (errorMsg || '').toLowerCase().includes('daily');
-    // Cooldown: 60s for RPM / per-minute burst limit, 15m for daily quota
-    const cooldownMs = isDaily ? 15 * 60 * 1000 : 62 * 1000;
+    const msg = (errorMsg || '').toLowerCase();
+    const isDaily = msg.includes('day') || msg.includes('daily');
+    const isInvalidKey = msg.includes('api_key_invalid') || msg.includes('invalid api key') || msg.includes('401') || msg.includes('403');
+    
+    // Cooldown duration: 24h for invalid key, 15m for daily quota, 60s for RPM burst limits
+    let cooldownMs = 60 * 1000;
+    if (isInvalidKey) {
+        cooldownMs = 24 * 60 * 60 * 1000;
+    } else if (isDaily) {
+        cooldownMs = 15 * 60 * 1000;
+    }
+
     existing.cooldownUntil = Date.now() + cooldownMs;
     existing.failCount = (existing.failCount || 0) + 1;
     existing.lastError = errorMsg || 'Quota or Rate Limit reached';
     keyPoolHealth.set(apiKey, existing);
 }
 
-function recordKeySuccess(apiKey) {
+function recordKeySuccess(apiKey, latencyMs) {
     const existing = keyPoolHealth.get(apiKey) || {
         cooldownUntil: 0,
         failCount: 0,
         successCount: 0,
         lastError: '',
+        lastLatencyMs: 0,
         lastUsed: 0
     };
     existing.cooldownUntil = 0;
     existing.successCount = (existing.successCount || 0) + 1;
     existing.lastUsed = Date.now();
+    existing.lastLatencyMs = latencyMs || existing.lastLatencyMs || 0;
     existing.lastError = '';
     keyPoolHealth.set(apiKey, existing);
 }
 
-// Execute single AI call with ultra-fast timeout (7000ms max)
-async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, historyRows, incomingText, temperature }) {
+// Execute single AI call with flexible token capping and fast failover
+async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, historyRows = [], incomingText, temperature, maxTokens }) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 7000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+    const effectiveMaxTokens = (maxTokens && Number(maxTokens) > 0) ? Number(maxTokens) : 1800;
+    const basePrompt = (systemPrompt && systemPrompt.trim()) 
+        ? systemPrompt 
+        : "You are a professional, helpful WhatsApp customer assistant for our business. Answer inquiries politely, accurately, and thoroughly.";
 
     try {
         if (provider === 'openai') {
             const chosenModel = model || 'gpt-4o-mini';
             const messages = [{ 
                 role: 'system', 
-                content: `${systemPrompt}\n\nIMPORTANT: Keep response concise (1-2 short sentences max, under 50 words) suitable for instant WhatsApp chat.` 
+                content: basePrompt 
             }];
             for (const row of historyRows) {
                 if (row.text) {
@@ -711,7 +729,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
                     model: chosenModel,
                     messages: messages,
                     temperature: temperature,
-                    max_tokens: 180
+                    max_tokens: effectiveMaxTokens
                 })
             });
 
@@ -726,7 +744,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
             const data = await res.json();
             return data.choices?.[0]?.message?.content || null;
         } else {
-            // Google Gemini (Fast REST Endpoint with 180 maxOutputTokens)
+            // Google Gemini (Fast REST Endpoint with user-customizable maxOutputTokens)
             const chosenModel = model || 'gemini-3.8-flash';
             const historySummary = historyRows.slice(-4).map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
             const userPromptText = historySummary 
@@ -740,7 +758,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     systemInstruction: {
-                        parts: [{ text: `${systemPrompt}\n\nIMPORTANT: Keep reply concise, direct, and under 50 words for instant WhatsApp chat.` }]
+                        parts: [{ text: basePrompt }]
                     },
                     contents: [{
                         role: 'user',
@@ -748,15 +766,19 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
                     }],
                     generationConfig: {
                         temperature: temperature,
-                        maxOutputTokens: 180
+                        maxOutputTokens: effectiveMaxTokens
                     }
                 })
             });
 
             if (restRes.ok) {
                 const restData = await restRes.json();
-                const text = restData.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (text) return text;
+                const candidate = restData.candidates?.[0];
+                const parts = candidate?.content?.parts;
+                if (Array.isArray(parts) && parts.length > 0) {
+                    const fullText = parts.map(p => p.text || '').join('').trim();
+                    if (fullText) return fullText;
+                }
             } else {
                 const errJson = await restRes.json().catch(() => ({}));
                 const errMsg = errJson.error?.message || `HTTP ${restRes.status} ${restRes.statusText}`;
@@ -769,9 +791,9 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
             const ai = new GoogleGenAI({ apiKey });
             const resp = await ai.models.generateContent({
                 model: chosenModel,
-                contents: `${systemPrompt}\nCustomer: ${incomingText}\nAssistant:`,
+                contents: `${basePrompt}\n\nCustomer: ${incomingText}\nAssistant:`,
                 config: {
-                    maxOutputTokens: 180,
+                    maxOutputTokens: effectiveMaxTokens,
                     temperature: temperature
                 }
             });
@@ -789,7 +811,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
     try {
         const instRes = await pool.query(`
             SELECT i.id, i.user_id, i.ai_enabled, i.ai_provider, i.ai_api_key, i.ai_model, 
-                   i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups,
+                   i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups, i.ai_max_tokens,
                    u.gemini_api_key, u.openai_api_key, u.default_ai_prompt, 
                    u.default_ai_provider, u.default_ai_model
             FROM instances i
@@ -849,7 +871,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
             model = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
         }
 
-        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 40-60 words) and suitable for direct WhatsApp chat. Never say you are an AI language model unless directly asked. Do not include prefixes like 'Assistant:' or 'Bot:'.";
+        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries politely, thoroughly, and accurately. Do not include prefixes like 'Assistant:' or 'Bot:'.";
         const systemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
                              (inst.default_ai_prompt && inst.default_ai_prompt.trim()) || 
                              defaultPrompt;
@@ -858,6 +880,10 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
             ? parseFloat(inst.ai_temperature) 
             : 0.7;
 
+        const maxTokens = (inst.ai_max_tokens && Number(inst.ai_max_tokens) > 0) 
+            ? Number(inst.ai_max_tokens) 
+            : 1800;
+
         // Fetch recent conversation history (limited to 4 messages for fast generation)
         const historyRes = await pool.query(
             'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 4',
@@ -865,7 +891,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         );
         const historyRows = (historyRes.rows || []).reverse();
 
-        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} using ${provider} (${model}) with ${prioritizedKeys.length} key(s) in pool`);
+        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} using ${provider} (${model}) with ${prioritizedKeys.length} key(s) in pool [Max Tokens: ${maxTokens}]`);
 
         let replyText = null;
 
@@ -883,12 +909,13 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
                     systemPrompt,
                     historyRows,
                     incomingText,
-                    temperature
+                    temperature,
+                    maxTokens
                 });
 
                 if (replyText && replyText.trim()) {
                     const elapsed = Date.now() - startTime;
-                    recordKeySuccess(currentKey);
+                    recordKeySuccess(currentKey, elapsed);
                     console.log(`[AI Auto-Reply] Generated in ${elapsed}ms using key ${masked} (Key ${i+1}/${prioritizedKeys.length})`);
                     break;
                 }
@@ -2705,6 +2732,7 @@ app.get('/api/instances', authenticate, async (req, res) => {
                 aiSystemPrompt: inst.ai_system_prompt || '',
                 aiTemperature: inst.ai_temperature !== null && inst.ai_temperature !== undefined ? Number(inst.ai_temperature) : 0.7,
                 aiAutoReplyGroups: !!inst.ai_auto_reply_groups,
+                aiMaxTokens: inst.ai_max_tokens ? Number(inst.ai_max_tokens) : 1800,
                 metaPhoneNumberId: inst.meta_phone_number_id,
                 metaWabaId: inst.meta_waba_id,
                 metaAccessToken: inst.meta_access_token
@@ -2861,7 +2889,7 @@ app.get('/api/instance/:id/ai-config', authenticate, async (req, res) => {
     try {
         const check = await pool.query(`
             SELECT i.id, i.user_id, i.ai_enabled, i.ai_provider, i.ai_api_key, i.ai_model, 
-                   i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups,
+                   i.ai_system_prompt, i.ai_temperature, i.ai_auto_reply_groups, i.ai_max_tokens,
                    u.gemini_api_key, u.openai_api_key, u.default_ai_prompt
             FROM instances i
             LEFT JOIN users u ON i.user_id = u.id
@@ -2884,6 +2912,7 @@ app.get('/api/instance/:id/ai-config', authenticate, async (req, res) => {
             aiSystemPrompt: row.ai_system_prompt || '',
             aiTemperature: row.ai_temperature !== null && row.ai_temperature !== undefined ? Number(row.ai_temperature) : 0.7,
             aiAutoReplyGroups: !!row.ai_auto_reply_groups,
+            aiMaxTokens: row.ai_max_tokens ? Number(row.ai_max_tokens) : 1800,
             hasUserGeminiKey: !!row.gemini_api_key,
             hasUserOpenAiKey: !!row.openai_api_key,
             defaultAiPrompt: row.default_ai_prompt || ''
@@ -2910,10 +2939,12 @@ app.put('/api/instance/:id/ai-config', authenticate, async (req, res) => {
             aiModel,
             aiSystemPrompt = '',
             aiTemperature = 0.7,
-            aiAutoReplyGroups = false
+            aiAutoReplyGroups = false,
+            aiMaxTokens = 1800
         } = req.body;
 
         const effectiveModel = aiModel || (aiProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash');
+        const effectiveTokens = (aiMaxTokens && Number(aiMaxTokens) > 0) ? Number(aiMaxTokens) : 1800;
 
         await pool.query(`
             UPDATE instances SET 
@@ -2923,8 +2954,9 @@ app.put('/api/instance/:id/ai-config', authenticate, async (req, res) => {
                 ai_model = $4,
                 ai_system_prompt = $5,
                 ai_temperature = $6,
-                ai_auto_reply_groups = $7
-            WHERE id = $8
+                ai_auto_reply_groups = $7,
+                ai_max_tokens = $8
+            WHERE id = $9
         `, [
             !!aiEnabled,
             aiProvider,
@@ -2933,6 +2965,7 @@ app.put('/api/instance/:id/ai-config', authenticate, async (req, res) => {
             aiSystemPrompt,
             aiTemperature,
             !!aiAutoReplyGroups,
+            effectiveTokens,
             req.params.id
         ]);
 
@@ -2965,7 +2998,7 @@ app.patch('/api/instance/:id/ai', authenticate, async (req, res) => {
 // Interactive AI Live Tester endpoint with Multi-Key Pool support & Latency measurement
 app.post('/api/ai/test', authenticate, async (req, res) => {
     try {
-        const { provider = 'gemini', apiKey, model, systemPrompt, testMessage } = req.body;
+        const { provider = 'gemini', apiKey, model, systemPrompt, testMessage, maxTokens = 1800 } = req.body;
         let rawKeys = apiKey ? String(apiKey).trim() : '';
 
         // If not provided in body, check user profile settings
@@ -2987,7 +3020,7 @@ app.post('/api/ai/test', authenticate, async (req, res) => {
         }
 
         const userPrompt = testMessage || 'Hi, can you introduce yourself and tell me what you do?';
-        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 40-60 words) and suitable for direct WhatsApp chat.";
+        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer inquiries politely, thoroughly, and accurately.";
         const sysPrompt = (systemPrompt && systemPrompt.trim()) || defaultPrompt;
 
         let reply = '';
@@ -3010,11 +3043,12 @@ app.post('/api/ai/test', authenticate, async (req, res) => {
                     systemPrompt: sysPrompt,
                     historyRows: [],
                     incomingText: userPrompt,
-                    temperature: 0.7
+                    temperature: 0.7,
+                    maxTokens: maxTokens || 1800
                 });
 
                 const latency = Date.now() - startT;
-                recordKeySuccess(currentKey);
+                recordKeySuccess(currentKey, latency);
 
                 if (!reply && text) {
                     reply = text;
@@ -3058,10 +3092,79 @@ app.post('/api/ai/test', authenticate, async (req, res) => {
             latencyMs: fastestLatency,
             activeKey: activeKeyUsed,
             totalKeys: candidateKeys.length,
+            maxTokensUsed: maxTokens || 1800,
             keyResults 
         });
     } catch (e) {
         console.error('[AI Test Error]', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Real-time AI Key Pool Health & Free-Tier Quota Status Synchronization
+app.post('/api/ai/pool-status', authenticate, async (req, res) => {
+    try {
+        const { provider = 'gemini', apiKey, instanceId } = req.body;
+        let rawKeys = apiKey ? String(apiKey).trim() : '';
+
+        if (!rawKeys && instanceId) {
+            const instRes = await pool.query('SELECT ai_api_key, ai_provider FROM instances WHERE id = $1', [instanceId]);
+            if (instRes.rows.length > 0) {
+                rawKeys = instRes.rows[0].ai_api_key || '';
+            }
+        }
+
+        if (!rawKeys) {
+            const userRes = await pool.query('SELECT gemini_api_key, openai_api_key FROM users WHERE id = $1', [req.user.id]);
+            if (userRes.rows.length > 0) {
+                rawKeys = provider === 'openai' 
+                    ? (userRes.rows[0].openai_api_key || '')
+                    : (userRes.rows[0].gemini_api_key || '');
+            }
+        }
+
+        const candidateKeys = parseApiKeyList(rawKeys);
+        const now = Date.now();
+
+        const poolStatus = candidateKeys.map((key, idx) => {
+            const masked = maskApiKey(key);
+            const h = keyPoolHealth.get(key);
+            const inCooldown = h && h.cooldownUntil && h.cooldownUntil > now;
+            const cooldownRemainingSec = inCooldown ? Math.ceil((h.cooldownUntil - now) / 1000) : 0;
+            const hasSuccess = h && h.successCount > 0;
+
+            let status = 'ready';
+            if (inCooldown) {
+                status = 'cooldown';
+            } else if (hasSuccess) {
+                status = 'active';
+            }
+
+            return {
+                index: idx + 1,
+                keyMasked: masked,
+                status,
+                isHealthy: !inCooldown,
+                isPrimary: idx === 0,
+                cooldownRemainingSec,
+                failCount: h ? (h.failCount || 0) : 0,
+                successCount: h ? (h.successCount || 0) : 0,
+                lastLatencyMs: h ? (h.lastLatencyMs || null) : null,
+                lastError: h ? (h.lastError || null) : null
+            };
+        });
+
+        const activeKey = poolStatus.find(k => k.isHealthy) || poolStatus[0] || null;
+
+        res.json({
+            success: true,
+            provider,
+            totalKeys: candidateKeys.length,
+            pool: poolStatus,
+            activeKeyIndex: activeKey ? activeKey.index : 1,
+            autoShiftActive: poolStatus.some(k => k.status === 'cooldown')
+        });
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
