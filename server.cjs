@@ -1051,6 +1051,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
                 } else {
                     console.error(`[AI Key Pool] Key ${masked} failed: ${err.message}. Trying next available key...`);
                 }
+            }
         }
 
         if (!replyText || !replyText.trim()) return null;
