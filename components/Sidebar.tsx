@@ -30,7 +30,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentUser, 
       title: 'Official Meta Cloud API',
       items: [
         { id: 'meta-templates', icon: FileText, label: 'Meta Templates', badgeText: 'META', badgeStyle: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER] },
-        { id: 'meta-automations', icon: MessageCircleCode, label: 'Meta Automations', badgeText: 'META', badgeStyle: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_TEMPLATES },
+        { id: 'meta-automations', icon: MessageCircleCode, label: 'Meta Auto Responder', badgeText: 'META', badgeStyle: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', roles: [UserRole.SUPERADMIN, UserRole.RESELLER, UserRole.ADMIN, UserRole.TEAM_MEMBER], permission: Permission.MANAGE_TEMPLATES },
         { id: 'meta-insights', icon: Infinity, label: 'Meta Insights & Billing', badgeText: 'META', badgeStyle: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30', roles: [UserRole.SUPERADMIN] },
       ]
     },

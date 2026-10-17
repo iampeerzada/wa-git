@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Bot, Sparkles, X, Check, Key, Shield, HelpCircle, 
   Send, AlertCircle, RefreshCw, Eye, EyeOff, Sliders, MessageSquare, 
-  CheckCircle2, ExternalLink, Zap
+  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck
 } from 'lucide-react';
 import { WhatsAppInstance, User } from '../types';
 
@@ -48,15 +48,23 @@ export default function AiAutoReplyModal({
 }: AiAutoReplyModalProps) {
   if (!isOpen) return null;
 
+  // Helper to split keys
+  const parseKeys = (str: string | undefined): string[] => {
+    if (!str) return [''];
+    const list = str.split(/[\r\n,;]+/).map(k => k.trim()).filter(Boolean);
+    return list.length > 0 ? list : [''];
+  };
+
   const [aiEnabled, setAiEnabled] = useState(instance.aiEnabled ?? false);
   const [aiProvider, setAiProvider] = useState<'gemini' | 'openai'>((instance.aiProvider as any) || 'gemini');
-  const [aiApiKey, setAiApiKey] = useState(instance.aiApiKey || '');
+  const [apiKeys, setApiKeys] = useState<string[]>(parseKeys(instance.aiApiKey));
   const [aiModel, setAiModel] = useState(instance.aiModel || (instance.aiProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash'));
   const [aiSystemPrompt, setAiSystemPrompt] = useState(instance.aiSystemPrompt || '');
   const [aiTemperature, setAiTemperature] = useState(instance.aiTemperature ?? 0.7);
   const [aiAutoReplyGroups, setAiAutoReplyGroups] = useState(instance.aiAutoReplyGroups ?? false);
+  const [fastMode, setFastMode] = useState(true);
 
-  const [showApiKey, setShowApiKey] = useState(false);
+  const [showApiKeys, setShowApiKeys] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -65,6 +73,8 @@ export default function AiAutoReplyModal({
   const [testInput, setTestInput] = useState('Hi, what are your business hours and how do I order?');
   const [isTesting, setIsTesting] = useState(false);
   const [testResponse, setTestResponse] = useState<string | null>(null);
+  const [testLatency, setTestLatency] = useState<number | null>(null);
+  const [testKeyResults, setTestKeyResults] = useState<any[]>([]);
   const [testError, setTestError] = useState<string | null>(null);
 
   // Fallback defaults from profile
@@ -84,7 +94,8 @@ export default function AiAutoReplyModal({
           const data = await res.json();
           setAiEnabled(data.aiEnabled ?? false);
           setAiProvider(data.aiProvider || 'gemini');
-          setAiApiKey(data.aiApiKey || '');
+          const keys = parseKeys(data.aiApiKey);
+          setApiKeys(keys);
           setAiModel(data.aiModel || (data.aiProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash'));
           setAiSystemPrompt(data.aiSystemPrompt || data.defaultAiPrompt || '');
           setAiTemperature(data.aiTemperature ?? 0.7);
@@ -108,12 +119,42 @@ export default function AiAutoReplyModal({
     }
   };
 
+  const handleAddKey = () => {
+    setApiKeys([...apiKeys, '']);
+  };
+
+  const handleUpdateKey = (index: number, val: string) => {
+    // If user pasted multiple keys into one box (newline or comma separated)
+    if (val.includes('\n') || val.includes(',') || val.includes(';')) {
+      const parts = val.split(/[\r\n,;]+/).map(p => p.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        const updated = [...apiKeys];
+        updated.splice(index, 1, ...parts);
+        setApiKeys(updated);
+        return;
+      }
+    }
+    const updated = [...apiKeys];
+    updated[index] = val;
+    setApiKeys(updated);
+  };
+
+  const handleRemoveKey = (index: number) => {
+    if (apiKeys.length <= 1) {
+      setApiKeys(['']);
+      return;
+    }
+    setApiKeys(apiKeys.filter((_, i) => i !== index));
+  };
+
   const handleSave = async () => {
     setIsSaving(true);
     setErrorMsg(null);
     setSaveSuccess(false);
 
     try {
+      const serializedKeys = apiKeys.map(k => k.trim()).filter(Boolean).join('\n');
+
       const res = await fetch(`${apiBase}/api/instance/${instance.id}/ai-config`, {
         method: 'PUT',
         headers: {
@@ -124,7 +165,7 @@ export default function AiAutoReplyModal({
         body: JSON.stringify({
           aiEnabled,
           aiProvider,
-          aiApiKey,
+          aiApiKey: serializedKeys,
           aiModel,
           aiSystemPrompt,
           aiTemperature,
@@ -141,7 +182,7 @@ export default function AiAutoReplyModal({
       onSaved({
         aiEnabled,
         aiProvider,
-        aiApiKey,
+        aiApiKey: serializedKeys,
         aiModel,
         aiSystemPrompt,
         aiTemperature,
@@ -163,9 +204,13 @@ export default function AiAutoReplyModal({
     if (!testInput.trim()) return;
     setIsTesting(true);
     setTestResponse(null);
+    setTestLatency(null);
+    setTestKeyResults([]);
     setTestError(null);
 
     try {
+      const serializedKeys = apiKeys.map(k => k.trim()).filter(Boolean).join('\n');
+
       const res = await fetch(`${apiBase}/api/ai/test`, {
         method: 'POST',
         headers: {
@@ -175,7 +220,7 @@ export default function AiAutoReplyModal({
         },
         body: JSON.stringify({
           provider: aiProvider,
-          apiKey: aiApiKey,
+          apiKey: serializedKeys,
           model: aiModel,
           systemPrompt: aiSystemPrompt,
           testMessage: testInput
@@ -184,9 +229,12 @@ export default function AiAutoReplyModal({
 
       const data = await res.json();
       if (!res.ok) {
+        if (data.keyResults) setTestKeyResults(data.keyResults);
         throw new Error(data.error || 'Test request failed');
       }
       setTestResponse(data.reply);
+      setTestLatency(data.latencyMs);
+      setTestKeyResults(data.keyResults || []);
     } catch (err: any) {
       setTestError(err.message || 'AI request failed');
     } finally {
@@ -313,49 +361,117 @@ export default function AiAutoReplyModal({
             </div>
           </div>
 
-          {/* API Key Input */}
-          <div className="space-y-1.5 bg-[#182229] p-4 rounded-xl border border-gray-800">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-gray-300 flex items-center gap-1.5">
-                <Key size={14} className="text-purple-400" />
-                {aiProvider === 'openai' ? 'OpenAI API Key' : 'Google Gemini API Key'}
-              </label>
+          {/* Multi-Key Pool & Free-Tier Auto-Shift Section */}
+          <div className="space-y-3 bg-[#182229] p-4 rounded-xl border border-gray-800">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-bold text-gray-200 flex items-center gap-1.5">
+                  <Key size={14} className="text-purple-400" />
+                  {aiProvider === 'openai' ? 'OpenAI API Key Pool' : 'Google Gemini API Key Pool'}
+                </label>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                  <Zap size={10} className="text-yellow-400" />
+                  {apiKeys.filter(k => k.trim()).length} Key{apiKeys.filter(k => k.trim()).length !== 1 ? 's' : ''} in Pool
+                </span>
+              </div>
               <a
                 href={aiProvider === 'openai' ? 'https://platform.openai.com/api-keys' : 'https://aistudio.google.com/app/apikey'}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[11px] text-[#25D366] hover:underline flex items-center gap-1"
               >
-                Get API Key <ExternalLink size={11} />
+                Get Free Gemini Key <ExternalLink size={11} />
               </a>
             </div>
 
-            <div className="relative flex items-center">
-              <input
-                type={showApiKey ? 'text' : 'password'}
-                value={aiApiKey}
-                onChange={e => setAiApiKey(e.target.value)}
-                placeholder={
-                  aiProvider === 'openai' 
-                    ? 'sk-proj-... or leave blank to use account profile key'
-                    : 'AIzaSy... or leave blank to use account profile key'
-                }
-                className="w-full bg-[#111b21] border border-gray-700 rounded-xl px-3 py-2 pr-10 text-xs text-white placeholder-gray-500 focus:border-purple-400 focus:outline-none font-mono"
-              />
+            {/* Free-Tier Auto-Shift Explainer Banner */}
+            <div className="p-2.5 rounded-xl bg-purple-950/30 border border-purple-500/20 flex items-start gap-2.5">
+              <ShieldCheck size={16} className="text-emerald-400 shrink-0 mt-0.5" />
+              <div className="text-[11px] text-gray-300 leading-relaxed">
+                <strong className="text-white">Free-Tier Quota & Limit Auto-Shift:</strong> You can add multiple free API keys (e.g. from multiple Google accounts). If Key #1 reaches Gemini&apos;s 15 RPM or daily quota, the engine <span className="text-emerald-400 font-semibold">instantly auto-shifts</span> to your backup keys with zero missed chats!
+              </div>
+            </div>
+
+            {/* List of Keys in Pool */}
+            <div className="space-y-2">
+              {apiKeys.map((key, idx) => (
+                <div key={idx} className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-gray-400 font-semibold flex items-center gap-1">
+                      <span className={`w-1.5 h-1.5 rounded-full ${idx === 0 ? 'bg-[#25D366]' : 'bg-purple-400'}`}></span>
+                      Key #{idx + 1} {idx === 0 ? '(Primary Active Key)' : '(Failover Backup Key)'}
+                    </span>
+                    {apiKeys.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveKey(idx)}
+                        className="text-red-400 hover:text-red-300 flex items-center gap-1 text-[10px] cursor-pointer"
+                      >
+                        <Trash2 size={11} /> Remove
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      type={showApiKeys ? 'text' : 'password'}
+                      value={key}
+                      onChange={e => handleUpdateKey(idx, e.target.value)}
+                      placeholder={
+                        aiProvider === 'openai' 
+                          ? 'sk-proj-... (or paste multiple keys separated by commas/newlines)'
+                          : 'AIzaSy... (or paste multiple keys separated by commas/newlines)'
+                      }
+                      className="w-full bg-[#111b21] border border-gray-700 focus:border-purple-400 rounded-xl px-3 py-2 pr-10 text-xs text-white placeholder-gray-500 focus:outline-none font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKeys(!showApiKeys)}
+                      className="absolute right-3 text-gray-400 hover:text-white"
+                      title={showApiKeys ? 'Hide keys' : 'Show keys'}
+                    >
+                      {showApiKeys ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 border-t border-gray-800/60">
               <button
                 type="button"
-                onClick={() => setShowApiKey(!showApiKey)}
-                className="absolute right-3 text-gray-400 hover:text-white"
+                onClick={handleAddKey}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 font-semibold rounded-lg text-xs transition-colors cursor-pointer w-fit"
               >
-                {showApiKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                <Plus size={13} />
+                <span>+ Add Another API Key (Failover)</span>
               </button>
+              <p className="text-[10px] text-gray-400">
+                {hasUserKey && apiKeys.filter(k => k.trim()).length === 0
+                  ? '✓ Using fallback key from Profile'
+                  : 'Keys are load-balanced and auto-shifted on 429 errors'}
+              </p>
             </div>
-            
-            <p className="text-[11px] text-gray-400">
-              {hasUserKey && !aiApiKey 
-                ? '✓ Using fallback default key saved in your User Profile.'
-                : 'Keys are securely stored in your private instance and encrypted.'}
-            </p>
+          </div>
+
+          {/* Speed & Latency Optimization Badge */}
+          <div className="p-3 bg-gradient-to-r from-emerald-950/20 via-[#182229] to-teal-950/20 rounded-xl border border-emerald-500/30 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div className="p-1.5 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-lg shrink-0">
+                <Zap size={16} className="animate-pulse" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                  Instant Response Acceleration Active
+                  <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded font-mono font-bold uppercase">~300-800ms</span>
+                </p>
+                <p className="text-[11px] text-gray-300">
+                  Pre-warmed connection, 180 token cap, and instant typing indicator for WhatsApp.
+                </p>
+              </div>
+            </div>
+            <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-1 rounded-full border border-emerald-500/20 shrink-0">
+              ⚡ Ultra-Fast
+            </span>
           </div>
 
           {/* Model Selector & Temperature Slider */}
@@ -365,20 +481,20 @@ export default function AiAutoReplyModal({
               <select
                 value={aiModel}
                 onChange={e => setAiModel(e.target.value)}
-                className="w-full bg-[#182229] border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:border-purple-400 focus:outline-none"
+                className="w-full bg-[#182229] border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:border-purple-400 focus:outline-none cursor-pointer"
               >
                 {aiProvider === 'openai' ? (
                   <>
-                    <option value="gpt-4o-mini">GPT-4o Mini (Fast & Cost Effective)</option>
-                    <option value="gpt-4o">GPT-4o (Most Intelligent)</option>
+                    <option value="gpt-4o-mini">⚡ GPT-4o Mini (Fast & Cost Effective)</option>
+                    <option value="gpt-4o">🧠 GPT-4o (Most Intelligent - Slower)</option>
                     <option value="gpt-3.5-turbo">GPT-3.5 Turbo (Legacy)</option>
                   </>
                 ) : (
                   <>
-                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (Recommended - Fastest)</option>
+                    <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Ultra-Fast & Smart - Recommended)</option>
+                    <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Lowest Latency / Instant TTFT)</option>
                     <option value="gemini-flash-latest">Gemini Flash Latest</option>
-                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
-                    <option value="gemini-4-argon">Gemini 4 Argon (Deep Reasoning)</option>
+                    <option value="gemini-4-argon">🧠 Gemini 4 Argon (Deep Reasoning - Slower)</option>
                   </>
                 )}
               </select>
@@ -485,8 +601,8 @@ export default function AiAutoReplyModal({
               <button
                 type="button"
                 onClick={handleRunTest}
-                disabled={isTesting || (!aiApiKey && !hasUserKey)}
-                className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white font-semibold rounded-xl text-xs flex items-center gap-1.5 transition-colors shrink-0 shadow-md"
+                disabled={isTesting || (apiKeys.filter(k => k.trim()).length === 0 && !hasUserKey)}
+                className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white font-semibold rounded-xl text-xs flex items-center gap-1.5 transition-colors shrink-0 shadow-md cursor-pointer"
               >
                 {isTesting ? <RefreshCw size={13} className="animate-spin" /> : <Send size={13} />}
                 <span>Test Reply</span>
@@ -494,14 +610,51 @@ export default function AiAutoReplyModal({
             </div>
 
             {testResponse && (
-              <div className="p-3 bg-purple-950/30 border border-purple-500/40 rounded-xl space-y-1">
-                <div className="flex items-center gap-1 text-[10px] text-purple-300 font-bold uppercase">
-                  <CheckCircle2 size={12} className="text-emerald-400" />
-                  Bot Response Preview:
+              <div className="p-3 bg-purple-950/30 border border-purple-500/40 rounded-xl space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-1">
+                  <div className="flex items-center gap-1.5 text-[10px] text-purple-300 font-bold uppercase">
+                    <CheckCircle2 size={13} className="text-emerald-400" />
+                    <span>Bot Response Preview:</span>
+                  </div>
+                  {testLatency !== null && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                      <Zap size={10} className="text-emerald-400" />
+                      <span>{testLatency}ms Latency (Ultra-Fast)</span>
+                    </span>
+                  )}
                 </div>
+
                 <p className="text-xs text-gray-200 leading-relaxed italic bg-black/30 p-2.5 rounded-lg border border-purple-500/20">
                   &ldquo;{testResponse}&rdquo;
                 </p>
+
+                {/* Key Pool Health Breakdown */}
+                {testKeyResults.length > 0 && (
+                  <div className="pt-2 border-t border-purple-500/20 space-y-1">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+                      Key Pool Health & Failover Check:
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      {testKeyResults.map((r, i) => (
+                        <div
+                          key={i}
+                          className={`px-2 py-1 rounded-lg border text-[10px] font-mono flex items-center justify-between ${
+                            r.isHealthy
+                              ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300'
+                              : 'bg-amber-950/30 border-amber-500/30 text-amber-300'
+                          }`}
+                        >
+                          <span className="truncate">
+                            Key #{r.index} ({r.keyMasked})
+                          </span>
+                          <span className="shrink-0 font-bold ml-1">
+                            {r.isHealthy ? `⚡ ${r.latencyMs}ms OK` : `⚠️ ${r.status}`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

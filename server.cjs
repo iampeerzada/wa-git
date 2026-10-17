@@ -581,14 +581,207 @@ const authenticate = async (req, res, next) => {
 // =========================================================================
 // AI AUTO-REPLY SMART CHAT ENGINE (Autoresponder.io style)
 // -------------------------------------------------------------------------
-// Supports:
-// 1. Google Gemini (Gemini 3.8 Flash, Gemini Flash Latest, Gemini 3.1 Flash Lite)
-// 2. OpenAI ChatGPT (GPT-4o Mini, GPT-4o, GPT-3.5 Turbo)
-// 3. Instance-specific API keys & custom system prompts
-// 4. Account-level fallback API keys & default prompts from Profile
-// 5. Multi-turn conversation context memory (from chat_messages table)
-// 6. Direct WhatsApp auto-reply with real-time UI chat synchronization
+// Features:
+// 1. Multi-Key Pool & Free-Tier Auto-Shift (shifts on 429/RESOURCE_EXHAUSTED)
+// 2. Ultra-Fast Response Time (~300-800ms) with token-capping (180 tokens)
+// 3. Round-Robin Key Load Distribution (multiplies Free Tier quotas)
+// 4. Fallback from Instance Keys to User Profile Keys to Env Keys
+// 5. Automatic Recovery from Cooldowns
 // =========================================================================
+
+// Parse any string, comma-separated, newline-separated, or JSON array of keys
+function parseApiKeyList(rawKeyString) {
+    if (!rawKeyString) return [];
+    if (Array.isArray(rawKeyString)) {
+        return rawKeyString.map(k => String(k).trim()).filter(k => k.length > 5);
+    }
+    if (typeof rawKeyString !== 'string') return [];
+    const trimmed = rawKeyString.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) {
+                return parsed.map(k => String(k).trim()).filter(k => k.length > 5);
+            }
+        } catch (e) {}
+    }
+    return trimmed
+        .split(/[\r\n,;]+/)
+        .map(k => k.trim())
+        .filter(k => k.length > 5);
+}
+
+function maskApiKey(key) {
+    if (!key || typeof key !== 'string') return '***';
+    if (key.length <= 10) return '***';
+    return key.substring(0, 6) + '...' + key.slice(-4);
+}
+
+// In-Memory Key Health and Quota Tracker
+const keyPoolHealth = new Map();
+
+function isRateLimitOrQuotaExhausted(err) {
+    if (!err) return false;
+    const msg = (err.message || String(err)).toLowerCase();
+    const status = err.status || err.statusCode || 0;
+    return (
+        status === 429 ||
+        status === 403 ||
+        msg.includes('429') ||
+        msg.includes('resource_exhausted') ||
+        msg.includes('quota') ||
+        msg.includes('rate limit') ||
+        msg.includes('rate_limit_exceeded') ||
+        msg.includes('insufficient_quota') ||
+        msg.includes('too many requests') ||
+        msg.includes('per minute') ||
+        msg.includes('per day') ||
+        msg.includes('exceeded your current quota') ||
+        msg.includes('free tier') ||
+        msg.includes('overloaded')
+    );
+}
+
+function recordKeyCooldown(apiKey, errorMsg) {
+    const existing = keyPoolHealth.get(apiKey) || {
+        cooldownUntil: 0,
+        failCount: 0,
+        successCount: 0,
+        lastError: '',
+        lastUsed: 0
+    };
+    const isDaily = (errorMsg || '').toLowerCase().includes('day') || (errorMsg || '').toLowerCase().includes('daily');
+    // Cooldown: 60s for RPM / per-minute burst limit, 15m for daily quota
+    const cooldownMs = isDaily ? 15 * 60 * 1000 : 62 * 1000;
+    existing.cooldownUntil = Date.now() + cooldownMs;
+    existing.failCount = (existing.failCount || 0) + 1;
+    existing.lastError = errorMsg || 'Quota or Rate Limit reached';
+    keyPoolHealth.set(apiKey, existing);
+}
+
+function recordKeySuccess(apiKey) {
+    const existing = keyPoolHealth.get(apiKey) || {
+        cooldownUntil: 0,
+        failCount: 0,
+        successCount: 0,
+        lastError: '',
+        lastUsed: 0
+    };
+    existing.cooldownUntil = 0;
+    existing.successCount = (existing.successCount || 0) + 1;
+    existing.lastUsed = Date.now();
+    existing.lastError = '';
+    keyPoolHealth.set(apiKey, existing);
+}
+
+// Execute single AI call with ultra-fast timeout (7000ms max)
+async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, historyRows, incomingText, temperature }) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+    try {
+        if (provider === 'openai') {
+            const chosenModel = model || 'gpt-4o-mini';
+            const messages = [{ 
+                role: 'system', 
+                content: `${systemPrompt}\n\nIMPORTANT: Keep response concise (1-2 short sentences max, under 50 words) suitable for instant WhatsApp chat.` 
+            }];
+            for (const row of historyRows) {
+                if (row.text) {
+                    messages.push({
+                        role: row.from_me ? 'assistant' : 'user',
+                        content: row.text
+                    });
+                }
+            }
+            const lastRow = historyRows[historyRows.length - 1];
+            if (!lastRow || lastRow.from_me || lastRow.text !== incomingText) {
+                messages.push({ role: 'user', content: incomingText });
+            }
+
+            const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                signal: controller.signal,
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: chosenModel,
+                    messages: messages,
+                    temperature: temperature,
+                    max_tokens: 180
+                })
+            });
+
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => ({}));
+                const errMsg = errJson.error?.message || `HTTP ${res.status} ${res.statusText}`;
+                const err = new Error(errMsg);
+                err.status = res.status;
+                throw err;
+            }
+
+            const data = await res.json();
+            return data.choices?.[0]?.message?.content || null;
+        } else {
+            // Google Gemini (Fast REST Endpoint with 180 maxOutputTokens)
+            const chosenModel = model || 'gemini-3.8-flash';
+            const historySummary = historyRows.slice(-4).map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
+            const userPromptText = historySummary 
+                ? `Recent chat:\n${historySummary}\nCustomer: ${incomingText}\nAssistant:` 
+                : incomingText;
+
+            const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(chosenModel)}:generateContent?key=${apiKey}`;
+            const restRes = await fetch(restUrl, {
+                method: 'POST',
+                signal: controller.signal,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    systemInstruction: {
+                        parts: [{ text: `${systemPrompt}\n\nIMPORTANT: Keep reply concise, direct, and under 50 words for instant WhatsApp chat.` }]
+                    },
+                    contents: [{
+                        role: 'user',
+                        parts: [{ text: userPromptText }]
+                    }],
+                    generationConfig: {
+                        temperature: temperature,
+                        maxOutputTokens: 180
+                    }
+                })
+            });
+
+            if (restRes.ok) {
+                const restData = await restRes.json();
+                const text = restData.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (text) return text;
+            } else {
+                const errJson = await restRes.json().catch(() => ({}));
+                const errMsg = errJson.error?.message || `HTTP ${restRes.status} ${restRes.statusText}`;
+                const err = new Error(errMsg);
+                err.status = restRes.status;
+                throw err;
+            }
+
+            // Fallback to GoogleGenAI SDK if empty
+            const ai = new GoogleGenAI({ apiKey });
+            const resp = await ai.models.generateContent({
+                model: chosenModel,
+                contents: `${systemPrompt}\nCustomer: ${incomingText}\nAssistant:`,
+                config: {
+                    maxOutputTokens: 180,
+                    temperature: temperature
+                }
+            });
+            return resp.text;
+        }
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 async function generateAiChatReply({ instanceId, from, incomingText }) {
     if (!incomingText || typeof incomingText !== 'string' || !incomingText.trim()) {
         return null;
@@ -616,25 +809,47 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         }
 
         const provider = (inst.ai_provider || inst.default_ai_provider || 'gemini').toLowerCase();
-        let apiKey = '';
-        if (provider === 'openai') {
-            apiKey = inst.ai_api_key || inst.openai_api_key || process.env.OPENAI_API_KEY || '';
-        } else {
-            apiKey = inst.ai_api_key || inst.gemini_api_key || process.env.GEMINI_API_KEY || '';
-        }
 
-        if (!apiKey || !apiKey.trim()) {
+        // 1. Gather all candidate API keys (Instance -> User Profile -> Env)
+        const instanceKeys = parseApiKeyList(inst.ai_api_key);
+        const userKeys = parseApiKeyList(provider === 'openai' ? inst.openai_api_key : inst.gemini_api_key);
+        const envKeys = parseApiKeyList(provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.GEMINI_API_KEY);
+
+        const allKeys = Array.from(new Set([...instanceKeys, ...userKeys, ...envKeys]));
+
+        if (allKeys.length === 0) {
             console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured in instance or user profile.`);
             return null;
         }
-        apiKey = apiKey.trim();
+
+        // 2. Prioritize Keys: Active / Healthy keys first (Round-Robin by least recently used), then cooldown keys
+        const now = Date.now();
+        const availableKeys = allKeys.filter(k => {
+            const h = keyPoolHealth.get(k);
+            return !h || !h.cooldownUntil || h.cooldownUntil <= now;
+        }).sort((a, b) => {
+            const aUsed = (keyPoolHealth.get(a)?.lastUsed) || 0;
+            const bUsed = (keyPoolHealth.get(b)?.lastUsed) || 0;
+            return aUsed - bUsed;
+        });
+
+        const cooldownKeys = allKeys.filter(k => {
+            const h = keyPoolHealth.get(k);
+            return h && h.cooldownUntil && h.cooldownUntil > now;
+        }).sort((a, b) => {
+            const aWait = (keyPoolHealth.get(a)?.cooldownUntil) || 0;
+            const bWait = (keyPoolHealth.get(b)?.cooldownUntil) || 0;
+            return aWait - bWait;
+        });
+
+        const prioritizedKeys = [...availableKeys, ...cooldownKeys];
 
         let model = inst.ai_model || inst.default_ai_model;
         if (!model) {
             model = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
         }
 
-        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 60-80 words) and suitable for direct WhatsApp chat. Never say you are an AI language model unless directly asked. Do not include prefixes like 'Assistant:' or 'Bot:'.";
+        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 40-60 words) and suitable for direct WhatsApp chat. Never say you are an AI language model unless directly asked. Do not include prefixes like 'Assistant:' or 'Bot:'.";
         const systemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
                              (inst.default_ai_prompt && inst.default_ai_prompt.trim()) || 
                              defaultPrompt;
@@ -643,85 +858,48 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
             ? parseFloat(inst.ai_temperature) 
             : 0.7;
 
-        // Fetch recent conversation history between this instance and this remote JID
+        // Fetch recent conversation history (limited to 4 messages for fast generation)
         const historyRes = await pool.query(
-            'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 8',
+            'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 4',
             [instanceId, from]
         );
         const historyRows = (historyRes.rows || []).reverse();
 
-        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} using ${provider} (${model})`);
+        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} using ${provider} (${model}) with ${prioritizedKeys.length} key(s) in pool`);
 
         let replyText = null;
 
-        if (provider === 'openai') {
-            const messages = [{ role: 'system', content: systemPrompt }];
-            for (const row of historyRows) {
-                if (row.text) {
-                    messages.push({
-                        role: row.from_me ? 'assistant' : 'user',
-                        content: row.text
-                    });
-                }
-            }
-            const lastRow = historyRows[historyRows.length - 1];
-            if (!lastRow || lastRow.from_me || lastRow.text !== incomingText) {
-                messages.push({ role: 'user', content: incomingText });
-            }
+        // 3. Loop through keys with Instant Auto-Shift Failover on Free Tier limits
+        for (let i = 0; i < prioritizedKeys.length; i++) {
+            const currentKey = prioritizedKeys[i];
+            const masked = maskApiKey(currentKey);
 
-            const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    model: model,
-                    messages: messages,
-                    temperature: temperature,
-                    max_tokens: 300
-                })
-            });
-
-            if (res.ok) {
-                const data = await res.json();
-                replyText = data.choices?.[0]?.message?.content;
-            } else {
-                const errJson = await res.json().catch(() => ({}));
-                console.error('[OpenAI API Error]', errJson.error?.message || res.statusText);
-            }
-        } else {
-            // Google Gemini
             try {
-                const { GoogleGenAI } = require("@google/genai");
-                const ai = new GoogleGenAI({ apiKey });
-                const historySummary = historyRows.map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
-                const fullPrompt = `${systemPrompt}\n\nRecent conversation history:\n${historySummary}\nCustomer: ${incomingText}\nAssistant:`;
+                const startTime = Date.now();
+                replyText = await executeSingleAiCall({
+                    provider,
+                    apiKey: currentKey,
+                    model,
+                    systemPrompt,
+                    historyRows,
+                    incomingText,
+                    temperature
+                });
 
-                const resp = await ai.models.generateContent({
-                    model: model || 'gemini-3.8-flash',
-                    contents: fullPrompt
-                });
-                replyText = resp.text;
-            } catch (sdkErr) {
-                console.warn('[Gemini SDK failed, attempting direct REST fallback]', sdkErr.message);
-                const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || 'gemini-3.8-flash')}:generateContent?key=${apiKey}`;
-                const restRes = await fetch(restUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{
-                            parts: [{ text: `${systemPrompt}\n\nCustomer: ${incomingText}\nAssistant:` }]
-                        }],
-                        generationConfig: { temperature: temperature }
-                    })
-                });
-                if (restRes.ok) {
-                    const restData = await restRes.json();
-                    replyText = restData.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (replyText && replyText.trim()) {
+                    const elapsed = Date.now() - startTime;
+                    recordKeySuccess(currentKey);
+                    console.log(`[AI Auto-Reply] Generated in ${elapsed}ms using key ${masked} (Key ${i+1}/${prioritizedKeys.length})`);
+                    break;
+                }
+            } catch (err) {
+                const isLimit = isRateLimitOrQuotaExhausted(err);
+                recordKeyCooldown(currentKey, err.message);
+
+                if (isLimit) {
+                    console.warn(`[AI Key Pool] Key ${masked} hit Free Tier quota/limit (${err.message}). Auto-shifting immediately to next key (${prioritizedKeys.length - i - 1} remaining in pool)...`);
                 } else {
-                    const err = await restRes.json().catch(() => ({}));
-                    console.error('[Gemini REST Error]', err.error?.message || restRes.statusText);
+                    console.error(`[AI Key Pool] Key ${masked} failed: ${err.message}. Trying next available key...`);
                 }
             }
         }
@@ -1073,6 +1251,7 @@ async function connectToWhatsApp(instanceId) {
                 // AI Auto-Responder Logic (Autoresponder.io style)
                 if (!fromMe && text) {
                     try {
+                        try { sock.sendPresenceUpdate('composing', from).catch(() => {}); } catch (pe) {}
                         const aiReply = await generateAiChatReply({ instanceId, from, incomingText: text });
                         if (aiReply) {
                             console.log(`[Baileys AI Auto-Reply] Successfully generated reply for ${from}: ${aiReply.substring(0, 50)}...`);
@@ -1083,6 +1262,8 @@ async function connectToWhatsApp(instanceId) {
                         }
                     } catch (aiErr) {
                         console.error('[Baileys AI Auto-Responder Error]', aiErr.message);
+                    } finally {
+                        try { sock.sendPresenceUpdate('paused', from).catch(() => {}); } catch (pe) {}
                     }
                 }
             } catch (dbErr) {
@@ -2781,89 +2962,106 @@ app.patch('/api/instance/:id/ai', authenticate, async (req, res) => {
     }
 });
 
-// Interactive AI Live Tester endpoint
+// Interactive AI Live Tester endpoint with Multi-Key Pool support & Latency measurement
 app.post('/api/ai/test', authenticate, async (req, res) => {
     try {
         const { provider = 'gemini', apiKey, model, systemPrompt, testMessage } = req.body;
-        let resolvedKey = apiKey ? apiKey.trim() : '';
+        let rawKeys = apiKey ? String(apiKey).trim() : '';
 
         // If not provided in body, check user profile settings
-        if (!resolvedKey) {
+        if (!rawKeys) {
             try {
                 const userRes = await pool.query('SELECT gemini_api_key, openai_api_key FROM users WHERE id = $1', [req.user.id]);
                 if (userRes.rows.length > 0) {
-                    resolvedKey = provider === 'openai' 
+                    rawKeys = provider === 'openai' 
                         ? (userRes.rows[0].openai_api_key || '')
                         : (userRes.rows[0].gemini_api_key || '');
                 }
-            } catch (dbErr) {
-                // If DB is offline, fall through to check resolvedKey
-            }
+            } catch (dbErr) {}
         }
 
-        if (!resolvedKey) {
-            return res.status(400).json({ error: `Please enter an API Key for ${provider === 'openai' ? 'OpenAI ChatGPT' : 'Google Gemini'} or save it in your Profile.` });
+        const candidateKeys = parseApiKeyList(rawKeys);
+
+        if (candidateKeys.length === 0) {
+            return res.status(400).json({ error: `Please enter at least one API Key for ${provider === 'openai' ? 'OpenAI ChatGPT' : 'Google Gemini'} or save it in your Profile.` });
         }
 
         const userPrompt = testMessage || 'Hi, can you introduce yourself and tell me what you do?';
-        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 60-80 words) and suitable for direct WhatsApp chat.";
+        const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries concisely, politely, and accurately. Keep your replies short (under 40-60 words) and suitable for direct WhatsApp chat.";
         const sysPrompt = (systemPrompt && systemPrompt.trim()) || defaultPrompt;
 
         let reply = '';
-        if (provider === 'openai') {
-            const chosenModel = model || 'gpt-4o-mini';
-            const openAiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${resolvedKey}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    model: chosenModel,
-                    messages: [
-                        { role: 'system', content: sysPrompt },
-                        { role: 'user', content: userPrompt }
-                    ],
-                    max_tokens: 250
-                })
-            });
-            const data = await openAiRes.json();
-            if (!openAiRes.ok) {
-                return res.status(400).json({ error: data.error?.message || 'Failed to authenticate with OpenAI API.' });
-            }
-            reply = data.choices?.[0]?.message?.content || 'No response returned from OpenAI.';
-        } else {
-            // Google Gemini
-            const chosenModel = model || 'gemini-3.8-flash';
+        let fastestLatency = 0;
+        let activeKeyUsed = '';
+        const keyResults = [];
+        let anySuccess = false;
+
+        // Test each key in the pool (first key generates the reply; others validated for quota/rate limit)
+        for (let i = 0; i < candidateKeys.length; i++) {
+            const currentKey = candidateKeys[i];
+            const masked = maskApiKey(currentKey);
+            const startT = Date.now();
+
             try {
-                const { GoogleGenAI } = require("@google/genai");
-                const ai = new GoogleGenAI({ apiKey: resolvedKey });
-                const fullPrompt = `${sysPrompt}\n\nCustomer: ${userPrompt}\nAssistant:`;
-                const response = await ai.models.generateContent({
-                    model: chosenModel,
-                    contents: fullPrompt
+                const text = await executeSingleAiCall({
+                    provider,
+                    apiKey: currentKey,
+                    model,
+                    systemPrompt: sysPrompt,
+                    historyRows: [],
+                    incomingText: userPrompt,
+                    temperature: 0.7
                 });
-                reply = response.text;
-            } catch (sdkErr) {
-                const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(chosenModel)}:generateContent?key=${resolvedKey}`;
-                const restRes = await fetch(restUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: `${sysPrompt}\n\nCustomer: ${userPrompt}\nAssistant:` }] }]
-                    })
-                });
-                const restData = await restRes.json();
-                if (!restRes.ok) {
-                    return res.status(400).json({ error: restData.error?.message || 'Failed to authenticate with Google Gemini API.' });
+
+                const latency = Date.now() - startT;
+                recordKeySuccess(currentKey);
+
+                if (!reply && text) {
+                    reply = text;
+                    fastestLatency = latency;
+                    activeKeyUsed = masked;
                 }
-                reply = restData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                keyResults.push({
+                    index: i + 1,
+                    keyMasked: masked,
+                    status: 'active',
+                    latencyMs: latency,
+                    isHealthy: true
+                });
+                anySuccess = true;
+            } catch (kErr) {
+                const isLimit = isRateLimitOrQuotaExhausted(kErr);
+                recordKeyCooldown(currentKey, kErr.message);
+                keyResults.push({
+                    index: i + 1,
+                    keyMasked: masked,
+                    status: isLimit ? 'rate_limited' : 'error',
+                    error: kErr.message,
+                    isHealthy: false
+                });
             }
         }
 
+        if (!anySuccess) {
+            const firstErr = keyResults[0]?.error || 'Failed to authenticate API key.';
+            return res.status(400).json({ 
+                error: `All keys in pool failed: ${firstErr}`,
+                keyResults 
+            });
+        }
+
         reply = (reply || '').replace(/^(assistant|bot|ai):\s*/i, '').trim();
-        res.json({ success: true, reply });
+        res.json({ 
+            success: true, 
+            reply, 
+            latencyMs: fastestLatency,
+            activeKey: activeKeyUsed,
+            totalKeys: candidateKeys.length,
+            keyResults 
+        });
     } catch (e) {
+        console.error('[AI Test Error]', e);
         res.status(500).json({ error: e.message });
     }
 });

@@ -2,17 +2,28 @@ import React, { useState, useEffect } from 'react';
 import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle, ChevronDown, Image as ImageIcon, Sparkles } from 'lucide-react';
 import AiAutoReplyModal from './AiAutoReplyModal';
 
-export default function AutoResponderManager({ instances, currentUser, apiBase, mediaAssets = [] }: any) {
+export default function AutoResponderManager({ instances = [], currentUser, apiBase, mediaAssets = [] }: any) {
   const [automations, setAutomations] = useState([]);
-  const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider !== "meta")?.id || "");
+  const [localInstances, setLocalInstances] = useState(instances);
+  const [providerFilter, setProviderFilter] = useState<'all' | 'baileys' | 'meta'>('all');
+  const [selectedInstance, setSelectedInstance] = useState(instances[0]?.id || "");
   const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
 
   useEffect(() => {
-    if (instances.length > 0 && !selectedInstance) {
-      const metaInst = instances.find(i => i.provider !== "meta");
-      if (metaInst) setSelectedInstance(metaInst.id);
-    }
+    setLocalInstances(instances);
   }, [instances]);
+
+  const filteredInstances = localInstances.filter((i: any) => {
+    if (providerFilter === 'baileys') return i.provider !== 'meta';
+    if (providerFilter === 'meta') return i.provider === 'meta';
+    return true;
+  });
+
+  useEffect(() => {
+    if (filteredInstances.length > 0 && !filteredInstances.some((i: any) => i.id === selectedInstance)) {
+      setSelectedInstance(filteredInstances[0].id);
+    }
+  }, [providerFilter, localInstances]);
 
   const [templates, setTemplates] = useState([]);
   const [showMediaLib, setShowMediaLib] = useState(false);
@@ -32,10 +43,26 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
     action_type: 'message'
   });
 
+  const fetchTemplates = async (instId: string) => {
+    try {
+      const res = await fetch(`${apiBase}/api/meta/templates/${instId}`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const list = Array.isArray(data) ? data : (Array.isArray(data?.templates) ? data.templates : (Array.isArray(data?.data) ? data.data : []));
+        setTemplates(list);
+      }
+    } catch (e) {}
+  };
+
   useEffect(() => {
     if (selectedInstance) {
       fetchAutomations();
-      
+      const inst = localInstances.find((i: any) => i.id === selectedInstance);
+      if (inst?.provider === 'meta') {
+        fetchTemplates(selectedInstance);
+      }
     }
   }, [selectedInstance]);
 
@@ -201,65 +228,120 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
 
   const rootNodes = automations.filter(a => !a.parent_id);
 
+  const currentInst = localInstances.find((i: any) => i.id === selectedInstance) || filteredInstances[0] || localInstances[0];
+  const isMeta = currentInst?.provider === 'meta';
+
   return (
     <div className="p-3 sm:p-6 max-w-6xl mx-auto space-y-4">
+      {/* Top Channel Filter & Title */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-sm sm:text-base md:text-lg font-bold flex items-center gap-2 text-white">
-              <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-[#25D366] shrink-0" />
-              <span>Auto Responder Flow</span>
+              <Bot className={`w-4 h-4 sm:w-5 sm:h-5 ${isMeta ? 'text-emerald-400' : 'text-[#25D366]'} shrink-0`} />
+              <span>Auto Responder & Visual Menus</span>
             </h2>
-            <span className="text-[9px] sm:text-[10px] bg-[#25D366]/10 text-[#25D366] px-2 py-0.5 rounded-full border border-[#25D366]/20 font-bold uppercase tracking-wider">
-              Baileys Engine
-            </span>
+            {isMeta ? (
+              <span className="text-[9px] sm:text-[10px] bg-emerald-500/15 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold uppercase tracking-wider flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                Meta Cloud API
+              </span>
+            ) : (
+              <span className="text-[9px] sm:text-[10px] bg-[#25D366]/10 text-[#25D366] px-2 py-0.5 rounded-full border border-[#25D366]/20 font-bold uppercase tracking-wider flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#25D366]"></span>
+                Baileys QR Engine
+              </span>
+            )}
           </div>
-          <p className="text-[11px] sm:text-xs text-gray-400 mt-0.5">Create intelligent, nested conversational menus for Baileys / WhatsApp Web sessions.</p>
+          <p className="text-[11px] sm:text-xs text-gray-400 mt-0.5">
+            Configure automated keyword flows, interactive menus, and smart AI chat persona across both Baileys Web and Meta Cloud API channels.
+          </p>
         </div>
-        <div className="flex items-center gap-2 w-full sm:w-auto">
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+          {/* Channel Filter Pills */}
+          <div className="bg-[#182229] p-0.5 rounded-xl border border-gray-700/60 flex text-xs">
+            <button
+              type="button"
+              onClick={() => setProviderFilter('all')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${providerFilter === 'all' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
+            >
+              All ({localInstances.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setProviderFilter('baileys')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${providerFilter === 'baileys' ? 'bg-[#25D366]/20 text-[#25D366] shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
+            >
+              Baileys ({localInstances.filter((i: any) => i.provider !== 'meta').length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setProviderFilter('meta')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${providerFilter === 'meta' ? 'bg-emerald-500/20 text-emerald-400 shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
+            >
+              Meta API ({localInstances.filter((i: any) => i.provider === 'meta').length})
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
             <select 
               value={selectedInstance} 
               onChange={(e) => setSelectedInstance(e.target.value)}
               className="flex-1 sm:flex-initial bg-[#2a3942] border border-gray-700 px-3 py-1.5 rounded-xl text-xs text-white outline-none focus:ring-1 focus:ring-[#25D366] min-w-0 cursor-pointer"
             >
-              {instances.filter(i => i.provider !== 'meta').map(i => (
-                <option key={i.id} value={i.id}>{i.name}</option>
+              {filteredInstances.map((i: any) => (
+                <option key={i.id} value={i.id}>
+                  {i.provider === 'meta' ? '⚡ [Meta API]' : '📱 [Baileys]'} {i.name}
+                </option>
               ))}
             </select>
             <button 
               onClick={() => openAddNode(null)} 
-              className="bg-[#25D366] hover:bg-[#128c7e] text-black px-3.5 py-1.5 sm:py-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap shadow-md shadow-green-500/10 cursor-pointer shrink-0"
+              className={`${isMeta ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-[#25D366] hover:bg-[#128c7e] text-black'} px-3.5 py-1.5 sm:py-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap shadow-md cursor-pointer shrink-0`}
             >
               <Plus size={15} /> <span>New Flow</span>
             </button>
+          </div>
         </div>
       </div>
 
       {/* AI Smart Auto-Responder Banner (Autoresponder.io style) */}
-      <div className="bg-gradient-to-r from-purple-950/30 via-[#182229] to-purple-950/20 border border-purple-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+      <div className="bg-gradient-to-r from-purple-950/30 via-[#182229] to-indigo-950/20 border border-purple-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-xl bg-purple-500/15 border border-purple-500/30 text-purple-400 shrink-0 mt-0.5">
             <Sparkles size={20} className="animate-pulse" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h3 className="font-bold text-white text-sm">Smart AI Conversational Auto-Responder</h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-bold text-white text-sm">Smart AI Auto-Responder</h3>
               <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                Autoresponder.io Style
+                {isMeta ? 'Meta Cloud API Persona' : 'Baileys Web Persona'}
               </span>
+              {currentInst?.aiEnabled ? (
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-green-500/20 text-green-300 border border-green-500/30 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-ping"></span>
+                  AI Active ({currentInst.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini 3.8 Flash'})
+                </span>
+              ) : (
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-gray-700 text-gray-400 border border-gray-600">
+                  AI Disabled
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-300 mt-1 leading-relaxed">
-              Use Gemini or ChatGPT with your own API key & custom prompt to automatically chat with customers in the direct chat box when no keyword rule matches.
+              Equip <span className="font-semibold text-white">{currentInst?.name || 'this channel'}</span> with your Gemini or OpenAI API key & prompt persona. When a customer writes in and no menu rule triggers, the AI automatically replies in direct chat just like Autoresponder.io!
             </p>
           </div>
         </div>
         <button
           type="button"
           onClick={() => {
-            const inst = instances.find((i: any) => i.id === selectedInstance) || instances[0];
+            const inst = localInstances.find((i: any) => i.id === selectedInstance) || localInstances[0];
             if (inst) setShowAiModalFor(inst);
           }}
-          className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/30 shrink-0 cursor-pointer"
+          disabled={!currentInst}
+          className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/30 shrink-0 cursor-pointer"
         >
           <Bot size={15} />
           <span>Configure AI Persona</span>
@@ -324,7 +406,37 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
               </div>
 
               
+              {formData.action_type === 'message' && isMeta && (
+                <div>
+                  <label className="block text-[11px] font-bold text-emerald-400 uppercase tracking-wider mb-1">Meta Message Format</label>
+                  <select className="w-full bg-[#202c33] border border-gray-700 px-3 py-1.5 rounded-xl text-xs text-white outline-none cursor-pointer" value={formData.reply_type} onChange={e => setFormData({...formData, reply_type: e.target.value})}>
+                    <option value="text">Custom Text Message / Interactive Buttons</option>
+                    <option value="template">Official Meta Approved Template</option>
+                  </select>
+                </div>
+              )}
+
               {formData.action_type === 'message' && (
+                formData.reply_type === 'template' && isMeta ? (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Select Meta Template</label>
+                      <select required className="w-full bg-[#202c33] border border-gray-700 px-3 py-1.5 rounded-xl text-xs text-white outline-none cursor-pointer" value={formData.template_name} onChange={e => {
+                        const t = (templates as any[]).find((temp: any) => temp.name === e.target.value);
+                        setFormData({...formData, template_name: e.target.value, template_language: t?.language || 'en'});
+                      }}>
+                        <option value="">Select an approved template...</option>
+                        {(Array.isArray(templates) ? templates : []).filter((t: any) => t.status === 'APPROVED' || !t.status).map((t: any) => (
+                          <option key={t.id || t.name} value={t.name}>{t.name} ({t.language || 'en'})</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Media URL (Optional for Template Header)</label>
+                      <input type="url" placeholder="https://example.com/header.jpg" className="w-full bg-[#202c33] border border-gray-700 focus:border-emerald-500 outline-none px-3 py-1.5 rounded-xl text-xs text-white font-mono" value={formData.media_url || ''} onChange={(e: any) => setFormData({...formData, media_url: e.target.value})} />
+                    </div>
+                  </div>
+                ) : (
                     <div className="space-y-3">
                       <div>
                         <label className="block text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">Menu / Message Text</label>
@@ -367,13 +479,14 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
                         </div>
                       </div>
                     </div>
+                )
               )}
 
               <div className="pt-3 border-t border-gray-800 flex justify-end items-center gap-2">
                 <button type="button" onClick={() => setIsEditing(false)} className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-gray-400 hover:text-white transition-colors cursor-pointer">
                   Cancel
                 </button>
-                <button type="submit" className="bg-[#25D366] hover:bg-[#128c7e] text-black font-bold px-4 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-md shadow-green-500/10">
+                <button type="submit" className={`${isMeta ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-[#25D366] hover:bg-[#128c7e] text-black'} font-bold px-4 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-md shadow-green-500/10`}>
                   <Save size={15} /> <span>{formData.id ? 'Save Changes' : 'Save Option'}</span>
                 </button>
               </div>
@@ -384,14 +497,18 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
 
       {rootNodes.length === 0 ? (
         <div className="bg-[#1b262c] rounded-2xl border border-gray-700/50 p-6 sm:p-12 text-center shadow-lg my-2 max-w-lg mx-auto">
-          <div className="bg-[#25D366]/10 border border-[#25D366]/20 text-[#25D366] w-12 h-12 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-inner">
+          <div className={`${isMeta ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-[#25D366]/10 border-[#25D366]/20 text-[#25D366]'} border w-12 h-12 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-inner`}>
             <Bot size={24} className="sm:w-8 sm:h-8" />
           </div>
-          <h3 className="text-sm sm:text-base md:text-lg font-bold text-white mb-2">Build Your First Baileys Automation Flow</h3>
-          <p className="text-xs sm:text-sm text-gray-400 mb-6 max-w-xs sm:max-w-md mx-auto leading-relaxed">Create an automated conversational flow with unlimited nested menus for your connected WhatsApp Web / Baileys sessions.</p>
+          <h3 className="text-sm sm:text-base md:text-lg font-bold text-white mb-2">
+            Build Your First {isMeta ? 'Meta Cloud API' : 'Baileys'} Automation Flow
+          </h3>
+          <p className="text-xs sm:text-sm text-gray-400 mb-6 max-w-xs sm:max-w-md mx-auto leading-relaxed">
+            Create an automated conversational flow with unlimited nested menus for your connected {isMeta ? 'official Meta WhatsApp Business API' : 'WhatsApp Web / Baileys'} sessions.
+          </p>
           <button 
             onClick={() => openAddNode(null)} 
-            className="bg-[#25D366] hover:bg-[#128c7e] text-black px-4 sm:px-6 py-2 sm:py-2.5 rounded-xl inline-flex items-center justify-center gap-2 text-xs sm:text-sm font-bold shadow-md shadow-green-500/10 cursor-pointer"
+            className={`${isMeta ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-[#25D366] hover:bg-[#128c7e] text-black'} px-4 sm:px-6 py-2 sm:py-2.5 rounded-xl inline-flex items-center justify-center gap-2 text-xs sm:text-sm font-bold shadow-md cursor-pointer`}
           >
             <Plus size={16} /> <span>Create Main Menu Flow</span>
           </button>
@@ -411,7 +528,12 @@ export default function AutoResponderManager({ instances, currentUser, apiBase, 
           apiBase={apiBase}
           isOpen={!!showAiModalFor}
           onClose={() => setShowAiModalFor(null)}
-          onSaved={() => setShowAiModalFor(null)}
+          onSaved={(updated) => {
+            setLocalInstances((prev: any[]) =>
+              prev.map((i: any) => i.id === showAiModalFor.id ? { ...i, ...updated } : i)
+            );
+            setShowAiModalFor(null);
+          }}
         />
       )}
     </div>

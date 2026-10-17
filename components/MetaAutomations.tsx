@@ -1,15 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle, ChevronDown, Image as ImageIcon } from 'lucide-react';
+import { Bot, Plus, Trash2, ChevronRight, Edit, ArrowLeft, Home, MessageSquare, Webhook, X, Save, AlertCircle, ChevronDown, Image as ImageIcon, Sparkles } from 'lucide-react';
 import io from 'socket.io-client';
+import AiAutoReplyModal from './AiAutoReplyModal';
 
-export default function MetaAutomations({ instances, currentUser, apiBase, mediaAssets = [] }) {
-  const [automations, setAutomations] = useState([]);
-  const [selectedInstance, setSelectedInstance] = useState(instances.find(i => i.provider === "meta")?.id || "");
+export default function MetaAutomations({ instances = [], currentUser, apiBase, mediaAssets = [] }: any) {
+  const [automations, setAutomations] = useState<any[]>([]);
+  const metaInstances = instances.filter((i: any) => i.provider === "meta");
+  const [selectedInstance, setSelectedInstance] = useState(metaInstances[0]?.id || instances[0]?.id || "");
+  const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
+  const [localInstances, setLocalInstances] = useState(instances);
 
   useEffect(() => {
-    if (instances.length > 0 && !selectedInstance) {
-      const metaInst = instances.find(i => i.provider === "meta");
-      if (metaInst) setSelectedInstance(metaInst.id);
+    setLocalInstances(instances);
+  }, [instances]);
+
+  useEffect(() => {
+    if (metaInstances.length > 0 && (!selectedInstance || !instances.some((i: any) => i.id === selectedInstance))) {
+      setSelectedInstance(metaInstances[0].id);
     }
   }, [instances]);
 
@@ -224,33 +231,93 @@ export default function MetaAutomations({ instances, currentUser, apiBase, media
 
   const rootNodes = automations.filter(a => !a.parent_id);
 
+  const currentMetaInst = localInstances.find((i: any) => i.id === selectedInstance) || metaInstances[0];
+
   return (
     <div className="p-3 sm:p-6 max-w-6xl mx-auto space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2">
         <div>
-          <h2 className="text-sm sm:text-base md:text-lg font-bold flex items-center gap-2 text-white">
-            <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-blue-400 shrink-0" />
-            <span>Visual Flow Builder</span>
-          </h2>
-          <p className="text-[11px] sm:text-xs text-gray-400 mt-0.5">Create intelligent, nested conversational menus without limits.</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-sm sm:text-base md:text-lg font-bold flex items-center gap-2 text-white">
+              <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400 shrink-0" />
+              <span>Meta Auto-Responder & Flow Studio</span>
+            </h2>
+            <span className="text-[9px] sm:text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/20 font-bold uppercase tracking-wider flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+              Meta Cloud API
+            </span>
+          </div>
+          <p className="text-[11px] sm:text-xs text-gray-400 mt-0.5">Automate official WhatsApp Business API conversations with keyword menus, approved templates, and smart AI chat persona.</p>
         </div>
         <div className="flex items-center gap-2 w-full sm:w-auto">
-            <select 
-              value={selectedInstance} 
-              onChange={(e) => setSelectedInstance(e.target.value)}
-              className="flex-1 sm:flex-initial bg-[#2a3942] border border-gray-700 px-3 py-1.5 rounded-xl text-xs text-white outline-none focus:ring-1 focus:ring-blue-500 min-w-0 cursor-pointer"
-            >
-              {instances.filter(i => i.provider === 'meta').map(i => (
-                <option key={i.id} value={i.id}>{i.name}</option>
-              ))}
-            </select>
+            {metaInstances.length > 0 ? (
+              <select 
+                value={selectedInstance} 
+                onChange={(e) => setSelectedInstance(e.target.value)}
+                className="flex-1 sm:flex-initial bg-[#2a3942] border border-gray-700 px-3 py-1.5 rounded-xl text-xs text-white outline-none focus:ring-1 focus:ring-emerald-500 min-w-0 cursor-pointer"
+              >
+                {metaInstances.map((i: any) => (
+                  <option key={i.id} value={i.id}>{i.name} ({i.metaPhoneNumberId || i.id})</option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-xs text-amber-400/90 bg-amber-400/10 border border-amber-400/20 px-3 py-1.5 rounded-xl">
+                No Meta instances found
+              </span>
+            )}
             <button 
               onClick={() => openAddNode(null)} 
-              className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-1.5 sm:py-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap shadow-md shadow-blue-500/10 cursor-pointer shrink-0"
+              disabled={metaInstances.length === 0}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3.5 py-1.5 sm:py-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap shadow-md shadow-emerald-500/10 cursor-pointer shrink-0"
             >
               <Plus size={15} /> <span>New Flow</span>
             </button>
         </div>
+      </div>
+
+      {/* Smart AI Auto-Responder Banner for Meta Cloud API */}
+      <div className="bg-gradient-to-r from-emerald-950/40 via-[#182229] to-purple-950/40 border border-emerald-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl bg-purple-500/15 border border-purple-500/30 text-purple-400 shrink-0 mt-0.5">
+            <Sparkles size={20} className="animate-pulse" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-bold text-white text-sm">Smart AI Auto-Responder for Meta API</h3>
+              <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Official WABA
+              </span>
+              {currentMetaInst?.aiEnabled ? (
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-green-500/20 text-green-300 border border-green-500/30 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-ping"></span>
+                  AI Active ({currentMetaInst.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini 3.8 Flash'})
+                </span>
+              ) : (
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700">
+                  AI Disabled
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-300 mt-1 leading-relaxed">
+              Equip your official Meta Cloud API number with your own Gemini or OpenAI API key & prompt persona. When a customer reaches out and no keyword rule matches, the AI automatically replies in direct chat just like Autoresponder.io!
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            if (currentMetaInst) {
+              setShowAiModalFor(currentMetaInst);
+            } else if (metaInstances.length > 0) {
+              setShowAiModalFor(metaInstances[0]);
+            }
+          }}
+          disabled={!currentMetaInst}
+          className="px-4 py-2 bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/30 shrink-0 cursor-pointer"
+        >
+          <Bot size={15} />
+          <span>Configure AI Persona</span>
+        </button>
       </div>
 
       {isEditing && (
@@ -431,6 +498,22 @@ export default function MetaAutomations({ instances, currentUser, apiBase, media
             <AutomationNode key={root.id} node={root} />
           ))}
         </div>
+      )}
+
+      {showAiModalFor && (
+        <AiAutoReplyModal
+          instance={showAiModalFor}
+          currentUser={currentUser}
+          apiBase={apiBase}
+          isOpen={!!showAiModalFor}
+          onClose={() => setShowAiModalFor(null)}
+          onSaved={(updated) => {
+            setLocalInstances((prev: any[]) =>
+              prev.map((i: any) => i.id === showAiModalFor.id ? { ...i, ...updated } : i)
+            );
+            setShowAiModalFor(null);
+          }}
+        />
       )}
     </div>
   );

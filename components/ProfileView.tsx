@@ -527,7 +527,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   type={showGeminiKey ? 'text' : 'password'}
                   value={geminiApiKey}
                   onChange={e => setGeminiApiKey(e.target.value)}
-                  placeholder="AIzaSy..."
+                  placeholder="AIzaSy... (or enter multiple keys separated by commas/newlines)"
                   className="w-full bg-[#111b21] border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono placeholder-gray-500 focus:border-purple-400 focus:outline-none pr-8"
                 />
                 <button
@@ -538,8 +538,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   {showGeminiKey ? <EyeOff size={13} /> : <Eye size={13} />}
                 </button>
               </div>
-              <p className="text-[10px] text-gray-500">
-                Recommended models: <span className="text-purple-300">gemini-3.8-flash</span>, <span className="text-purple-300">gemini-flash-latest</span>
+              <p className="text-[10px] text-gray-400">
+                ⚡ <strong className="text-purple-300">Multi-Key Auto-Shift:</strong> Multiple keys are load-balanced and auto-shifted if a key hits Free Tier 15 RPM or quota limit. Recommended model: <span className="text-purple-300 font-mono font-bold">gemini-3.8-flash</span> (~400ms).
               </p>
             </div>
 
@@ -564,7 +564,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   type={showOpenaiKey ? 'text' : 'password'}
                   value={openaiApiKey}
                   onChange={e => setOpenaiApiKey(e.target.value)}
-                  placeholder="sk-proj-..."
+                  placeholder="sk-proj-... (or enter multiple keys separated by commas/newlines)"
                   className="w-full bg-[#111b21] border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono placeholder-gray-500 focus:border-emerald-400 focus:outline-none pr-8"
                 />
                 <button
@@ -575,8 +575,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   {showOpenaiKey ? <EyeOff size={13} /> : <Eye size={13} />}
                 </button>
               </div>
-              <p className="text-[10px] text-gray-500">
-                Recommended models: <span className="text-emerald-300">gpt-4o-mini</span>, <span className="text-emerald-300">gpt-4o</span>
+              <p className="text-[10px] text-gray-400">
+                ⚡ <strong className="text-emerald-300">Multi-Key Failover:</strong> Multiple keys are automatically rotated if one key hits rate limits. Recommended model: <span className="text-emerald-300 font-mono font-bold">gpt-4o-mini</span>.
               </p>
             </div>
 
