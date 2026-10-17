@@ -80,6 +80,9 @@ export default function AiAutoReplyModal({
   const [testKeyResults, setTestKeyResults] = useState<any[]>([]);
   const [testError, setTestError] = useState<string | null>(null);
 
+  // Fallback defaults from profile
+  const [hasUserKey, setHasUserKey] = useState(false);
+
   // Tab state & AI Execution History Logs state
   const [activeTab, setActiveTab] = useState<'settings' | 'logs'>('settings');
   const [aiLogs, setAiLogs] = useState<any[]>([]);
