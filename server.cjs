@@ -642,6 +642,24 @@ function maskApiKey(key) {
 // In-Memory Key Health and Quota Tracker
 const keyPoolHealth = new Map();
 
+// Default AI model failover fallback sequence for Gemini and OpenAI engines
+const GEMINI_MODEL_FALLBACKS = [
+    'gemini-3.8-flash',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro'
+];
+
+const OPENAI_MODEL_FALLBACKS = [
+    'gpt-4o-mini',
+    'gpt-4o',
+    'gpt-3.5-turbo'
+];
+
+// In-Memory Tracker to monitor active model and auto-shift model failovers per instance
+const instanceActiveModelMap = new Map();
+
 function isRateLimitOrQuotaExhausted(err) {
     if (!err) return false;
     const msg = (err.message || String(err)).toLowerCase();
@@ -698,7 +716,10 @@ async function logAiAutomationEvent({ instanceId, instanceName, provider, remote
 
 // Records key cooldown / failover status in key pool memory tracker
 function recordKeyCooldown(apiKey, errorMsg) {
-    const existing = keyPoolHealth.get(apiKey) || {
+    const cleanKey = String(apiKey || '').trim();
+    if (!cleanKey) return;
+
+    const existing = keyPoolHealth.get(cleanKey) || {
         cooldownUntil: 0,
         failCount: 0,
         successCount: 0,
@@ -721,12 +742,12 @@ function recordKeyCooldown(apiKey, errorMsg) {
     existing.cooldownUntil = Date.now() + cooldownMs;
     existing.failCount = (existing.failCount || 0) + 1;
     existing.lastError = errorMsg || 'Quota or Rate Limit reached';
-    keyPoolHealth.set(apiKey, existing);
+    keyPoolHealth.set(cleanKey, existing);
 
     // Broadcast key status update to connected UI instances
     if (io) {
         io.emit('key_pool_updated', {
-            apiKeyMasked: maskApiKey(apiKey),
+            apiKeyMasked: maskApiKey(cleanKey),
             status: 'cooldown',
             cooldownUntil: existing.cooldownUntil,
             error: existing.lastError
@@ -736,7 +757,10 @@ function recordKeyCooldown(apiKey, errorMsg) {
 
 // Records successful API key usage in key pool memory tracker
 function recordKeySuccess(apiKey, latencyMs) {
-    const existing = keyPoolHealth.get(apiKey) || {
+    const cleanKey = String(apiKey || '').trim();
+    if (!cleanKey) return;
+
+    const existing = keyPoolHealth.get(cleanKey) || {
         cooldownUntil: 0,
         failCount: 0,
         successCount: 0,
@@ -749,12 +773,12 @@ function recordKeySuccess(apiKey, latencyMs) {
     existing.lastUsed = Date.now();
     existing.lastLatencyMs = latencyMs || existing.lastLatencyMs || 0;
     existing.lastError = '';
-    keyPoolHealth.set(apiKey, existing);
+    keyPoolHealth.set(cleanKey, existing);
 
     // Broadcast key status update to connected UI instances
     if (io) {
         io.emit('key_pool_updated', {
-            apiKeyMasked: maskApiKey(apiKey),
+            apiKeyMasked: maskApiKey(cleanKey),
             status: 'active',
             latencyMs: existing.lastLatencyMs
         });
@@ -878,6 +902,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
 }
 
 async function generateAiChatReply({ instanceId, from, incomingText }) {
+    // Validate input text content
     if (!incomingText || typeof incomingText !== 'string' || !incomingText.trim()) {
         return null;
     }
@@ -900,6 +925,9 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         // Check if AI auto-responder is toggled ON for this instance
         if (!inst.ai_enabled) return null;
 
+        // Skip broadcast messages and status updates
+        if (from === 'status@broadcast') return null;
+
         // Skip group chats if auto-reply for groups is disabled
         if (from && from.endsWith('@g.us') && !inst.ai_auto_reply_groups) {
             return null;
@@ -909,12 +937,13 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         const instanceCategory = inst.provider === 'meta' ? 'meta' : 'baileys';
         const provider = (inst.ai_provider || inst.default_ai_provider || 'gemini').toLowerCase();
 
-        // Gather all candidate API keys from instance settings, user profile, and env
+        // Gather all candidate API keys from instance settings, user profile, and env (trimmed & deduplicated)
         const instanceKeys = parseApiKeyList(inst.ai_api_key);
         const userKeys = parseApiKeyList(provider === 'openai' ? inst.openai_api_key : inst.gemini_api_key);
         const envKeys = parseApiKeyList(provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.GEMINI_API_KEY);
 
-        const allKeys = Array.from(new Set([...instanceKeys, ...userKeys, ...envKeys]));
+        const rawAllKeys = [...instanceKeys, ...userKeys, ...envKeys];
+        const allKeys = Array.from(new Set(rawAllKeys.map(k => String(k).trim()).filter(k => k.length > 5)));
 
         if (allKeys.length === 0) {
             console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured.`);
@@ -956,10 +985,14 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
 
         const prioritizedKeys = [...availableKeys, ...cooldownKeys];
 
-        let model = inst.ai_model || inst.default_ai_model;
-        if (!model) {
-            model = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
+        // Determine primary model and construct fallback model sequence
+        let primaryModel = inst.ai_model || inst.default_ai_model;
+        if (!primaryModel) {
+            primaryModel = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
         }
+
+        const modelFallbackChain = provider === 'openai' ? OPENAI_MODEL_FALLBACKS : GEMINI_MODEL_FALLBACKS;
+        const candidateModels = Array.from(new Set([primaryModel, ...modelFallbackChain]));
 
         const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries politely, thoroughly, and accurately. Do not include prefixes like 'Assistant:' or 'Bot:'.";
         const systemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
@@ -974,91 +1007,133 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
             ? Number(inst.ai_max_tokens) 
             : 1800;
 
-        // Fetch recent 4 chat messages for context
+        // Fetch recent 4 chat messages for conversation context
         const historyRes = await pool.query(
             'SELECT from_me, text FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 ORDER BY timestamp DESC LIMIT 4',
             [instanceId, from]
         );
         const historyRows = (historyRes.rows || []).reverse();
 
-        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} (${instanceCategory}) using ${provider} (${model}) with ${prioritizedKeys.length} key(s) in pool`);
+        console.log(`[AI Auto-Reply] Generating reply for ${from} on instance ${instanceId} (${instanceCategory}) using ${provider} (${primaryModel}) with ${prioritizedKeys.length} key(s) in pool`);
 
         let replyText = null;
-        let successfulKeyMasked = '';
-        let successfulLatency = 0;
 
-        // Loop through candidate keys with instant auto-shift failover on rate limits
-        for (let i = 0; i < prioritizedKeys.length; i++) {
+        // Loop through candidate keys with dual API key and Model failover
+        keyLoop: for (let i = 0; i < prioritizedKeys.length; i++) {
             const currentKey = prioritizedKeys[i];
             const masked = maskApiKey(currentKey);
 
-            try {
-                const startTime = Date.now();
-                replyText = await executeSingleAiCall({
-                    provider,
-                    apiKey: currentKey,
-                    model,
-                    systemPrompt,
-                    historyRows,
-                    incomingText,
-                    temperature,
-                    maxTokens
-                });
+            // Loop through candidate models for current API key
+            for (let m = 0; m < candidateModels.length; m++) {
+                const currentModel = candidateModels[m];
 
-                if (replyText && replyText.trim()) {
-                    const elapsed = Date.now() - startTime;
-                    recordKeySuccess(currentKey, elapsed);
-                    successfulKeyMasked = masked;
-                    successfulLatency = elapsed;
-                    console.log(`[AI Auto-Reply] Success in ${elapsed}ms using key ${masked} (Key ${i+1}/${prioritizedKeys.length})`);
+                try {
+                    const startTime = Date.now();
+                    replyText = await executeSingleAiCall({
+                        provider,
+                        apiKey: currentKey,
+                        model: currentModel,
+                        systemPrompt,
+                        historyRows,
+                        incomingText,
+                        temperature,
+                        maxTokens
+                    });
 
-                    // Log successful AI generation into ai_automation_logs DB
+                    if (replyText && replyText.trim()) {
+                        const elapsed = Date.now() - startTime;
+                        recordKeySuccess(currentKey, elapsed);
+
+                        // If auto model failover occurred, update active model tracker & emit socket update
+                        const isShiftedModel = currentModel !== primaryModel;
+                        if (isShiftedModel) {
+                            instanceActiveModelMap.set(String(instanceId), {
+                                activeModel: currentModel,
+                                primaryModel: primaryModel,
+                                isShifted: true,
+                                shiftReason: `Auto-shifted to ${currentModel} due to tier limit on ${primaryModel}`,
+                                shiftTimestamp: Date.now()
+                            });
+                            if (io) {
+                                io.emit('model_failover_updated', {
+                                    instanceId,
+                                    activeModel: currentModel,
+                                    primaryModel: primaryModel,
+                                    isShifted: true
+                                });
+                            }
+                        } else {
+                            // Primary model succeeded, clear any previous failover shift
+                            instanceActiveModelMap.delete(String(instanceId));
+                        }
+
+                        console.log(`[AI Auto-Reply] Success in ${elapsed}ms using key ${masked} with model ${currentModel} (Key ${i+1}/${prioritizedKeys.length})`);
+
+                        // Log successful AI interaction into ai_automation_logs DB
+                        await logAiAutomationEvent({
+                            instanceId,
+                            instanceName,
+                            provider: instanceCategory,
+                            remoteJid: from,
+                            userPrompt: incomingText,
+                            aiResponse: replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim(),
+                            modelUsed: currentModel,
+                            apiKeyMasked: masked,
+                            status: isShiftedModel ? 'model_failover' : 'success',
+                            latencyMs: elapsed,
+                            errorMessage: isShiftedModel ? `Model failover triggered: ${primaryModel} -> ${currentModel}` : ''
+                        });
+
+                        break keyLoop;
+                    }
+                } catch (err) {
+                    const isLimit = isRateLimitOrQuotaExhausted(err);
+
+                    // If more fallback models exist for current key, failover to next model
+                    if (m < candidateModels.length - 1 && isLimit) {
+                        console.warn(`[AI Model Failover] Key ${masked} hit limit on ${currentModel} (${err.message}). Auto-switching to fallback model ${candidateModels[m + 1]}...`);
+                        await logAiAutomationEvent({
+                            instanceId,
+                            instanceName,
+                            provider: instanceCategory,
+                            remoteJid: from,
+                            userPrompt: incomingText,
+                            aiResponse: '',
+                            modelUsed: currentModel,
+                            apiKeyMasked: masked,
+                            status: 'model_failover',
+                            latencyMs: 0,
+                            errorMessage: `Model ${currentModel} limit: ${err.message}. Auto-switching to ${candidateModels[m + 1]}`
+                        });
+                        continue; // Try next model in loop
+                    }
+
+                    // Record key cooldown if all models for key failed
+                    recordKeyCooldown(currentKey, err.message);
+
+                    // Log failed key attempt into DB logs
                     await logAiAutomationEvent({
                         instanceId,
                         instanceName,
                         provider: instanceCategory,
                         remoteJid: from,
                         userPrompt: incomingText,
-                        aiResponse: replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim(),
-                        modelUsed: model,
+                        aiResponse: '',
+                        modelUsed: currentModel,
                         apiKeyMasked: masked,
-                        status: 'success',
-                        latencyMs: elapsed,
-                        errorMessage: ''
+                        status: isLimit ? 'rate_limited' : 'failed',
+                        latencyMs: 0,
+                        errorMessage: err.message || 'Key & Model failover triggered'
                     });
 
-                    break;
-                }
-            } catch (err) {
-                const isLimit = isRateLimitOrQuotaExhausted(err);
-                recordKeyCooldown(currentKey, err.message);
-
-                // Log failed key attempt in failover history logs
-                await logAiAutomationEvent({
-                    instanceId,
-                    instanceName,
-                    provider: instanceCategory,
-                    remoteJid: from,
-                    userPrompt: incomingText,
-                    aiResponse: '',
-                    modelUsed: model,
-                    apiKeyMasked: masked,
-                    status: isLimit ? 'rate_limited' : 'failed',
-                    latencyMs: 0,
-                    errorMessage: err.message || 'Key failover triggered'
-                });
-
-                if (isLimit) {
-                    console.warn(`[AI Key Pool] Key ${masked} hit Free Tier quota/limit (${err.message}). Auto-shifting immediately to next key (${prioritizedKeys.length - i - 1} remaining)...`);
-                } else {
-                    console.error(`[AI Key Pool] Key ${masked} failed: ${err.message}. Auto-shifting to next key...`);
+                    break; // Move to next API key
                 }
             }
         }
 
         if (!replyText || !replyText.trim()) return null;
 
-        // Strip any unwanted prefixes
+        // Strip unwanted leading prefixes
         replyText = replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim();
         return replyText;
     } catch (err) {
@@ -1400,8 +1475,150 @@ async function connectToWhatsApp(instanceId) {
                     console.error('[Webhook Fetch Error]', webhookErr.message);
                 }
 
-                // AI Auto-Responder Logic (Autoresponder.io style)
-                if (!fromMe && text) {
+                // Check for Keyword-based Auto-Responder Rules first
+                let ruleMatched = false;
+
+                if (!fromMe && text && from !== 'status@broadcast') {
+                    try {
+                        // Fetch active auto-responder rules for this instance
+                        const ruleResult = await pool.query(
+                            'SELECT * FROM auto_responder_rules WHERE instance_id = $1 AND is_active = TRUE',
+                            [instanceId]
+                        );
+
+                        const msgLower = text.trim().toLowerCase();
+                        const matchedRule = ruleResult.rows.find(rule => {
+                            const rawKw = (rule.trigger_keyword || '').toLowerCase();
+                            const keywords = rawKw.split(',').map(k => k.trim()).filter(Boolean);
+                            if (keywords.length === 0) return false;
+                            return keywords.some(k => msgLower === k || msgLower.includes(k) || k.includes(msgLower));
+                        });
+
+                        if (matchedRule) {
+                            ruleMatched = true;
+                            const rule = matchedRule;
+                            console.log(`[AutoResponder] Rule match found for "${text}" on instance ${instanceId}`);
+                            
+                            // Construct response payload
+                            let payload = {};
+                            if (rule.media_url) {
+                                const type = rule.media_type || 'image';
+                                payload = { [type]: { url: rule.media_url }, caption: rule.response_message };
+                            } else {
+                                payload = { text: rule.response_message };
+                            }
+
+                            // Process button options if configured
+                            let useInteractive = false;
+                            let interactiveMessageContent = {};
+
+                            if (rule.buttons_json) {
+                                try {
+                                    const btns = typeof rule.buttons_json === 'string' ? JSON.parse(rule.buttons_json) : rule.buttons_json;
+                                    if (btns.length > 0) {
+                                        const buttons = btns.map(btn => {
+                                          const type = String(btn.type).toLowerCase();
+                                          if (type === 'url' || type === 'link') {
+                                            return {
+                                              name: 'cta_url',
+                                              buttonParamsJson: JSON.stringify({
+                                                display_text: btn.displayText,
+                                                url: btn.url,
+                                                merchant_url: btn.url
+                                              })
+                                            };
+                                          } else if (type === 'call') {
+                                            return {
+                                              name: 'cta_call',
+                                              buttonParamsJson: JSON.stringify({
+                                                display_text: btn.displayText,
+                                                phone_number: btn.phoneNumber || btn.url
+                                              })
+                                            };
+                                          } else {
+                                            return {
+                                              name: 'quick_reply',
+                                              buttonParamsJson: JSON.stringify({
+                                                display_text: btn.displayText,
+                                                id: String(btn.id || btn.displayText)
+                                              })
+                                            };
+                                          }
+                                        });
+
+                                        let headerOptions = { hasMediaAttachment: false };
+
+                                        if (rule.media_url) {
+                                          const type = (rule.media_type === 'video' || rule.media_type === 'document') ? rule.media_type : 'image';
+                                          const mediaPayload = { [type]: { url: rule.media_url } };
+                                          const preparedMedia = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
+                                          
+                                          headerOptions.hasMediaAttachment = true;
+                                          if (type === 'image') headerOptions.imageMessage = preparedMedia.imageMessage;
+                                          else if (type === 'video') headerOptions.videoMessage = preparedMedia.videoMessage;
+                                          else if (type === 'document') headerOptions.documentMessage = preparedMedia.documentMessage;
+                                        }
+
+                                        const interactiveMessage = {
+                                          body: proto.Message.InteractiveMessage.Body.create({ text: rule.response_message || ' ' }),
+                                          nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                                            buttons: buttons,
+                                            messageVersion: 1
+                                          })
+                                        };
+
+                                        if (rule.media_url) {
+                                          interactiveMessage.header = proto.Message.InteractiveMessage.Header.create(headerOptions);
+                                        }
+
+                                        interactiveMessageContent = {
+                                          viewOnceMessage: {
+                                            message: {
+                                              messageContextInfo: {
+                                                deviceListMetadata: {},
+                                                deviceListMetadataVersion: 2
+                                              },
+                                              interactiveMessage: proto.Message.InteractiveMessage.fromObject(interactiveMessage)
+                                            }
+                                          }
+                                        };
+                                        useInteractive = true;
+                                    }
+                                } catch (e) {
+                                    console.error('[AutoResponder Button Setup Error]', e);
+                                }
+                            }
+
+                            if (useInteractive) {
+                                const msgGen = generateWAMessageFromContent(from, interactiveMessageContent, { 
+                                  userJid: sock.user.id,
+                                  upload: sock.waUploadToServer
+                                });
+                                await sock.relayMessage(from, msgGen.message, { messageId: msgGen.key.id });
+                                if (msgGen && msgGen.key && msgGen.message) {
+                                    saveMessage(msgGen.key, msgGen.message);
+                                }
+                            } else {
+                                const sent = await sock.sendMessage(from, payload);
+                                if (sent && sent.key && sent.message) {
+                                    saveMessage(sent.key, sent.message);
+                                }
+                            }
+                            
+                            // Log auto-response event in database
+                            const responseText = rule.response_message || 'Media Auto-Response';
+                            await pool.query(
+                                'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ((SELECT user_id FROM instances WHERE id = $1), $1, $2, $3, $4, $5)',
+                                [instanceId, from, 'auto_responded', 'auto_' + Date.now(), responseText]
+                            );
+                        }
+                    } catch (err) {
+                        console.error('[AutoResponder Keyword Error]', err.message);
+                    }
+                }
+
+                // AI Auto-Responder Logic (Smart persona fallback when no keyword rule matched)
+                if (!fromMe && text && !ruleMatched && from !== 'status@broadcast') {
                     try {
                         try { sock.sendPresenceUpdate('composing', from).catch(() => {}); } catch (pe) {}
                         const aiReply = await generateAiChatReply({ instanceId, from, incomingText: text });
@@ -1420,147 +1637,6 @@ async function connectToWhatsApp(instanceId) {
                 }
             } catch (dbErr) {
                 console.error('[Chat Storage Error]', dbErr.message);
-            }
-
-            if (fromMe) return;
-            if (!text) return;
-
-            try {
-                // Fetch active rules for this instance
-                const ruleResult = await pool.query(
-                    'SELECT * FROM auto_responder_rules WHERE instance_id = $1 AND is_active = TRUE',
-                    [instanceId]
-                );
-
-                const msgLower = text.trim().toLowerCase();
-                const matchedRule = ruleResult.rows.find(rule => {
-                    const rawKw = (rule.trigger_keyword || '').toLowerCase();
-                    const keywords = rawKw.split(',').map(k => k.trim()).filter(Boolean);
-                    if (keywords.length === 0) return false;
-                    return keywords.some(k => msgLower === k || msgLower.includes(k) || k.includes(msgLower));
-                });
-
-                if (matchedRule) {
-                    const rule = matchedRule;
-                    console.log(`[AutoResponder] Match found for "${text}" on instance ${instanceId}`);
-                    
-                    // Simple Response Logic
-                    let payload = {};
-                    if (rule.media_url) {
-                        const type = rule.media_type || 'image';
-                        payload = { [type]: { url: rule.media_url }, caption: rule.response_message };
-                    } else {
-                        payload = { text: rule.response_message };
-                    }
-
-                    // Handle Buttons if stored in JSON
-                    let useInteractive = false;
-                    let interactiveMessageContent = {};
-
-                    if (rule.buttons_json) {
-                        try {
-                            const btns = typeof rule.buttons_json === 'string' ? JSON.parse(rule.buttons_json) : rule.buttons_json;
-                            if (btns.length > 0) {
-                                const buttons = btns.map(btn => {
-                                  const type = String(btn.type).toLowerCase();
-                                  if (type === 'url' || type === 'link') {
-                                    return {
-                                      name: 'cta_url',
-                                      buttonParamsJson: JSON.stringify({
-                                        display_text: btn.displayText,
-                                        url: btn.url,
-                                        merchant_url: btn.url
-                                      })
-                                    };
-                                  } else if (type === 'call') {
-                                    return {
-                                      name: 'cta_call',
-                                      buttonParamsJson: JSON.stringify({
-                                        display_text: btn.displayText,
-                                        phone_number: btn.phoneNumber || btn.url
-                                      })
-                                    };
-                                  } else {
-                                    return {
-                                      name: 'quick_reply',
-                                      buttonParamsJson: JSON.stringify({
-                                        display_text: btn.displayText,
-                                        id: String(btn.id || btn.displayText)
-                                      })
-                                    };
-                                  }
-                                });
-
-                                let headerOptions = {
-                                  hasMediaAttachment: false
-                                };
-
-                                if (rule.media_url) {
-                                  const type = (rule.media_type === 'video' || rule.media_type === 'document') ? rule.media_type : 'image';
-                                  const mediaPayload = { [type]: { url: rule.media_url } };
-                                  const preparedMedia = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
-                                  
-                                  headerOptions.hasMediaAttachment = true;
-                                  if (type === 'image') headerOptions.imageMessage = preparedMedia.imageMessage;
-                                  else if (type === 'video') headerOptions.videoMessage = preparedMedia.videoMessage;
-                                  else if (type === 'document') headerOptions.documentMessage = preparedMedia.documentMessage;
-                                }
-
-                                const interactiveMessage = {
-                                  body: proto.Message.InteractiveMessage.Body.create({ text: rule.response_message || ' ' }),
-                                  nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                                    buttons: buttons,
-                                    messageVersion: 1
-                                  })
-                                };
-
-                                if (rule.media_url) {
-                                  interactiveMessage.header = proto.Message.InteractiveMessage.Header.create(headerOptions);
-                                }
-
-                                interactiveMessageContent = {
-                                  viewOnceMessage: {
-                                    message: {
-                                      messageContextInfo: {
-                                        deviceListMetadata: {},
-                                        deviceListMetadataVersion: 2
-                                      },
-                                      interactiveMessage: proto.Message.InteractiveMessage.fromObject(interactiveMessage)
-                                    }
-                                  }
-                                };
-                                useInteractive = true;
-                            }
-                        } catch (e) {
-                            console.error('[AutoResponder Button Setup Error]', e);
-                        }
-                    }
-
-                    if (useInteractive) {
-                        const msgGen = generateWAMessageFromContent(from, interactiveMessageContent, { 
-                          userJid: sock.user.id,
-                          upload: sock.waUploadToServer
-                        });
-                        await sock.relayMessage(from, msgGen.message, { messageId: msgGen.key.id });
-                        if (msgGen && msgGen.key && msgGen.message) {
-                            saveMessage(msgGen.key, msgGen.message);
-                        }
-                    } else {
-                        const sent = await sock.sendMessage(from, payload);
-                        if (sent && sent.key && sent.message) {
-                            saveMessage(sent.key, sent.message);
-                        }
-                    }
-                    
-                    // Log the auto-response event
-                    const responseText = rule.response_message || 'Media Auto-Response';
-                    await pool.query(
-                        'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ((SELECT user_id FROM instances WHERE id = $1), $1, $2, $3, $4, $5)',
-                        [instanceId, from, 'auto_responded', 'auto_' + Date.now(), responseText]
-                    );
-                }
-            } catch (err) {
-                console.error('[AutoResponder Error]', err.message);
             }
         });
 
@@ -3252,8 +3328,9 @@ app.post('/api/ai/pool-status', authenticate, async (req, res) => {
         const now = Date.now();
 
         const poolStatus = candidateKeys.map((key, idx) => {
-            const masked = maskApiKey(key);
-            const h = keyPoolHealth.get(key);
+            const cleanKey = String(key || '').trim();
+            const masked = maskApiKey(cleanKey);
+            const h = keyPoolHealth.get(cleanKey);
             const inCooldown = h && h.cooldownUntil && h.cooldownUntil > now;
             const cooldownRemainingSec = inCooldown ? Math.ceil((h.cooldownUntil - now) / 1000) : 0;
             const hasSuccess = h && h.successCount > 0;
@@ -3289,6 +3366,46 @@ app.post('/api/ai/pool-status', authenticate, async (req, res) => {
             activeKeyIndex: activeKey ? activeKey.index : 1,
             autoShiftActive: poolStatus.some(k => k.status === 'cooldown')
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET active model status & auto-shift failover info for an instance
+app.get('/api/ai/active-model/:instanceId', authenticate, async (req, res) => {
+    try {
+        const instId = String(req.params.instanceId);
+        const instRes = await pool.query('SELECT ai_model, ai_provider FROM instances WHERE id = $1', [instId]);
+        if (instRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Instance not found' });
+        }
+
+        const primaryModel = instRes.rows[0].ai_model || (instRes.rows[0].ai_provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash');
+        const activeInfo = instanceActiveModelMap.get(instId);
+
+        res.json({
+            success: true,
+            instanceId: instId,
+            primaryModel: primaryModel,
+            activeModel: activeInfo ? activeInfo.activeModel : primaryModel,
+            isShifted: activeInfo ? activeInfo.isShifted : false,
+            shiftReason: activeInfo ? activeInfo.shiftReason : '',
+            shiftTimestamp: activeInfo ? activeInfo.shiftTimestamp : null
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST reset active model back to primary model for an instance
+app.post('/api/ai/reset-active-model/:instanceId', authenticate, async (req, res) => {
+    try {
+        const instId = String(req.params.instanceId);
+        instanceActiveModelMap.delete(instId);
+        if (io) {
+            io.emit('model_failover_updated', { instanceId: instId, isShifted: false });
+        }
+        res.json({ success: true, message: 'Active model reset to primary configuration' });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }

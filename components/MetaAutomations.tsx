@@ -4,21 +4,33 @@ import io from 'socket.io-client';
 import AiAutoReplyModal from './AiAutoReplyModal';
 
 export default function MetaAutomations({ instances = [], currentUser, apiBase, mediaAssets = [] }: any) {
+  // Store automation flows, local instance list, and active model status
   const [automations, setAutomations] = useState<any[]>([]);
-  const metaInstances = instances.filter((i: any) => i.provider === "meta");
-  const [selectedInstance, setSelectedInstance] = useState(metaInstances[0]?.id || instances[0]?.id || "");
-  const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
   const [localInstances, setLocalInstances] = useState(instances);
+  const [activeModelInfo, setActiveModelInfo] = useState<any>(null);
 
   useEffect(() => {
     setLocalInstances(instances);
   }, [instances]);
 
+  // Helper function to strictly identify Official Meta Cloud API instances
+  const isMetaInstance = (i: any) => 
+    i?.provider === 'meta' || 
+    i?.provider === 'waba' || 
+    i?.provider === 'facebook' || 
+    !!i?.meta_phone_number_id || 
+    !!i?.meta_access_token;
+
+  // Filter instances so strictly ONLY Official Meta Cloud API instances are used in Meta category
+  const metaInstances = localInstances.filter((i: any) => isMetaInstance(i));
+  const [selectedInstance, setSelectedInstance] = useState(metaInstances[0]?.id || "");
+  const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
+
   useEffect(() => {
-    if (metaInstances.length > 0 && (!selectedInstance || !instances.some((i: any) => i.id === selectedInstance))) {
+    if (metaInstances.length > 0 && (!selectedInstance || !metaInstances.some((i: any) => i.id === selectedInstance))) {
       setSelectedInstance(metaInstances[0].id);
     }
-  }, [instances]);
+  }, [localInstances]);
 
   const [templates, setTemplates] = useState([]);
   const [showMediaLib, setShowMediaLib] = useState(false);
@@ -38,12 +50,29 @@ export default function MetaAutomations({ instances = [], currentUser, apiBase, 
     action_type: 'message'
   });
 
+  // Fetch automations, Meta templates, and active model failover status when selected instance changes
   useEffect(() => {
     if (selectedInstance) {
       fetchAutomations();
       fetchTemplates();
+      fetchActiveModelInfo(selectedInstance);
     }
   }, [selectedInstance]);
+
+  // Fetch active model status for selected Meta instance
+  const fetchActiveModelInfo = async (instId: string) => {
+    try {
+      const res = await fetch(`${apiBase}/api/ai/active-model/${instId}`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveModelInfo(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch active model info', e);
+    }
+  };
 
   // Real-time socket listener for automations updates
   useEffect(() => {
@@ -290,11 +319,16 @@ export default function MetaAutomations({ instances = [], currentUser, apiBase, 
               {currentMetaInst?.aiEnabled ? (
                 <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-green-500/20 text-green-300 border border-green-500/30 flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-ping"></span>
-                  AI Active ({currentMetaInst.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini 3.8 Flash'})
+                  AI Active ({activeModelInfo?.activeModel || currentMetaInst.aiModel || (currentMetaInst.aiProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash')})
                 </span>
               ) : (
                 <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700">
                   AI Disabled
+                </span>
+              )}
+              {activeModelInfo?.isShifted && (
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                  ⚡ Auto-Shifted from {activeModelInfo.primaryModel}
                 </span>
               )}
             </div>

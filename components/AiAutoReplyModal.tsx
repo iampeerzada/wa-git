@@ -82,12 +82,13 @@ export default function AiAutoReplyModal({
   const [testKeyResults, setTestKeyResults] = useState<any[]>([]);
   const [testError, setTestError] = useState<string | null>(null);
 
-  // Fallback defaults from profile
+  // Fallback defaults from profile and active model state
   const [hasUserKey, setHasUserKey] = useState(false);
   const [activeModalTab, setActiveModalTab] = useState<'config' | 'logs'>('config');
+  const [activeModelInfo, setActiveModelInfo] = useState<any>(null);
 
   useEffect(() => {
-    // Fetch instance detailed AI config
+    // Fetch instance detailed AI config & sync key statuses
     const loadConfig = async () => {
       try {
         const res = await fetch(`${apiBase}/api/instance/${instance.id}/ai-config`, {
@@ -109,15 +110,50 @@ export default function AiAutoReplyModal({
           setAiMaxTokens(data.aiMaxTokens ? Number(data.aiMaxTokens) : 1800);
           setUncappedTokens(data.aiMaxTokens ? Number(data.aiMaxTokens) >= 4000 : false);
           setHasUserKey(data.hasUserGeminiKey || data.hasUserOpenAiKey);
+
+          // Automatically sync live key pool status with freshly loaded keys
+          handleSyncPool(keys, data.aiProvider || 'gemini');
         }
       } catch (e) {
         console.error('Failed to load AI config', e);
       }
     };
+
     loadConfig();
+    fetchActiveModelInfo();
   }, [instance.id, apiBase, currentUser.id, currentUser.apiKey]);
 
-  // Real-time Socket.IO listener for key pool status updates
+  // Fetch active model failover status for current instance
+  const fetchActiveModelInfo = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/ai/active-model/${instance.id}`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveModelInfo(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch active model info', e);
+    }
+  };
+
+  // Reset auto-shifted model back to primary model
+  const handleResetModel = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/ai/reset-active-model/${instance.id}`, {
+        method: 'POST',
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        fetchActiveModelInfo();
+      }
+    } catch (e) {
+      console.error('Failed to reset active model', e);
+    }
+  };
+
+  // Real-time Socket.IO listener for key pool status updates and model failovers
   useEffect(() => {
     const socket = io(apiBase);
     
@@ -127,6 +163,13 @@ export default function AiAutoReplyModal({
     // Listen for live key failover or recovery events
     socket.on('key_pool_updated', () => {
       handleSyncPool();
+    });
+
+    // Listen for live model failover events
+    socket.on('model_failover_updated', (data) => {
+      if (!data?.instanceId || String(data.instanceId) === String(instance.id)) {
+        fetchActiveModelInfo();
+      }
     });
 
     return () => {
@@ -172,10 +215,14 @@ export default function AiAutoReplyModal({
     setApiKeys(apiKeys.filter((_, i) => i !== index));
   };
 
-  const handleSyncPool = async () => {
+  // Sync health and quota status of all candidate API keys in pool
+  const handleSyncPool = async (overrideKeys?: string[], overrideProvider?: string) => {
     setIsSyncingPool(true);
     try {
-      const serializedKeys = apiKeys.map(k => k.trim()).filter(Boolean).join('\n');
+      const keysToUse = overrideKeys || apiKeys;
+      const providerToUse = overrideProvider || aiProvider;
+      const serializedKeys = keysToUse.map(k => k.trim()).filter(Boolean).join('\n');
+
       const res = await fetch(`${apiBase}/api/ai/pool-status`, {
         method: 'POST',
         headers: {
@@ -184,7 +231,7 @@ export default function AiAutoReplyModal({
           'X-API-Key': currentUser.apiKey
         },
         body: JSON.stringify({
-          provider: aiProvider,
+          provider: providerToUse,
           apiKey: serializedKeys,
           instanceId: instance.id
         })
@@ -692,10 +739,38 @@ export default function AiAutoReplyModal({
             )}
           </div>
 
+          {/* Model Failover Status Alert Banner */}
+          {activeModelInfo?.isShifted && (
+            <div className="p-3 bg-amber-950/40 border border-amber-500/40 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={16} className="text-amber-400 shrink-0" />
+                <div>
+                  <span className="font-bold text-amber-300">Model Auto-Shift Failover Active:</span> Currently responding with <strong className="font-mono text-white">{activeModelInfo.activeModel}</strong> because primary model ({activeModelInfo.primaryModel}) hit tier/rate limits.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetModel}
+                className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-lg text-[11px] font-bold shrink-0 transition-all cursor-pointer shadow-sm"
+              >
+                Reset Primary Model
+              </button>
+            </div>
+          )}
+
           {/* Model Selector & Temperature Slider */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-300">Model Selection (Speed & Intelligence)</label>
+              <div className="flex justify-between items-center text-xs">
+                <label className="font-bold text-gray-300">Model Selection (Speed & Intelligence)</label>
+                {activeModelInfo && (
+                  <span className={`text-[10px] font-mono font-bold px-1.5 py-0.2 rounded ${
+                    activeModelInfo.isShifted ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  }`}>
+                    {activeModelInfo.isShifted ? `Active: ${activeModelInfo.activeModel}` : 'Primary Active'}
+                  </span>
+                )}
+              </div>
               <select
                 value={aiModel}
                 onChange={e => setAiModel(e.target.value)}
@@ -709,10 +784,11 @@ export default function AiAutoReplyModal({
                   </>
                 ) : (
                   <>
-                    <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Lowest Latency ~200-400ms - Fastest for WhatsApp)</option>
                     <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Ultra-Fast & Smart ~400-700ms - Recommended)</option>
-                    <option value="gemini-flash-latest">Gemini Flash Latest</option>
-                    <option value="gemini-4-argon">🧠 Gemini 4 Argon (Deep Reasoning - Slower)</option>
+                    <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Fast Auto-Failover Backup)</option>
+                    <option value="gemini-2.0-flash">⚡ Gemini 2.0 Flash (Secondary Backup)</option>
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="gemini-1.5-pro">🧠 Gemini 1.5 Pro (Deep Reasoning)</option>
                   </>
                 )}
               </select>

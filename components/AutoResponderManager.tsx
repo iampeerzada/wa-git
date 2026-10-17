@@ -4,31 +4,34 @@ import AiAutoReplyModal from './AiAutoReplyModal';
 
 // Baileys WhatsApp Web QR Auto-Responder Manager (Strictly keeps Baileys instances in Baileys category)
 export default function AutoResponderManager({ instances = [], currentUser, apiBase, mediaAssets = [] }: any) {
+  // Store automation flows and local instance list
   const [automations, setAutomations] = useState([]);
   const [localInstances, setLocalInstances] = useState(instances);
-  
-  // Set default provider filter strictly to 'baileys' to keep Meta instances out of Baileys categories
-  const [providerFilter, setProviderFilter] = useState<'baileys' | 'all' | 'meta'>('baileys');
+  const [activeModelInfo, setActiveModelInfo] = useState<any>(null);
 
   useEffect(() => {
     setLocalInstances(instances);
   }, [instances]);
 
-  // Filter instances so Baileys WhatsApp QR instances are isolated in Baileys category
-  const filteredInstances = localInstances.filter((i: any) => {
-    if (providerFilter === 'baileys') return i.provider !== 'meta';
-    if (providerFilter === 'meta') return i.provider === 'meta';
-    return i.provider !== 'meta';
-  });
+  // Helper function to identify Meta Cloud API instances
+  const isMetaInstance = (i: any) => 
+    i?.provider === 'meta' || 
+    i?.provider === 'waba' || 
+    i?.provider === 'facebook' || 
+    !!i?.meta_phone_number_id || 
+    !!i?.meta_access_token;
 
-  const [selectedInstance, setSelectedInstance] = useState(filteredInstances[0]?.id || instances[0]?.id || "");
+  // Strictly filter instances so ONLY Baileys WhatsApp QR instances are displayed in this category
+  const filteredInstances = localInstances.filter((i: any) => !isMetaInstance(i));
+
+  const [selectedInstance, setSelectedInstance] = useState(filteredInstances[0]?.id || "");
   const [showAiModalFor, setShowAiModalFor] = useState<any>(null);
 
   useEffect(() => {
     if (filteredInstances.length > 0 && !filteredInstances.some((i: any) => i.id === selectedInstance)) {
       setSelectedInstance(filteredInstances[0].id);
     }
-  }, [providerFilter, localInstances]);
+  }, [localInstances]);
 
   const [templates, setTemplates] = useState([]);
   const [showMediaLib, setShowMediaLib] = useState(false);
@@ -48,28 +51,28 @@ export default function AutoResponderManager({ instances = [], currentUser, apiB
     action_type: 'message'
   });
 
-  const fetchTemplates = async (instId: string) => {
-    try {
-      const res = await fetch(`${apiBase}/api/meta/templates/${instId}`, {
-        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
-      });
-      const data = await res.json();
-      if (res.ok) {
-        const list = Array.isArray(data) ? data : (Array.isArray(data?.templates) ? data.templates : (Array.isArray(data?.data) ? data.data : []));
-        setTemplates(list);
-      }
-    } catch (e) {}
-  };
-
+  // Fetch automations and active model status when selected instance changes
   useEffect(() => {
     if (selectedInstance) {
       fetchAutomations();
-      const inst = localInstances.find((i: any) => i.id === selectedInstance);
-      if (inst?.provider === 'meta') {
-        fetchTemplates(selectedInstance);
-      }
+      fetchActiveModelInfo(selectedInstance);
     }
   }, [selectedInstance]);
+
+  // Fetch active model failover status for current instance
+  const fetchActiveModelInfo = async (instId: string) => {
+    try {
+      const res = await fetch(`${apiBase}/api/ai/active-model/${instId}`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveModelInfo(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch active model status', e);
+    }
+  };
 
   const fetchAutomations = async () => {
     try {
@@ -246,50 +249,19 @@ export default function AutoResponderManager({ instances = [], currentUser, apiB
               <Bot className={`w-4 h-4 sm:w-5 sm:h-5 ${isMeta ? 'text-emerald-400' : 'text-[#25D366]'} shrink-0`} />
               <span>Auto Responder & Visual Menus</span>
             </h2>
-            {isMeta ? (
-              <span className="text-[9px] sm:text-[10px] bg-emerald-500/15 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold uppercase tracking-wider flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                Meta Cloud API
-              </span>
-            ) : (
-              <span className="text-[9px] sm:text-[10px] bg-[#25D366]/10 text-[#25D366] px-2 py-0.5 rounded-full border border-[#25D366]/20 font-bold uppercase tracking-wider flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#25D366]"></span>
-                Baileys QR Engine
-              </span>
-            )}
+            <span className="text-[9px] sm:text-[10px] bg-[#25D366]/10 text-[#25D366] px-2 py-0.5 rounded-full border border-[#25D366]/20 font-bold uppercase tracking-wider flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#25D366]"></span>
+              Baileys QR Category
+            </span>
           </div>
           <p className="text-[11px] sm:text-xs text-gray-400 mt-0.5">
-            Configure automated keyword flows, interactive menus, and smart AI chat persona across both Baileys Web and Meta Cloud API channels.
+            Configure automated keyword flows, interactive menus, and smart AI chat persona for connected Baileys WhatsApp Web instances.
           </p>
         </div>
 
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
-          {/* Channel Filter Pills */}
-          <div className="bg-[#182229] p-0.5 rounded-xl border border-gray-700/60 flex text-xs">
-            <button
-              type="button"
-              onClick={() => setProviderFilter('all')}
-              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${providerFilter === 'all' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
-            >
-              All ({localInstances.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setProviderFilter('baileys')}
-              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${providerFilter === 'baileys' ? 'bg-[#25D366]/20 text-[#25D366] shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
-            >
-              Baileys ({localInstances.filter((i: any) => i.provider !== 'meta').length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setProviderFilter('meta')}
-              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${providerFilter === 'meta' ? 'bg-emerald-500/20 text-emerald-400 shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
-            >
-              Meta API ({localInstances.filter((i: any) => i.provider === 'meta').length})
-            </button>
-          </div>
-
           <div className="flex items-center gap-2">
+            {/* Instance selector strictly listing Baileys instances */}
             <select 
               value={selectedInstance} 
               onChange={(e) => setSelectedInstance(e.target.value)}
@@ -297,13 +269,13 @@ export default function AutoResponderManager({ instances = [], currentUser, apiB
             >
               {filteredInstances.map((i: any) => (
                 <option key={i.id} value={i.id}>
-                  {i.provider === 'meta' ? '⚡ [Meta API]' : '📱 [Baileys]'} {i.name}
+                  📱 {i.name}
                 </option>
               ))}
             </select>
             <button 
               onClick={() => openAddNode(null)} 
-              className={`${isMeta ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-[#25D366] hover:bg-[#128c7e] text-black'} px-3.5 py-1.5 sm:py-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap shadow-md cursor-pointer shrink-0`}
+              className="bg-[#25D366] hover:bg-[#128c7e] text-black px-3.5 py-1.5 sm:py-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap shadow-md cursor-pointer shrink-0"
             >
               <Plus size={15} /> <span>New Flow</span>
             </button>
@@ -321,21 +293,26 @@ export default function AutoResponderManager({ instances = [], currentUser, apiB
             <div className="flex items-center gap-2 flex-wrap">
               <h3 className="font-bold text-white text-sm">Smart AI Auto-Responder</h3>
               <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                {isMeta ? 'Meta Cloud API Persona' : 'Baileys Web Persona'}
+                Baileys Web Persona
               </span>
               {currentInst?.aiEnabled ? (
                 <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-green-500/20 text-green-300 border border-green-500/30 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-ping"></span>
-                  AI Active ({currentInst.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini 3.8 Flash'})
+                  AI Active ({activeModelInfo?.activeModel || currentInst.aiModel || (currentInst.aiProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash')})
                 </span>
               ) : (
                 <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-gray-700 text-gray-400 border border-gray-600">
                   AI Disabled
                 </span>
               )}
+              {activeModelInfo?.isShifted && (
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                  ⚡ Auto-Shifted from {activeModelInfo.primaryModel}
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-300 mt-1 leading-relaxed">
-              Equip <span className="font-semibold text-white">{currentInst?.name || 'this channel'}</span> with your Gemini or OpenAI API key & prompt persona. When a customer writes in and no menu rule triggers, the AI automatically replies in direct chat just like Autoresponder.io!
+              Equip <span className="font-semibold text-white">{currentInst?.name || 'this channel'}</span> with multi-API key & AI model failover. When a customer writes in and no menu rule matches, AI responds automatically!
             </p>
           </div>
         </div>
