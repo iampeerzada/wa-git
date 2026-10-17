@@ -193,10 +193,35 @@ pool.connect(async (err, client, release) => {
         `);
         console.log('[Database] chat_lid_mappings table verified.');
 
+        // Create AI Automation execution logs table for failover tracking and history
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS ai_automation_logs (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(50),
+                instance_id VARCHAR(50),
+                remote_jid VARCHAR(100),
+                recipient_phone VARCHAR(50),
+                incoming_text TEXT,
+                ai_reply TEXT,
+                provider VARCHAR(20),
+                model VARCHAR(100),
+                api_key_used VARCHAR(100),
+                key_index INT,
+                total_keys INT,
+                latency_ms INT,
+                status VARCHAR(20),
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('[Database] ai_automation_logs table verified.');
+
         try {
             await client.query('ALTER TABLE chat_messages ALTER COLUMN remote_jid TYPE VARCHAR(100);');
             await client.query('CREATE INDEX IF NOT EXISTS idx_chat_lid_lookup ON chat_lid_mappings(instance_id, lid);');
             await client.query('CREATE INDEX IF NOT EXISTS idx_chat_lid_phone ON chat_lid_mappings(instance_id, phone_jid);');
+            await client.query('CREATE INDEX IF NOT EXISTS idx_ai_logs_instance_created ON ai_automation_logs(instance_id, created_at DESC);');
+            await client.query('CREATE INDEX IF NOT EXISTS idx_ai_logs_user_created ON ai_automation_logs(user_id, created_at DESC);');
         } catch (e) {}
 
         // High-performance database indexes for instant chatbox loading
@@ -673,8 +698,17 @@ function recordKeyCooldown(apiKey, errorMsg) {
         lastUsed: 0
     };
     const msg = (errorMsg || '').toLowerCase();
+
+    // Do NOT put key into cooldown if error was caused by model configuration or client-side prompt issue
+    const isModelNotFound = msg.includes('not found') || msg.includes('404') || msg.includes('invalid model');
+    if (isModelNotFound) {
+        existing.lastError = errorMsg || 'Model not found';
+        keyPoolHealth.set(apiKey, existing);
+        return;
+    }
+
     const isDaily = msg.includes('day') || msg.includes('daily');
-    const isInvalidKey = msg.includes('api_key_invalid') || msg.includes('invalid api key') || msg.includes('401') || msg.includes('403');
+    const isInvalidKey = msg.includes('api_key_invalid') || msg.includes('invalid api key') || msg.includes('401') || msg.includes('403') || msg.includes('key not valid');
     
     // Cooldown duration: 24h for invalid key, 15m for daily quota, 60s for RPM burst limits
     let cooldownMs = 60 * 1000;
@@ -764,7 +798,11 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
             return data.choices?.[0]?.message?.content || null;
         } else {
             // Google Gemini (Fast REST Endpoint with user-customizable maxOutputTokens)
-            const chosenModel = model || 'gemini-3.8-flash';
+            let chosenModel = model || 'gemini-3.8-flash';
+            if (!chosenModel || chosenModel.includes('2.5') || chosenModel.includes('1.5') || chosenModel === 'gemini-flash') {
+                chosenModel = 'gemini-3.8-flash';
+            }
+
             const historySummary = historyRows.slice(-4).map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
             const userPromptText = historySummary 
                 ? `Recent chat:\n${historySummary}\nCustomer: ${incomingText}\nAssistant:` 
@@ -860,6 +898,26 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
 
         if (allKeys.length === 0) {
             console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured in instance or user profile.`);
+            await pool.query(`
+                INSERT INTO ai_automation_logs 
+                (user_id, instance_id, remote_jid, recipient_phone, incoming_text, ai_reply, provider, model, api_key_used, key_index, total_keys, latency_ms, status, error_message)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            `, [
+                inst.user_id,
+                instanceId,
+                from,
+                from ? from.replace(/[^0-9]/g, '') : '',
+                incomingText,
+                null,
+                provider,
+                inst.ai_model || 'gemini-3.8-flash',
+                'NONE',
+                0,
+                0,
+                0,
+                'no_key',
+                'No API key found in instance or user profile'
+            ]).catch(() => {});
             return null;
         }
 
@@ -886,7 +944,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         const prioritizedKeys = [...availableKeys, ...cooldownKeys];
 
         let model = inst.ai_model || inst.default_ai_model;
-        if (!model) {
+        if (!model || model.includes('2.5') || model.includes('1.5')) {
             model = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
         }
 
@@ -918,9 +976,9 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         for (let i = 0; i < prioritizedKeys.length; i++) {
             const currentKey = prioritizedKeys[i];
             const masked = maskApiKey(currentKey);
+            const startTime = Date.now();
 
             try {
-                const startTime = Date.now();
                 replyText = await executeSingleAiCall({
                     provider,
                     apiKey: currentKey,
@@ -936,18 +994,63 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
                     const elapsed = Date.now() - startTime;
                     recordKeySuccess(currentKey, elapsed);
                     console.log(`[AI Auto-Reply] Generated in ${elapsed}ms using key ${masked} (Key ${i+1}/${prioritizedKeys.length})`);
+
+                    // Log successful execution in database for full transparency
+                    await pool.query(`
+                        INSERT INTO ai_automation_logs 
+                        (user_id, instance_id, remote_jid, recipient_phone, incoming_text, ai_reply, provider, model, api_key_used, key_index, total_keys, latency_ms, status, error_message)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    `, [
+                        inst.user_id,
+                        instanceId,
+                        from,
+                        from ? from.replace(/[^0-9]/g, '') : '',
+                        incomingText,
+                        replyText.trim(),
+                        provider,
+                        model,
+                        masked,
+                        i + 1,
+                        prioritizedKeys.length,
+                        elapsed,
+                        'success',
+                        null
+                    ]).catch(() => {});
+
                     break;
                 }
             } catch (err) {
+                const elapsed = Date.now() - startTime;
                 const isLimit = isRateLimitOrQuotaExhausted(err);
                 recordKeyCooldown(currentKey, err.message);
+
+                // Log failover attempt in database
+                await pool.query(`
+                    INSERT INTO ai_automation_logs 
+                    (user_id, instance_id, remote_jid, recipient_phone, incoming_text, ai_reply, provider, model, api_key_used, key_index, total_keys, latency_ms, status, error_message)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                `, [
+                    inst.user_id,
+                    instanceId,
+                    from,
+                    from ? from.replace(/[^0-9]/g, '') : '',
+                    incomingText,
+                    null,
+                    provider,
+                    model,
+                    masked,
+                    i + 1,
+                    prioritizedKeys.length,
+                    elapsed,
+                    isLimit ? 'failover' : 'failed',
+                    err.message
+                ]).catch(() => {});
 
                 if (isLimit) {
                     console.warn(`[AI Key Pool] Key ${masked} hit Free Tier quota/limit (${err.message}). Auto-shifting immediately to next key (${prioritizedKeys.length - i - 1} remaining in pool)...`);
                 } else {
                     console.error(`[AI Key Pool] Key ${masked} failed: ${err.message}. Trying next available key...`);
                 }
-            }
         }
 
         if (!replyText || !replyText.trim()) return null;
@@ -3263,6 +3366,53 @@ app.post('/api/ai/pool-status', authenticate, async (req, res) => {
             activeKeyIndex: activeKey ? activeKey.index : 1,
             autoShiftActive: poolStatus.some(k => k.status === 'cooldown')
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Fetch AI Automation Execution Logs (Key failovers, responses, latencies, errors)
+app.get('/api/ai/logs', authenticate, async (req, res) => {
+    try {
+        const { instanceId, limit = 50, offset = 0 } = req.query;
+        let query = 'SELECT * FROM ai_automation_logs';
+        const params = [];
+
+        if (instanceId) {
+            query += ' WHERE instance_id = $1';
+            params.push(instanceId);
+            if (req.user.role !== 'superadmin') {
+                query += ' AND user_id = $2';
+                params.push(req.user.id);
+            }
+        } else if (req.user.role !== 'superadmin') {
+            query += ' WHERE user_id = $1';
+            params.push(req.user.id);
+        }
+
+        query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(parseInt(limit, 10) || 50, parseInt(offset, 10) || 0);
+
+        const result = await pool.query(query, params);
+        res.json({ success: true, logs: result.rows });
+    } catch (e) {
+        console.error('[AI Logs Error]', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Clear AI Automation Logs for an instance
+app.delete('/api/ai/logs', authenticate, async (req, res) => {
+    try {
+        const { instanceId } = req.query;
+        if (!instanceId) return res.status(400).json({ error: 'Instance ID required' });
+
+        if (req.user.role !== 'superadmin') {
+            await pool.query('DELETE FROM ai_automation_logs WHERE instance_id = $1 AND user_id = $2', [instanceId, req.user.id]);
+        } else {
+            await pool.query('DELETE FROM ai_automation_logs WHERE instance_id = $1', [instanceId]);
+        }
+        res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
