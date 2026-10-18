@@ -290,6 +290,41 @@ export default function AiAutoReplyModal({
     }
   };
 
+  // Fetch collections directly from MySQL table (e.g. app_store) and sync into AI Knowledge Base
+  const handleFetchAndSyncMysql = async () => {
+    setIsSyncingStoreData(true);
+    setSyncSuccessMsg(null);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/mysql-fetch-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          host: mysqlHost,
+          port: mysqlPort,
+          databaseName: mysqlDb,
+          username: mysqlUser,
+          password: mysqlPassword,
+          targetTable: mysqlTables || 'app_store'
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSyncSuccessMsg(data.message);
+        fetchKnowledge();
+      } else {
+        alert(data.error || 'Failed to sync from MySQL');
+      }
+    } catch (e: any) {
+      alert(`Sync Error: ${e.message}`);
+    } finally {
+      setIsSyncingStoreData(false);
+    }
+  };
+
   // Import JSON payload or store products into Knowledge Base
   const handleSyncStoreData = async () => {
     if (!rawStoreJson.trim()) return;
@@ -997,15 +1032,27 @@ export default function AiAutoReplyModal({
                   <span>Test External MySQL Connection</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={handleSaveMysqlConfig}
-                  disabled={isSavingMysql}
-                  className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-600/30"
-                >
-                  {isSavingMysql ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
-                  <span>Save Connection Config</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleFetchAndSyncMysql}
+                    disabled={isSyncingStoreData || !mysqlHost}
+                    className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-600/30"
+                  >
+                    {isSyncingStoreData ? <RefreshCw size={14} className="animate-spin" /> : <Layers size={14} />}
+                    <span>Sync `{mysqlTables || 'app_store'}` into AI Knowledge Base</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveMysqlConfig}
+                    disabled={isSavingMysql}
+                    className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-600/30"
+                  >
+                    {isSavingMysql ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
+                    <span>Save Connection Config</span>
+                  </button>
+                </div>
               </div>
 
               {mysqlTestResult && (

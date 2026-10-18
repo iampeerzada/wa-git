@@ -3768,6 +3768,98 @@ app.post('/api/ai/mysql-test', authenticate, async (req, res) => {
     }
 });
 
+// POST /api/ai/mysql-fetch-sync: Directly query app_store MySQL table, parse collection JSON arrays (software, products, demos, jobs, etc.), and import into AI Knowledge Base
+app.post('/api/ai/mysql-fetch-sync', authenticate, async (req, res) => {
+    try {
+        const { host, port = 3306, databaseName, username, password, targetTable = 'app_store' } = req.body;
+
+        let mysql = mysqlDriver;
+        if (!mysql) {
+            try {
+                mysql = require('mysql2/promise');
+                mysqlDriver = mysql;
+            } catch (mErr) {
+                return res.status(500).json({ error: 'mysql2 module not loaded on server.' });
+            }
+        }
+
+        const conn = await mysql.createConnection({
+            host,
+            port: Number(port) || 3306,
+            user: username,
+            password: password || '',
+            database: databaseName,
+            connectTimeout: 8000
+        });
+
+        // Clean target table name safely
+        const cleanTable = targetTable.replace(/[^a-zA-Z0-9_]/g, '');
+        const [rows] = await conn.query(`SELECT * FROM \`${cleanTable}\``);
+        await conn.end();
+
+        let syncedCount = 0;
+        let categoriesSynced = [];
+
+        for (const row of rows) {
+            // Support both collection_name+data schema (e.g. app_store) and standard column schemas
+            const collectionName = row.collection_name || row.category || row.type || 'General Store';
+            const rawData = row.data || row.content || row.json || null;
+
+            if (rawData) {
+                let parsedItems = [];
+                try {
+                    parsedItems = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+                } catch (pe) {
+                    parsedItems = [{ title: collectionName, description: String(rawData) }];
+                }
+
+                if (!Array.isArray(parsedItems)) {
+                    parsedItems = [parsedItems];
+                }
+
+                for (const item of parsedItems) {
+                    if (!item || typeof item !== 'object') continue;
+
+                    const title = item.title || item.name || item.product_name || item.subject || `${collectionName} Item`;
+                    
+                    // Format item fields into clean readable knowledge text
+                    const contentParts = [];
+                    for (const [k, v] of Object.entries(item)) {
+                        if (v !== null && v !== undefined && v !== '') {
+                            const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                            contentParts.push(`${k}: ${valStr}`);
+                        }
+                    }
+                    const content = contentParts.join('\n');
+
+                    // Delete existing item with same user & title if updating, then insert
+                    await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [req.user.id, title]);
+                    await pool.query(
+                        `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
+                         VALUES ($1, $2, $3, $4, $5, TRUE)`,
+                        [req.user.id, `Store: ${collectionName}`, title, content, collectionName]
+                    );
+                    syncedCount++;
+                }
+                categoriesSynced.push(collectionName);
+            }
+        }
+
+        // Update last sync timestamp in external_mysql_configs
+        await pool.query("UPDATE external_mysql_configs SET last_sync_at = CURRENT_TIMESTAMP, status = 'synced' WHERE user_id = $1", [req.user.id]);
+
+        res.json({
+            success: true,
+            syncedCount,
+            categoriesSynced,
+            message: `Successfully imported ${syncedCount} items across ${categoriesSynced.length} collections (${categoriesSynced.join(', ')}) into AI Knowledge Base!`
+        });
+    } catch (e) {
+        console.error('MySQL Sync Error:', e);
+        res.status(500).json({ error: `MySQL Fetch & Sync Failed: ${e.message}` });
+    }
+});
+
 // POST /api/ai/mysql-sync: Import product tables or custom store SQL data into Knowledge Base
 app.post('/api/ai/mysql-sync', authenticate, async (req, res) => {
     try {
