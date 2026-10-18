@@ -616,11 +616,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   </>
                 ) : (
                   <>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash (Fastest & Smart)</option>
-                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Ultra Lightweight)</option>
-                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
-                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (Fastest)</option>
+                    <option value="gemini-flash-latest">Gemini Flash Latest</option>
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
+                    <option value="gemini-4-argon">Gemini 4 Argon</option>
                   </>
                 )}
               </select>

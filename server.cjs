@@ -9,15 +9,6 @@ const { Pool } = require('pg');
 const { Queue } = require('bullmq');
 const IORedis = require('ioredis');
 
-// Load mysql2 driver for external MySQL store connections
-let mysqlDriver = null;
-try {
-    mysqlDriver = require('mysql2/promise');
-    console.log('[Database] mysql2 driver loaded for external store connections.');
-} catch (mErr) {
-    console.warn('[Database] mysql2 driver notice:', mErr.message);
-}
-
 class Redis extends IORedis {
     constructor(...args) {
         super(...args);
@@ -318,7 +309,7 @@ pool.connect(async (err, client, release) => {
             )
         `);
 
-        // Create ai_automation_logs table for AI activity logging
+        // AI Automation Activity & Failover Logs table
         await client.query(`
             CREATE TABLE IF NOT EXISTS ai_automation_logs (
                 id SERIAL PRIMARY KEY,
@@ -337,43 +328,6 @@ pool.connect(async (err, client, release) => {
             )
         `);
         console.log('[Database] ai_automation_logs table verified.');
-
-        // Create ai_knowledge_base table to store product specs, software features (e.g. OLT software, WhatsApp Meta API), FAQs, and store items
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS ai_knowledge_base (
-                id SERIAL PRIMARY KEY,
-                user_id VARCHAR(255),
-                instance_id VARCHAR(255),
-                category VARCHAR(100) DEFAULT 'Software Features',
-                title VARCHAR(255) NOT NULL,
-                content TEXT NOT NULL,
-                tags TEXT,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('[Database] ai_knowledge_base table verified.');
-
-        // Create external_mysql_configs table to save external MySQL store database host, credentials, tables, and sync state
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS external_mysql_configs (
-                id SERIAL PRIMARY KEY,
-                user_id VARCHAR(255) NOT NULL UNIQUE,
-                host VARCHAR(255),
-                port INT DEFAULT 3306,
-                database_name VARCHAR(255),
-                username VARCHAR(255),
-                password VARCHAR(255),
-                tables_to_sync TEXT,
-                api_webhook_url TEXT,
-                auto_sync_enabled BOOLEAN DEFAULT FALSE,
-                last_sync_at TIMESTAMP,
-                status VARCHAR(50) DEFAULT 'disconnected',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('[Database] external_mysql_configs table verified.');
         
         try {
             await client.query(`
@@ -690,12 +644,11 @@ const keyPoolHealth = new Map();
 
 // Default AI model failover fallback sequence for Gemini and OpenAI engines
 const GEMINI_MODEL_FALLBACKS = [
+    'gemini-3.8-flash',
     'gemini-2.5-flash',
-    'gemini-3.1-flash-lite',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    'gemini-2.5-flash-lite'
+    'gemini-1.5-pro'
 ];
 
 const OPENAI_MODEL_FALLBACKS = [
@@ -703,22 +656,6 @@ const OPENAI_MODEL_FALLBACKS = [
     'gpt-4o',
     'gpt-3.5-turbo'
 ];
-
-// Helper: Normalize AI model strings to valid Google Gemini / OpenAI API endpoints
-function normalizeAiModel(provider, model) {
-    if ((provider || '').toLowerCase() === 'openai') {
-        if (!model || model.includes('gemini')) return 'gpt-4o-mini';
-        return model;
-    }
-    if (model === 'gemini-3.1-flash-lite') {
-        return 'gemini-2.5-flash-lite';
-    }
-    // Normalize Gemini models to active API models
-    if (!model || model.includes('3.8') || model.includes('4-argon') || model.includes('gpt')) {
-        return 'gemini-2.5-flash';
-    }
-    return model;
-}
 
 // In-Memory Tracker to monitor active model and auto-shift model failovers per instance
 const instanceActiveModelMap = new Map();
@@ -730,8 +667,6 @@ function isRateLimitOrQuotaExhausted(err) {
     return (
         status === 429 ||
         status === 403 ||
-        status === 401 ||
-        status === 400 ||
         msg.includes('429') ||
         msg.includes('resource_exhausted') ||
         msg.includes('quota') ||
@@ -743,11 +678,7 @@ function isRateLimitOrQuotaExhausted(err) {
         msg.includes('per day') ||
         msg.includes('exceeded your current quota') ||
         msg.includes('free tier') ||
-        msg.includes('overloaded') ||
-        msg.includes('invalid') ||
-        msg.includes('expired') ||
-        msg.includes('api_key_invalid') ||
-        msg.includes('not found')
+        msg.includes('overloaded')
     );
 }
 
@@ -911,7 +842,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
             return data.choices?.[0]?.message?.content || null;
         } else {
             // Google Gemini (Fast REST Endpoint with user-customizable maxOutputTokens)
-            const chosenModel = normalizeAiModel(provider, model || 'gemini-2.5-flash');
+            const chosenModel = model || 'gemini-3.8-flash';
             const historySummary = historyRows.slice(-4).map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
             const userPromptText = historySummary 
                 ? `Recent chat:\n${historySummary}\nCustomer: ${incomingText}\nAssistant:` 
@@ -970,7 +901,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
     }
 }
 
-async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabledCheck = false }) {
+async function generateAiChatReply({ instanceId, from, incomingText }) {
     // Validate input text content
     if (!incomingText || typeof incomingText !== 'string' || !incomingText.trim()) {
         return null;
@@ -991,24 +922,8 @@ async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabl
         if (instRes.rows.length === 0) return null;
         const inst = instRes.rows[0];
 
-        // Check if AI auto-responder is toggled ON for this instance (allow test simulator to bypass)
-        if (!inst.ai_enabled && !bypassEnabledCheck) {
-            console.log(`[AI Auto-Reply Notice] Incoming message for instance ${instanceId} ignored because AI Auto-Responder toggle is OFF.`);
-            await logAiAutomationEvent({
-                instanceId,
-                instanceName: inst.name || 'WhatsApp Instance',
-                provider: inst.provider === 'meta' ? 'meta' : 'baileys',
-                remoteJid: from,
-                userPrompt: incomingText,
-                aiResponse: '',
-                modelUsed: normalizeAiModel(inst.ai_provider, inst.ai_model),
-                apiKeyMasked: 'Disabled',
-                status: 'failed',
-                latencyMs: 0,
-                errorMessage: `AI Auto-Responder toggle is OFF for this WhatsApp instance. Enable it in "Configure AI Persona & Rules".`
-            });
-            return null;
-        }
+        // Check if AI auto-responder is toggled ON for this instance
+        if (!inst.ai_enabled) return null;
 
         // Skip broadcast messages and status updates
         if (from === 'status@broadcast') return null;
@@ -1022,7 +937,7 @@ async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabl
         const instanceCategory = inst.provider === 'meta' ? 'meta' : 'baileys';
         const provider = (inst.ai_provider || inst.default_ai_provider || 'gemini').toLowerCase();
 
-        // Gather all candidate API keys from instance settings, user profile, and env
+        // Gather all candidate API keys from instance settings, user profile, and env (trimmed & deduplicated)
         const instanceKeys = parseApiKeyList(inst.ai_api_key);
         const userKeys = parseApiKeyList(provider === 'openai' ? inst.openai_api_key : inst.gemini_api_key);
         const envKeys = parseApiKeyList(provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.GEMINI_API_KEY);
@@ -1032,9 +947,6 @@ async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabl
 
         if (allKeys.length === 0) {
             console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured.`);
-            if (bypassEnabledCheck) {
-                return `⚠️ Notice: No ${provider.toUpperCase()} API Key is configured. Please enter your API key in settings or persona rules to test responses.`;
-            }
             await logAiAutomationEvent({
                 instanceId,
                 instanceName,
@@ -1042,7 +954,7 @@ async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabl
                 remoteJid: from,
                 userPrompt: incomingText,
                 aiResponse: '',
-                modelUsed: normalizeAiModel(provider, inst.ai_model),
+                modelUsed: inst.ai_model || 'gemini-3.8-flash',
                 apiKeyMasked: 'None Configured',
                 status: 'failed',
                 latencyMs: 0,
@@ -1073,120 +985,19 @@ async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabl
 
         const prioritizedKeys = [...availableKeys, ...cooldownKeys];
 
-        // Determine primary model and normalize to valid API endpoint string
-        let rawPrimary = inst.ai_model || inst.default_ai_model;
-        let primaryModel = normalizeAiModel(provider, rawPrimary);
+        // Determine primary model and construct fallback model sequence
+        let primaryModel = inst.ai_model || inst.default_ai_model;
+        if (!primaryModel) {
+            primaryModel = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
+        }
 
-        const modelFallbackChain = (provider === 'openai' ? OPENAI_MODEL_FALLBACKS : GEMINI_MODEL_FALLBACKS).map(m => normalizeAiModel(provider, m));
+        const modelFallbackChain = provider === 'openai' ? OPENAI_MODEL_FALLBACKS : GEMINI_MODEL_FALLBACKS;
         const candidateModels = Array.from(new Set([primaryModel, ...modelFallbackChain]));
 
         const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries politely, thoroughly, and accurately. Do not include prefixes like 'Assistant:' or 'Bot:'.";
-        const baseSystemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
+        const systemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
                              (inst.default_ai_prompt && inst.default_ai_prompt.trim()) || 
                              defaultPrompt;
-
-        // Fetch active Knowledge Base & Store documents for smart context injection
-        let knowledgeDocs = [];
-        try {
-            const kbRes = await pool.query(
-                `SELECT category, title, content, tags FROM ai_knowledge_base 
-                 WHERE is_active = TRUE 
-                 ORDER BY id DESC LIMIT 150`
-            );
-            const rawDocs = kbRes.rows || [];
-
-            // Stopwords set to isolate specific product names, software features & specs
-            const stopWords = new Set([
-                'do', 'you', 'have', 'this', 'that', 'the', 'a', 'an', 'is', 'are', 'was', 'were',
-                'what', 'which', 'who', 'how', 'much', 'many', 'does', 'cost', 'price', 'pricing',
-                'product', 'products', 'available', 'availability', 'quantity', 'related',
-                'tell', 'me', 'about', 'show', 'give', 'item', 'items', 'info', 'details', 'feature',
-                'features', 'spec', 'specs', 'store', 'buy', 'order', 'online', 'stock', 'in', 'of',
-                'for', 'to', 'with', 'and', 'or', 'can', 'i', 'get', 'please', 'kya', 'hai', 'kitna',
-                'rate', 'chahiye'
-            ]);
-
-            const cleanText = incomingText.toLowerCase().replace(/[^\w\s]/gi, ' ');
-            const allWords = cleanText.split(/\s+/).filter(w => w.length > 1);
-            const meaningfulWords = allWords.filter(w => !stopWords.has(w));
-
-            if (rawDocs.length > 0) {
-                const scoredDocs = rawDocs.map(doc => {
-                    const docTitle = (doc.title || '').toLowerCase();
-                    const docContent = (doc.content || '').toLowerCase();
-                    const docTags = (doc.tags || '').toLowerCase();
-                    const docCategory = (doc.category || '').toLowerCase();
-                    const fullDocText = `${docTitle} ${docContent} ${docTags} ${docCategory}`;
-
-                    let score = 0;
-
-                    // Exact user query phrase match in title or content
-                    if (meaningfulWords.length > 0) {
-                        const searchPhrase = meaningfulWords.join(' ');
-                        if (docTitle.includes(searchPhrase)) score += 100;
-                        else if (fullDocText.includes(searchPhrase)) score += 50;
-                    }
-
-                    // Score meaningful words against title (highest priority), tags, category, content
-                    for (const word of meaningfulWords) {
-                        if (docTitle.includes(word)) score += 35;
-                        else if (docTags.includes(word)) score += 20;
-                        else if (docCategory.includes(word)) score += 15;
-                        else if (docContent.includes(word)) score += 10;
-                    }
-
-                    return { doc, score };
-                });
-
-                scoredDocs.sort((a, b) => b.score - a.score);
-
-                const matchedDocs = scoredDocs.filter(sd => sd.score > 0).map(sd => sd.doc);
-                if (matchedDocs.length > 0) {
-                    const matchedTitles = new Set(matchedDocs.map(d => d.title));
-                    const remaining = rawDocs.filter(d => !matchedTitles.has(d.title));
-                    knowledgeDocs = [...matchedDocs, ...remaining].slice(0, 40);
-                } else {
-                    knowledgeDocs = rawDocs.slice(0, 40);
-                }
-            } else {
-                knowledgeDocs = [];
-            }
-        } catch (kbErr) {
-            console.warn('[AI Knowledge Base] Context fetch notice:', kbErr.message);
-        }
-
-        // Construct knowledge-enhanced system prompt forcing AI to answer product queries directly
-        let systemPrompt = baseSystemPrompt;
-        if (knowledgeDocs.length > 0) {
-            const kbText = knowledgeDocs.map((doc, idx) => 
-                `[Item ${idx + 1}] (${doc.category}) ${doc.title}\n${doc.content}\nTags: ${doc.tags || 'N/A'}`
-            ).join('\n\n');
-
-            systemPrompt = `[CRITICAL DIRECTIVE: KNOWLEDGE BASE PRIORITY ACTIVE]
-You are an official sales & support representative for our business on WhatsApp.
-You MUST prioritize answering customer inquiries about product availability, stock, pricing, software features, hardware specs, and store items using the OFFICIAL BUSINESS KNOWLEDGE BASE below.
-
-=== INSTRUCTIONS FOR PRODUCT, STOCK & PRICING INQUIRIES ===
-1. When a customer asks about a specific product (e.g., "do you have [product name]?", "available quantity", or "price"), IMMEDIATELY check the OFFICIAL BUSINESS KNOWLEDGE BASE below.
-2. If the requested product/software IS found in the Knowledge Base:
-   - State clearly that the product is AVAILABLE.
-   - Provide its exact features, specs, available quantity/stock status, and pricing as listed in the Knowledge Base.
-3. If the requested product is NOT in the Knowledge Base:
-   - Politely inform the customer that the specific item is currently not listed in our catalog or out of stock.
-   - Suggest relevant matching products or software from the Knowledge Base below, or offer to connect them with a human team member.
-4. ANSWER THE CUSTOMER'S QUESTION DIRECTLY. Do not reply with generic welcome menus when a specific product or software question is asked.
-
-=== BOT PERSONA & CUSTOMER INSTRUCTIONS ===
-${baseSystemPrompt}
-
-=== OFFICIAL BUSINESS KNOWLEDGE BASE & STORE CATALOG (${knowledgeDocs.length} Active Items) ===
-${kbText}
-
-=== MULTILINGUAL & FORMATTING INSTRUCTIONS ===
-- Respond in the EXACT SAME LANGUAGE used by the customer (Hindi, Hinglish, English, etc.).
-- If asked in Hindi or Hinglish (e.g. "kya xyz product available hai kitna price hai?"), answer in clear, friendly Hindi/Hinglish with point-by-point details.
-- Be concise, polite, and directly helpful. Do not add prefixes like "Assistant:" or "Bot:".`;
-        }
 
         const temperature = inst.ai_temperature !== null && inst.ai_temperature !== undefined 
             ? parseFloat(inst.ai_temperature) 
@@ -1320,26 +1131,7 @@ ${kbText}
             }
         }
 
-        if (!replyText || !replyText.trim()) {
-            console.error(`[AI Auto-Reply Pool Exhausted] All ${prioritizedKeys.length} candidate API key(s) failed or hit quota limits for instance ${instanceId}.`);
-            await logAiAutomationEvent({
-                instanceId,
-                instanceName,
-                provider: instanceCategory,
-                remoteJid: from,
-                userPrompt: incomingText,
-                aiResponse: '',
-                modelUsed: primaryModel,
-                apiKeyMasked: 'All Keys Failed',
-                status: 'failed',
-                latencyMs: 0,
-                errorMessage: `All ${prioritizedKeys.length} API key(s) in pool hit rate limits or errors. Please check your API keys or quota.`
-            });
-            if (bypassEnabledCheck) {
-                return `⚠️ Error: All ${prioritizedKeys.length} candidate API key(s) in your pool failed or hit quota/rate limits. Please enter valid API key(s) in settings.`;
-            }
-            return null;
-        }
+        if (!replyText || !replyText.trim()) return null;
 
         // Strip unwanted leading prefixes
         replyText = replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim();
@@ -3699,461 +3491,6 @@ app.delete('/api/ai/logs', authenticate, async (req, res) => {
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
-    }
-});
-
-// ==========================================
-// AI KNOWLEDGE BASE & SOFTWARE CATALOG APIS
-// ==========================================
-
-// GET /api/ai/knowledge: Retrieve business knowledge base & software catalog articles efficiently
-app.get('/api/ai/knowledge', authenticate, async (req, res) => {
-    try {
-        const { category, search, limit = 200 } = req.query;
-        let query = `SELECT id, user_id, instance_id, category, title, content, tags, is_active, created_at 
-                     FROM ai_knowledge_base 
-                     WHERE (user_id = $1 OR user_id IS NULL OR user_id = '1' OR user_id = $1::text)`;
-        let params = [String(req.user.id)];
-
-        if (category && category !== 'all') {
-            params.push(category);
-            query += ` AND category = $${params.length}`;
-        }
-
-        if (search && typeof search === 'string' && search.trim()) {
-            params.push(`%${search.trim().toLowerCase()}%`);
-            query += ` AND (LOWER(title) LIKE $${params.length} OR LOWER(content) LIKE $${params.length} OR LOWER(tags) LIKE $${params.length})`;
-        }
-
-        query += ' ORDER BY id DESC';
-
-        const parsedLimit = Math.min(Math.max(parseInt(limit) || 200, 1), 500);
-        params.push(parsedLimit);
-        query += ` LIMIT $${params.length}`;
-
-        const result = await pool.query(query, params);
-        res.json({ success: true, knowledge: result.rows });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// POST /api/ai/knowledge: Create or update a knowledge base document
-app.post('/api/ai/knowledge', authenticate, async (req, res) => {
-    try {
-        const { id, instanceId, category = 'Software Features', title, content, tags = '', isActive = true } = req.body;
-        if (!title || !content) {
-            return res.status(400).json({ error: 'Title and content are required' });
-        }
-
-        if (id) {
-            // Update existing knowledge entry
-            await pool.query(
-                `UPDATE ai_knowledge_base 
-                 SET category = $1, title = $2, content = $3, tags = $4, is_active = $5, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = $6 AND (user_id = $7 OR user_id IS NULL OR user_id = '1')`,
-                [category, title, content, tags, !!isActive, id, String(req.user.id)]
-            );
-        } else {
-            // Insert new knowledge entry with current user ID
-            await pool.query(
-                `INSERT INTO ai_knowledge_base (user_id, instance_id, category, title, content, tags, is_active)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                [String(req.user.id), instanceId || null, category, title, content, tags, !!isActive]
-            );
-        }
-
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// DELETE /api/ai/knowledge/:id: Remove a knowledge base item
-app.delete('/api/ai/knowledge/:id', authenticate, async (req, res) => {
-    try {
-        await pool.query('DELETE FROM ai_knowledge_base WHERE id = $1 AND (user_id = $2 OR user_id IS NULL OR user_id = \'1\')', [req.params.id, String(req.user.id)]);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// POST /api/ai/knowledge/seed-samples: Seed pre-populated software feature manuals & store FAQs for multi-software businesses
-app.post('/api/ai/knowledge/seed-samples', authenticate, async (req, res) => {
-    try {
-        const samples = [
-            {
-                category: 'OLT Management Software',
-                title: 'OLT Management Software - Features & Hardware Specs',
-                content: `OLT Management Software Features:
-- Real-time PON Port & ONU Status Monitoring
-- Automated ONU/ONT Provisioning & Auto-Discovery
-- Optical Power & Rx/Tx Signal Quality Diagnostics (-8dBm to -27dBm)
-- Bandwidth Management, VLAN Tagging, and Speed Tier Control
-- Supported Hardware: VSOL V1600G, Huawei MA5608T/MA5800, ZTE C320/C300, Syrotech EPON/GPON OLTs
-- Fiber Cut & Power Outage WhatsApp/SMS Alert Notifications
-- Integrated Subscriber Expiry & Billing System`,
-                tags: 'olt, fiber, pon, onu, broadband, isp, hardware, features'
-            },
-            {
-                category: 'ISP Billing & RADIUS Software',
-                title: 'ISP Billing & Bandwidth Management Software - Features',
-                content: `ISP Billing & Bandwidth Control Software Features:
-- MikroTik API & RADIUS AAA Authentication Server
-- Automated PPPoE, Hotspot & Static IP User Management
-- Automated Billing Invoicing, Payment Reminders & Auto-Disconnection
-- Online Payment Gateway Integration (UPI, Credit Cards, NetBanking)
-- Subscriber Portal with Usage Graph, Speedometer & Renewal History`,
-                tags: 'isp, billing, radius, mikrotik, pppoe, hotspot, bandwidth'
-            },
-            {
-                category: 'WhatsApp Meta API Platform',
-                title: 'WhatsApp Meta API Platform - Capabilities & Features',
-                content: `WhatsApp Official Meta Cloud API Platform Features:
-- Green Badge Verified Official Business Profile
-- Interactive Quick Reply Buttons, List Menus, and Template Broadcasts
-- Unlimited Concurrent Customer Chats with Zero Account Ban Risk
-- AI Auto-Responder with Key Failover & Custom Knowledge Base
-- Webhook Integration for CRM, Shopify, WooCommerce, and MySQL Stores
-- Multi-Agent Live Chat Inbox with Role-Based Permissions`,
-                tags: 'whatsapp, meta, cloud api, broadcast, bot, features'
-            },
-            {
-                category: 'Software Licensing & Key Management',
-                title: 'Software License Key & Serial Manager - Specs',
-                content: `Software License Key Management Features:
-- Online Serial Key Activation & HWID Device Locking
-- Subscription Expiry & Auto-Renewal Alert System
-- License Tier Levels (Trial, Standard, Professional, Enterprise)
-- Anti-Piracy Protection & Remote Deactivation API`,
-                tags: 'license, activation, software, serial key, hwid, enterprise'
-            },
-            {
-                category: 'Online Store FAQ',
-                title: 'Online Store - Ordering, Shipping & Warranty Policy',
-                content: `Online Store Frequently Asked Questions:
-- Ordering: Select software/hardware item -> Pay online -> Instant WhatsApp/Email delivery.
-- Shipping & Hardware Delivery: 2-4 business days via Express Courier with tracking number.
-- Software Delivery: Instant license key & download link sent immediately after payment.
-- Warranty & Support: 1-Year hardware warranty and 24/7 technical support included.`,
-                tags: 'store, orders, shipping, warranty, license, delivery, faq'
-            }
-        ];
-
-        for (const item of samples) {
-            await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [String(req.user.id), item.title]);
-            await pool.query(
-                `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
-                 VALUES ($1, $2, $3, $4, $5, TRUE)`,
-                [String(req.user.id), item.category, item.title, item.content, item.tags]
-            );
-        }
-
-        res.json({ success: true, count: samples.length });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ==========================================
-// EXTERNAL MYSQL STORE INTEGRATION APIS
-// ==========================================
-
-// GET /api/ai/mysql-config: Retrieve saved External MySQL Store settings including password
-app.get('/api/ai/mysql-config', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT host, port, database_name, username, password, tables_to_sync, api_webhook_url, auto_sync_enabled, last_sync_at, status FROM external_mysql_configs WHERE user_id = $1', [String(req.user.id)]);
-        res.json({ success: true, config: result.rows[0] || null });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// POST /api/ai/mysql-config: Save External MySQL Store Connection Parameters
-app.post('/api/ai/mysql-config', authenticate, async (req, res) => {
-    try {
-        const { host, port = 3306, databaseName, username, password, tablesToSync, apiWebhookUrl, autoSyncEnabled } = req.body;
-
-        await pool.query(`
-            INSERT INTO external_mysql_configs (user_id, host, port, database_name, username, password, tables_to_sync, api_webhook_url, auto_sync_enabled, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'configured')
-            ON CONFLICT (user_id) DO UPDATE SET
-                host = EXCLUDED.host,
-                port = EXCLUDED.port,
-                database_name = EXCLUDED.database_name,
-                username = EXCLUDED.username,
-                password = COALESCE(NULLIF(EXCLUDED.password, ''), external_mysql_configs.password),
-                tables_to_sync = EXCLUDED.tables_to_sync,
-                api_webhook_url = EXCLUDED.api_webhook_url,
-                auto_sync_enabled = EXCLUDED.auto_sync_enabled,
-                status = 'configured'
-        `, [req.user.id, host, port, databaseName, username, password || '', tablesToSync, apiWebhookUrl, !!autoSyncEnabled]);
-
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// POST /api/ai/mysql-test: Test external MySQL database connection
-app.post('/api/ai/mysql-test', authenticate, async (req, res) => {
-    try {
-        const { host, port = 3306, databaseName, username, password } = req.body;
-        if (!host || !username || !databaseName) {
-            return res.status(400).json({ error: 'Host, Username, and Database Name are required' });
-        }
-
-        let mysql = mysqlDriver;
-        if (!mysql) {
-            try {
-                mysql = require('mysql2/promise');
-                mysqlDriver = mysql;
-            } catch (mErr) {
-                return res.status(500).json({ error: 'mysql2 module not loaded. Please restart the dev server or verify node_modules.' });
-            }
-        }
-
-        const conn = await mysql.createConnection({
-            host,
-            port: Number(port) || 3306,
-            user: username,
-            password: password || '',
-            database: databaseName,
-            connectTimeout: 5000
-        });
-
-        const [tables] = await conn.query('SHOW TABLES');
-        await conn.end();
-
-        res.json({ 
-            success: true, 
-            message: 'Successfully connected to external MySQL server!',
-            tables: tables.map(t => Object.values(t)[0])
-        });
-    } catch (e) {
-        res.status(400).json({ error: `MySQL Connection Failed: ${e.message}` });
-    }
-});
-
-// POST /api/ai/mysql-fetch-sync: Directly query app_store MySQL table, parse collection JSON arrays (software, products, demos, jobs, etc.), and import into AI Knowledge Base
-// POST /api/ai/mysql-fetch-sync: Query MySQL tables, submenus, child tables, and standard columns into AI Knowledge Base
-app.post('/api/ai/mysql-fetch-sync', authenticate, async (req, res) => {
-    try {
-        const { host, port = 3306, databaseName, username, password, targetTable = 'all' } = req.body;
-
-        // Initialize mysql2/promise driver for remote MySQL query
-        let mysql = mysqlDriver;
-        if (!mysql) {
-            try {
-                mysql = require('mysql2/promise');
-                mysqlDriver = mysql;
-            } catch (mErr) {
-                return res.status(500).json({ error: 'mysql2 module not loaded on server.' });
-            }
-        }
-
-        // Connect to remote MySQL database
-        const conn = await mysql.createConnection({
-            host,
-            port: Number(port) || 3306,
-            user: username,
-            password: password || '',
-            database: databaseName,
-            connectTimeout: 10000
-        });
-
-        // Determine list of tables to query (either 'all', comma-separated list, or single table)
-        let tablesToProcess = [];
-        if (!targetTable || targetTable === 'all' || targetTable === '*') {
-            const [discoveredTables] = await conn.query('SHOW TABLES');
-            tablesToProcess = discoveredTables.map(t => Object.values(t)[0]);
-        } else if (typeof targetTable === 'string' && targetTable.includes(',')) {
-            tablesToProcess = targetTable.split(',').map(t => t.trim()).filter(Boolean);
-        } else {
-            tablesToProcess = [String(targetTable).trim()];
-        }
-
-        let syncedCount = 0;
-        let tablesSynced = [];
-
-        // Loop through each target table to import main rows and submenus/child items
-        for (const tableName of tablesToProcess) {
-            const cleanTable = tableName.replace(/[^a-zA-Z0-9_]/g, '');
-            if (!cleanTable) continue;
-
-            try {
-                const [rows] = await conn.query(`SELECT * FROM \`${cleanTable}\` LIMIT 500`);
-                if (!rows || rows.length === 0) continue;
-
-                for (const row of rows) {
-                    const collectionName = row.collection_name || row.category || row.type || row.menu_title || cleanTable;
-                    
-                    // Check if row has JSON array/object in data, content, json, submenus, or features column
-                    let jsonItems = null;
-                    const jsonCandidate = row.data || row.content || row.json || row.submenus || row.items || row.features;
-                    if (jsonCandidate) {
-                        try {
-                            const parsed = typeof jsonCandidate === 'string' ? JSON.parse(jsonCandidate) : jsonCandidate;
-                            if (Array.isArray(parsed) && parsed.length > 0) {
-                                jsonItems = parsed;
-                            } else if (parsed && typeof parsed === 'object') {
-                                jsonItems = [parsed];
-                            }
-                        } catch (e) {
-                            // Ignore JSON parse errors and fallback to standard column extraction
-                        }
-                    }
-
-                    // Process extracted JSON items (submenus / sub-collections) if present
-                    if (jsonItems && jsonItems.length > 0) {
-                        for (const item of jsonItems) {
-                            if (!item || typeof item !== 'object') continue;
-                            const title = item.title || item.name || item.product_name || item.submenu_name || item.subject || `${collectionName} Item`;
-                            
-                            // Format JSON item properties into clean readable text
-                            const parts = [];
-                            for (const [k, v] of Object.entries(item)) {
-                                if (v !== null && v !== undefined && v !== '') {
-                                    const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
-                                    parts.push(`${k}: ${valStr}`);
-                                }
-                            }
-                            const content = parts.join('\n');
-
-                            // Delete existing item with same user & title to prevent duplicates, then insert
-                            await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [req.user.id, title]);
-                            await pool.query(
-                                `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
-                                 VALUES ($1, $2, $3, $4, $5, TRUE)`,
-                                [req.user.id, `Store: ${collectionName}`, title, content, `${cleanTable}, ${collectionName}`]
-                            );
-                            syncedCount++;
-                        }
-                    }
-
-                    // Always extract standard SQL columns for every row (parent record, submenu, or software item)
-                    const title = row.title || row.name || row.product_name || row.submenu_title || row.submenu_name || row.subject || `${cleanTable} Record #${row.id || syncedCount + 1}`;
-                    const rowParts = [];
-                    for (const [k, v] of Object.entries(row)) {
-                        if (v !== null && v !== undefined && v !== '') {
-                            let valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
-                            // If value is stringified JSON, format neatly
-                            if (typeof v === 'string' && (v.startsWith('{') || v.startsWith('['))) {
-                                try {
-                                    const parsedObj = JSON.parse(v);
-                                    valStr = JSON.stringify(parsedObj, null, 2);
-                                } catch (e) { /* keep as is */ }
-                            }
-                            rowParts.push(`${k}: ${valStr}`);
-                        }
-                    }
-                    const rowContent = rowParts.join('\n');
-
-                    // Delete existing item with same user & title to avoid duplicate, then insert standard column item
-                    await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [req.user.id, title]);
-                    await pool.query(
-                        `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
-                         VALUES ($1, $2, $3, $4, $5, TRUE)`,
-                        [req.user.id, `Store Table: ${cleanTable}`, title, rowContent, `${cleanTable}, ${collectionName}`]
-                    );
-                    syncedCount++;
-                }
-
-                tablesSynced.push(cleanTable);
-            } catch (tblErr) {
-                console.warn(`[MySQL Sync Warning] Failed to query table ${cleanTable}:`, tblErr.message);
-            }
-        }
-
-        await conn.end();
-
-        // Update last sync timestamp in external_mysql_configs database table
-        await pool.query("UPDATE external_mysql_configs SET last_sync_at = CURRENT_TIMESTAMP, status = 'synced' WHERE user_id = $1", [req.user.id]);
-
-        res.json({
-            success: true,
-            syncedCount,
-            tablesSynced,
-            message: `Successfully imported ${syncedCount} items across ${tablesSynced.length} table(s) [${tablesSynced.join(', ')}] including submenus and child data into AI Knowledge Base!`
-        });
-    } catch (e) {
-        console.error('MySQL Fetch & Sync Error:', e);
-        res.status(500).json({ error: `MySQL Sync Failed: ${e.message}` });
-    }
-});
-
-// POST /api/ai/mysql-sync: Import product tables or custom store SQL data into Knowledge Base
-app.post('/api/ai/mysql-sync', authenticate, async (req, res) => {
-    try {
-        const { rawJsonData, tableName } = req.body;
-        
-        let importedCount = 0;
-        if (rawJsonData && Array.isArray(rawJsonData)) {
-            // Import JSON array payload from MySQL / Store API
-            for (const item of rawJsonData) {
-                const title = item.name || item.title || item.product_name || item.subject || 'Store Knowledge Item';
-                const content = Object.entries(item).map(([k, v]) => `${k}: ${v}`).join('\n');
-                await pool.query(
-                    `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
-                     VALUES ($1, 'External Store Products', $2, $3, $4, TRUE)`,
-                    [req.user.id, title, content, tableName || 'mysql_store']
-                );
-                importedCount++;
-            }
-        }
-
-        // Update last sync timestamp
-        await pool.query("UPDATE external_mysql_configs SET last_sync_at = CURRENT_TIMESTAMP, status = 'synced' WHERE user_id = $1", [req.user.id]);
-
-        res.json({ success: true, importedCount });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// POST /api/ai/test-chat: Simulator endpoint to test AI Knowledge Base response generation
-app.post('/api/ai/test-chat', authenticate, async (req, res) => {
-    try {
-        const { message, instanceId } = req.body;
-        if (!message || typeof message !== 'string' || !message.trim()) {
-            return res.status(400).json({ error: 'Message text is required for testing' });
-        }
-
-        // Determine active instance ID for user
-        let targetInstanceId = instanceId;
-        if (!targetInstanceId) {
-            const instRes = await pool.query('SELECT id FROM instances WHERE user_id = $1 LIMIT 1', [req.user.id]);
-            if (instRes.rows.length > 0) {
-                targetInstanceId = instRes.rows[0].id;
-            } else {
-                return res.status(400).json({ error: 'No WhatsApp instance found for testing. Please create a WhatsApp instance first.' });
-            }
-        }
-
-        // Call generateAiChatReply to run the full Knowledge Base AI pipeline (bypassing instance ai_enabled toggle for test simulator)
-        const reply = await generateAiChatReply({
-            instanceId: targetInstanceId,
-            from: 'test_user_simulator@s.whatsapp.net',
-            incomingText: message.trim(),
-            bypassEnabledCheck: true
-        });
-
-        // Query top matched knowledge base documents for debugging display
-        const kbRes = await pool.query(
-            `SELECT category, title FROM ai_knowledge_base WHERE is_active = TRUE ORDER BY id DESC LIMIT 10`
-        );
-
-        res.json({
-            success: true,
-            reply: reply || 'AI generated an empty response. Check if Gemini/OpenAI API key is configured or enabled in settings.',
-            instanceId: targetInstanceId,
-            knowledgeDocsCount: kbRes.rows.length,
-            knowledgeDocs: kbRes.rows
-        });
-    } catch (e) {
-        console.error('[AI Simulator Error]', e);
-        res.status(200).json({ success: false, error: `AI Simulator Error: ${e.message}` });
     }
 });
 
