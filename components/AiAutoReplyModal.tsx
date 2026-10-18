@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Bot, Sparkles, X, Check, Key, Shield, HelpCircle, 
   Send, AlertCircle, RefreshCw, Eye, EyeOff, Sliders, MessageSquare, 
-  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText, History
+  CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText, History,
+  BookOpen, Database, Layers, Globe, FileCode, Edit3, Copy
 } from 'lucide-react';
 import io from 'socket.io-client';
 import { WhatsAppInstance, User } from '../types';
@@ -84,8 +85,249 @@ export default function AiAutoReplyModal({
 
   // Fallback defaults from profile and active model state
   const [hasUserKey, setHasUserKey] = useState(false);
-  const [activeModalTab, setActiveModalTab] = useState<'config' | 'logs'>('config');
+  const [activeModalTab, setActiveModalTab] = useState<'config' | 'knowledge' | 'mysql' | 'logs'>('config');
   const [activeModelInfo, setActiveModelInfo] = useState<any>(null);
+
+  // Business Knowledge Base & Software Catalog state
+  const [knowledgeList, setKnowledgeList] = useState<any[]>([]);
+  const [isLoadingKnowledge, setIsLoadingKnowledge] = useState(false);
+  const [showAddKbModal, setShowAddKbModal] = useState(false);
+  const [kbCategory, setKbCategory] = useState('OLT Management Software');
+  const [kbTitle, setKbTitle] = useState('');
+  const [kbContent, setKbContent] = useState('');
+  const [kbTags, setKbTags] = useState('');
+  const [editingKbId, setEditingKbId] = useState<number | null>(null);
+  const [isSavingKb, setIsSavingKb] = useState(false);
+
+  // External MySQL Database & Webhook Integration state
+  const [mysqlHost, setMysqlHost] = useState('');
+  const [mysqlPort, setMysqlPort] = useState(3306);
+  const [mysqlDb, setMysqlDb] = useState('');
+  const [mysqlUser, setMysqlUser] = useState('');
+  const [mysqlPassword, setMysqlPassword] = useState('');
+  const [mysqlTables, setMysqlTables] = useState('products, software_features, faqs');
+  const [mysqlWebhook, setMysqlWebhook] = useState('');
+  const [isTestingMysql, setIsTestingMysql] = useState(false);
+  const [mysqlTestResult, setMysqlTestResult] = useState<any>(null);
+  const [isSavingMysql, setIsSavingMysql] = useState(false);
+  const [mysqlSaveSuccess, setMysqlSaveSuccess] = useState(false);
+  const [rawStoreJson, setRawStoreJson] = useState('');
+  const [isSyncingStoreData, setIsSyncingStoreData] = useState(false);
+  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
+
+  // Fetch Knowledge Base items from backend
+  const fetchKnowledge = async () => {
+    setIsLoadingKnowledge(true);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/knowledge?instanceId=${instance.id}`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setKnowledgeList(data.knowledge || []);
+      }
+    } catch (e) {
+      console.error('Failed to fetch knowledge base', e);
+    } finally {
+      setIsLoadingKnowledge(false);
+    }
+  };
+
+  // Fetch External MySQL Configuration from backend
+  const fetchMysqlConfig = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/ai/mysql-config`, {
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.config) {
+          setMysqlHost(data.config.host || '');
+          setMysqlPort(data.config.port || 3306);
+          setMysqlDb(data.config.database_name || '');
+          setMysqlUser(data.config.username || '');
+          setMysqlTables(data.config.tables_to_sync || 'products, software_features, faqs');
+          setMysqlWebhook(data.config.api_webhook_url || '');
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch MySQL config', e);
+    }
+  };
+
+  // Create or Update Knowledge Base Document
+  const handleSaveKbItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!kbTitle.trim() || !kbContent.trim()) return;
+    setIsSavingKb(true);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/knowledge`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          id: editingKbId,
+          instanceId: instance.id,
+          category: kbCategory,
+          title: kbTitle,
+          content: kbContent,
+          tags: kbTags,
+          isActive: true
+        })
+      });
+      if (res.ok) {
+        setShowAddKbModal(false);
+        setEditingKbId(null);
+        setKbTitle('');
+        setKbContent('');
+        setKbTags('');
+        fetchKnowledge();
+      }
+    } catch (e) {
+      console.error('Failed to save knowledge item', e);
+    } finally {
+      setIsSavingKb(false);
+    }
+  };
+
+  // Delete Knowledge Base item
+  const handleDeleteKbItem = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this knowledge item?')) return;
+    try {
+      const res = await fetch(`${apiBase}/api/ai/knowledge/${id}`, {
+        method: 'DELETE',
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        fetchKnowledge();
+      }
+    } catch (e) {
+      console.error('Failed to delete knowledge item', e);
+    }
+  };
+
+  // Seed sample pre-populated software feature documents (OLT software, WhatsApp platform, Store FAQ)
+  const handleSeedKbSamples = async () => {
+    setIsLoadingKnowledge(true);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/knowledge/seed-samples`, {
+        method: 'POST',
+        headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
+      });
+      if (res.ok) {
+        fetchKnowledge();
+      }
+    } catch (e) {
+      console.error('Failed to seed knowledge samples', e);
+    } finally {
+      setIsLoadingKnowledge(false);
+    }
+  };
+
+  // Test external MySQL Database Connection
+  const handleTestMysql = async () => {
+    setIsTestingMysql(true);
+    setMysqlTestResult(null);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/mysql-test`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          host: mysqlHost,
+          port: mysqlPort,
+          databaseName: mysqlDb,
+          username: mysqlUser,
+          password: mysqlPassword
+        })
+      });
+      const data = await res.json();
+      setMysqlTestResult(data);
+    } catch (e: any) {
+      setMysqlTestResult({ success: false, error: e.message });
+    } finally {
+      setIsTestingMysql(false);
+    }
+  };
+
+  // Save external MySQL connection settings
+  const handleSaveMysqlConfig = async () => {
+    setIsSavingMysql(true);
+    setMysqlSaveSuccess(false);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/mysql-config`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          host: mysqlHost,
+          port: mysqlPort,
+          databaseName: mysqlDb,
+          username: mysqlUser,
+          password: mysqlPassword,
+          tablesToSync: mysqlTables,
+          apiWebhookUrl: mysqlWebhook,
+          autoSyncEnabled: true
+        })
+      });
+      if (res.ok) {
+        setMysqlSaveSuccess(true);
+        setTimeout(() => setMysqlSaveSuccess(false), 3000);
+      }
+    } catch (e) {
+      console.error('Failed to save MySQL config', e);
+    } finally {
+      setIsSavingMysql(false);
+    }
+  };
+
+  // Import JSON payload or store products into Knowledge Base
+  const handleSyncStoreData = async () => {
+    if (!rawStoreJson.trim()) return;
+    setIsSyncingStoreData(true);
+    setSyncSuccessMsg(null);
+    try {
+      let parsed = JSON.parse(rawStoreJson);
+      if (!Array.isArray(parsed)) parsed = [parsed];
+
+      const res = await fetch(`${apiBase}/api/ai/mysql-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          rawJsonData: parsed,
+          tableName: 'external_mysql_store'
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSyncSuccessMsg(`Successfully imported ${data.importedCount || parsed.length} product/feature items into AI Knowledge Base!`);
+        setRawStoreJson('');
+        fetchKnowledge();
+      }
+    } catch (e: any) {
+      alert(`Invalid JSON or Import Error: ${e.message}`);
+    } finally {
+      setIsSyncingStoreData(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeModalTab === 'knowledge') fetchKnowledge();
+    if (activeModalTab === 'mysql') fetchMysqlConfig();
+  }, [activeModalTab]);
 
   useEffect(() => {
     // Fetch instance detailed AI config & sync key statuses
@@ -369,7 +611,7 @@ export default function AiAutoReplyModal({
               </div>
               
               {/* Tab Navigation Controls */}
-              <div className="flex items-center gap-2 mt-2">
+              <div className="flex flex-wrap items-center gap-2 mt-2">
                 <button
                   type="button"
                   onClick={() => setActiveModalTab('config')}
@@ -385,6 +627,32 @@ export default function AiAutoReplyModal({
 
                 <button
                   type="button"
+                  onClick={() => setActiveModalTab('knowledge')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeModalTab === 'knowledge'
+                      ? 'bg-purple-600 text-white shadow-md'
+                      : 'bg-gray-800 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <BookOpen size={13} className="text-yellow-400" />
+                  <span>Knowledge Base & FAQs</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveModalTab('mysql')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeModalTab === 'mysql'
+                      ? 'bg-purple-600 text-white shadow-md'
+                      : 'bg-gray-800 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <Database size={13} className="text-cyan-400" />
+                  <span>External MySQL Store Sync</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setActiveModalTab('logs')}
                   className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                     activeModalTab === 'logs'
@@ -393,7 +661,7 @@ export default function AiAutoReplyModal({
                   }`}
                 >
                   <History size={13} />
-                  <span>AI Activity Logs & Key History</span>
+                  <span>AI Activity Logs</span>
                 </button>
               </div>
             </div>
@@ -416,6 +684,407 @@ export default function AiAutoReplyModal({
               apiBase={apiBase} 
               selectedInstanceId={instance.id} 
             />
+          </div>
+        ) : activeModalTab === 'knowledge' ? (
+          /* Business Knowledge Base & Software Catalog Tab */
+          <div className="p-4 sm:p-6 overflow-y-auto max-h-[75vh] space-y-5 text-sm text-gray-200">
+            {/* Header Banner */}
+            <div className="bg-gradient-to-r from-amber-950/40 via-[#182229] to-purple-950/40 border border-amber-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <BookOpen size={18} className="text-yellow-400" />
+                  <h4 className="font-bold text-white text-base">Business Knowledge Base & Software Catalog</h4>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-300 border border-yellow-500/30">
+                    {knowledgeList.length} Article{knowledgeList.length !== 1 ? 's' : ''} Active
+                  </span>
+                </div>
+                <p className="text-xs text-gray-300">
+                  Provide detailed information about your software (e.g. OLT Management Software, Meta WhatsApp Platform), store products, and FAQs. The AI Auto-Responder uses this knowledge to give accurate answers in Hindi, English, Hinglish, or any customer language!
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleSeedKbSamples}
+                  disabled={isLoadingKnowledge}
+                  className="px-3 py-1.5 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/30 text-yellow-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Sparkles size={13} />
+                  <span>Seed Software Samples</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingKbId(null);
+                    setKbCategory('OLT Management Software');
+                    setKbTitle('');
+                    setKbContent('');
+                    setKbTags('');
+                    setShowAddKbModal(true);
+                  }}
+                  className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-purple-600/30"
+                >
+                  <Plus size={14} />
+                  <span>Add Article</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Knowledge Base Article List */}
+            {isLoadingKnowledge ? (
+              <div className="py-12 text-center text-gray-400 space-y-2">
+                <RefreshCw size={24} className="animate-spin mx-auto text-purple-400" />
+                <p className="text-xs">Loading Knowledge Base articles...</p>
+              </div>
+            ) : knowledgeList.length === 0 ? (
+              <div className="bg-[#182229] border border-gray-800 rounded-2xl p-8 text-center space-y-3">
+                <BookOpen size={36} className="mx-auto text-gray-600" />
+                <h5 className="font-bold text-white text-sm">No Knowledge Articles Added Yet</h5>
+                <p className="text-xs text-gray-400 max-w-md mx-auto">
+                  Click <strong>&quot;Seed Software Samples&quot;</strong> to pre-fill standard manuals for OLT Management Software, WhatsApp Meta API Platform, and Store FAQs, or add your own custom product manuals!
+                </p>
+                <div className="flex items-center justify-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleSeedKbSamples}
+                    className="px-4 py-2 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 font-bold rounded-xl text-xs border border-yellow-500/40 transition-all flex items-center gap-2 cursor-pointer"
+                  >
+                    <Sparkles size={14} />
+                    <span>Auto-Seed Software Templates</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {knowledgeList.map((doc: any) => (
+                  <div key={doc.id} className="bg-[#182229] border border-gray-800 rounded-xl p-4 space-y-2.5 hover:border-purple-500/40 transition-all">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 inline-block">
+                          {doc.category}
+                        </span>
+                        <h5 className="font-bold text-white text-sm line-clamp-1">{doc.title}</h5>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingKbId(doc.id);
+                            setKbCategory(doc.category || 'OLT Management Software');
+                            setKbTitle(doc.title);
+                            setKbContent(doc.content);
+                            setKbTags(doc.tags || '');
+                            setShowAddKbModal(true);
+                          }}
+                          className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors cursor-pointer"
+                          title="Edit Document"
+                        >
+                          <Edit3 size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteKbItem(doc.id)}
+                          className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-800 rounded-lg transition-colors cursor-pointer"
+                          title="Delete Document"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-gray-300 whitespace-pre-wrap line-clamp-4 bg-gray-900/60 p-2.5 rounded-lg border border-gray-800/80 font-mono text-[11px]">
+                      {doc.content}
+                    </p>
+
+                    {doc.tags && (
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <span className="text-[10px] text-gray-500">Tags:</span>
+                        {doc.tags.split(',').map((t: string, i: number) => (
+                          <span key={i} className="text-[9px] px-1.5 py-0.2 rounded bg-gray-800 text-gray-400">
+                            #{t.trim()}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Add / Edit Knowledge Modal */}
+            {showAddKbModal && (
+              <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-[#111b21] border border-gray-800 rounded-2xl w-full max-w-xl p-6 space-y-4 shadow-2xl">
+                  <div className="flex items-center justify-between border-b border-gray-800 pb-3">
+                    <h4 className="font-bold text-white text-base flex items-center gap-2">
+                      <BookOpen size={18} className="text-purple-400" />
+                      <span>{editingKbId ? 'Edit Knowledge Article' : 'Add Knowledge Article'}</span>
+                    </h4>
+                    <button onClick={() => setShowAddKbModal(false)} className="text-gray-400 hover:text-white cursor-pointer">
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleSaveKbItem} className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-300">Category</label>
+                      <select
+                        value={kbCategory}
+                        onChange={e => setKbCategory(e.target.value)}
+                        className="w-full bg-[#182229] border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
+                      >
+                        <option value="OLT Management Software">OLT Management Software</option>
+                        <option value="WhatsApp Meta API Platform">WhatsApp Meta API Platform</option>
+                        <option value="Online Store Products">Online Store Products</option>
+                        <option value="Pricing & Plans">Pricing & Plans</option>
+                        <option value="General FAQ">General FAQ</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-300">Article Title</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. OLT Management Software Features & PON Diagnostics"
+                        value={kbTitle}
+                        onChange={e => setKbTitle(e.target.value)}
+                        className="w-full bg-[#182229] border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-300">Article Content / Features (Bullet points or detailed specs)</label>
+                      <textarea
+                        required
+                        rows={6}
+                        placeholder="Write features, answers, or specs here. The AI will read this context to answer customer queries accurately in Hindi, English, or Hinglish."
+                        value={kbContent}
+                        onChange={e => setKbContent(e.target.value)}
+                        className="w-full bg-[#182229] border border-gray-800 rounded-xl p-3 text-xs text-white focus:outline-none focus:border-purple-500 font-mono"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-gray-300">Tags (Comma-separated)</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. olt, pon, fiber, specs, pricing"
+                        value={kbTags}
+                        onChange={e => setKbTags(e.target.value)}
+                        className="w-full bg-[#182229] border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddKbModal(false)}
+                        className="px-4 py-2 bg-gray-800 text-gray-300 font-semibold rounded-xl text-xs cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSavingKb}
+                        className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {isSavingKb ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
+                        <span>Save Article</span>
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : activeModalTab === 'mysql' ? (
+          /* External MySQL Database & Webhook Integration Tab */
+          <div className="p-4 sm:p-6 overflow-y-auto max-h-[75vh] space-y-6 text-sm text-gray-200">
+            {/* Header Banner */}
+            <div className="bg-gradient-to-r from-cyan-950/40 via-[#182229] to-blue-950/40 border border-cyan-500/30 rounded-2xl p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <Database size={20} className="text-cyan-400" />
+                <h4 className="font-bold text-white text-base">External MySQL Store Database & Webhook Sync</h4>
+              </div>
+              <p className="text-xs text-gray-300">
+                Connect your online store database hosted on another server (cPanel, phpMyAdmin, AWS RDS, DigitalOcean, etc.) or import store catalog JSON to make your AI Auto-Responder 100% aware of your product inventory and software features!
+              </p>
+            </div>
+
+            {/* MySQL Connection Config Card */}
+            <div className="bg-[#182229] border border-gray-800 rounded-2xl p-5 space-y-4">
+              <h5 className="font-bold text-white text-sm flex items-center gap-2">
+                <Database size={16} className="text-cyan-400" />
+                <span>External MySQL Server Credentials</span>
+              </h5>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs text-gray-400 font-bold">MySQL Host / IP</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. sql.domain.com or 103.21.22.1"
+                    value={mysqlHost}
+                    onChange={e => setMysqlHost(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-gray-400 font-bold">MySQL Port</label>
+                  <input
+                    type="number"
+                    value={mysqlPort}
+                    onChange={e => setMysqlPort(Number(e.target.value))}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-gray-400 font-bold">Database Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. u1234_online_store"
+                    value={mysqlDb}
+                    onChange={e => setMysqlDb(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-gray-400 font-bold">Database Username</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. store_user"
+                    value={mysqlUser}
+                    onChange={e => setMysqlUser(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-gray-400 font-bold">Database Password</label>
+                  <input
+                    type="password"
+                    placeholder="••••••••"
+                    value={mysqlPassword}
+                    onChange={e => setMysqlPassword(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-gray-400 font-bold">Target Sync Tables</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. products, software_features"
+                    value={mysqlTables}
+                    onChange={e => setMysqlTables(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-gray-800/80">
+                <button
+                  type="button"
+                  onClick={handleTestMysql}
+                  disabled={isTestingMysql}
+                  className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-cyan-300 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer border border-cyan-500/30"
+                >
+                  {isTestingMysql ? <RefreshCw size={14} className="animate-spin" /> : <Zap size={14} />}
+                  <span>Test External MySQL Connection</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSaveMysqlConfig}
+                  disabled={isSavingMysql}
+                  className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-600/30"
+                >
+                  {isSavingMysql ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
+                  <span>Save Connection Config</span>
+                </button>
+              </div>
+
+              {mysqlTestResult && (
+                <div className={`p-3.5 rounded-xl border text-xs ${
+                  mysqlTestResult.success 
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
+                    : 'bg-red-500/10 border-red-500/30 text-red-300'
+                }`}>
+                  <div className="flex items-center gap-2 font-bold mb-1">
+                    {mysqlTestResult.success ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                    <span>{mysqlTestResult.message || mysqlTestResult.error}</span>
+                  </div>
+                  {mysqlTestResult.tables && (
+                    <p className="text-[11px] text-gray-300">
+                      Discovered Tables: {mysqlTestResult.tables.join(', ')}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {mysqlSaveSuccess && (
+                <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                  <CheckCircle2 size={16} />
+                  <span>External MySQL settings successfully saved!</span>
+                </div>
+              )}
+            </div>
+
+            {/* Direct JSON / Store Product Batch Import Card */}
+            <div className="bg-[#182229] border border-gray-800 rounded-2xl p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h5 className="font-bold text-white text-sm flex items-center gap-2">
+                  <FileCode size={16} className="text-yellow-400" />
+                  <span>Direct Store Product / Software JSON Import</span>
+                </h5>
+                <span className="text-[10px] text-gray-400 font-mono">Accepts JSON Array</span>
+              </div>
+              <p className="text-xs text-gray-400">
+                Paste JSON array of products or software features exported from your online store or custom database:
+              </p>
+              <textarea
+                rows={4}
+                placeholder={`[
+  { "name": "OLT Management Software V2", "features": "PON port monitoring, Auto ONU provisioning, SMS alerts", "price": "$199" },
+  { "name": "WhatsApp Meta API Service", "features": "Green badge, Unlimited broadcasts, Zero ban risk", "price": "$49/mo" }
+]`}
+                value={rawStoreJson}
+                onChange={e => setRawStoreJson(e.target.value)}
+                className="w-full bg-gray-900 border border-gray-800 rounded-xl p-3 text-xs text-white font-mono focus:outline-none focus:border-yellow-500"
+              />
+              <div className="flex items-center justify-between">
+                {syncSuccessMsg ? (
+                  <p className="text-xs text-emerald-400 font-semibold">{syncSuccessMsg}</p>
+                ) : <div />}
+                <button
+                  type="button"
+                  onClick={handleSyncStoreData}
+                  disabled={isSyncingStoreData || !rawStoreJson.trim()}
+                  className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-yellow-600/30"
+                >
+                  {isSyncingStoreData ? <RefreshCw size={14} className="animate-spin" /> : <Layers size={14} />}
+                  <span>Import JSON into Knowledge Base</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Guidance & Architecture Box */}
+            <div className="bg-gradient-to-r from-purple-950/20 via-[#182229] to-indigo-950/20 border border-purple-500/30 rounded-2xl p-5 space-y-3">
+              <h5 className="font-bold text-white text-sm flex items-center gap-2">
+                <Globe size={16} className="text-purple-400" />
+                <span>How External MySQL Store Knowledge Works</span>
+              </h5>
+              <ul className="text-xs text-gray-300 space-y-2 list-disc list-inside">
+                <li><strong>1. Security & Firewall:</strong> Ensure your external MySQL server allows remote connections from our server host or cPanel Remote MySQL setting.</li>
+                <li><strong>2. Auto-Injected Knowledge Context:</strong> Whenever a customer messages your WhatsApp bot (e.g. asking about OLT features, store product prices, order returns), the AI queries active Knowledge Base articles and injects product specs directly into the prompt context.</li>
+                <li><strong>3. Multilingual AI Matching:</strong> Even if your store data is in English, if a user asks in Hindi or Hinglish (&quot;OLT software me kya features hai?&quot;), the AI reads your knowledge base and replies fluently in Hindi!</li>
+                <li><strong>4. Webhook Sync Endpoint:</strong> You can configure your store&apos;s webhook to send new products directly to <code className="text-purple-300 bg-gray-900 px-1 py-0.5 rounded">POST /api/ai/mysql-sync</code> to keep the AI continuously updated!</li>
+              </ul>
+            </div>
           </div>
         ) : (
           <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm text-gray-200">

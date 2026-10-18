@@ -309,7 +309,7 @@ pool.connect(async (err, client, release) => {
             )
         `);
 
-        // AI Automation Activity & Failover Logs table
+        // Create ai_automation_logs table for AI activity logging
         await client.query(`
             CREATE TABLE IF NOT EXISTS ai_automation_logs (
                 id SERIAL PRIMARY KEY,
@@ -328,6 +328,43 @@ pool.connect(async (err, client, release) => {
             )
         `);
         console.log('[Database] ai_automation_logs table verified.');
+
+        // Create ai_knowledge_base table to store product specs, software features (e.g. OLT software, WhatsApp Meta API), FAQs, and store items
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS ai_knowledge_base (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255),
+                instance_id VARCHAR(255),
+                category VARCHAR(100) DEFAULT 'Software Features',
+                title VARCHAR(255) NOT NULL,
+                content TEXT NOT NULL,
+                tags TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('[Database] ai_knowledge_base table verified.');
+
+        // Create external_mysql_configs table to save external MySQL store database host, credentials, tables, and sync state
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS external_mysql_configs (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL UNIQUE,
+                host VARCHAR(255),
+                port INT DEFAULT 3306,
+                database_name VARCHAR(255),
+                username VARCHAR(255),
+                password VARCHAR(255),
+                tables_to_sync TEXT,
+                api_webhook_url TEXT,
+                auto_sync_enabled BOOLEAN DEFAULT FALSE,
+                last_sync_at TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'disconnected',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('[Database] external_mysql_configs table verified.');
         
         try {
             await client.query(`
@@ -995,9 +1032,33 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         const candidateModels = Array.from(new Set([primaryModel, ...modelFallbackChain]));
 
         const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries politely, thoroughly, and accurately. Do not include prefixes like 'Assistant:' or 'Bot:'.";
-        const systemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
+        const baseSystemPrompt = (inst.ai_system_prompt && inst.ai_system_prompt.trim()) || 
                              (inst.default_ai_prompt && inst.default_ai_prompt.trim()) || 
                              defaultPrompt;
+
+        // Fetch active Knowledge Base & Software Feature documents for smart context injection
+        let knowledgeDocs = [];
+        try {
+            const kbRes = await pool.query(
+                `SELECT category, title, content, tags FROM ai_knowledge_base 
+                 WHERE (user_id = $1 OR instance_id = $2 OR instance_id IS NULL) AND is_active = TRUE 
+                 ORDER BY id DESC LIMIT 20`,
+                [inst.user_id, instanceId]
+            );
+            knowledgeDocs = kbRes.rows || [];
+        } catch (kbErr) {
+            console.warn('[AI Knowledge Base] Context fetch notice:', kbErr.message);
+        }
+
+        // Construct knowledge-enhanced system prompt
+        let systemPrompt = baseSystemPrompt;
+        if (knowledgeDocs.length > 0) {
+            const kbText = knowledgeDocs.map((doc, idx) => 
+                `[Document ${idx + 1}] Category: ${doc.category}\nTitle: ${doc.title}\nContent: ${doc.content}\nTags: ${doc.tags || 'N/A'}`
+            ).join('\n\n');
+
+            systemPrompt += `\n\n=== OFFICIAL BUSINESS KNOWLEDGE BASE & SOFTWARE CATALOG ===\n${kbText}\n\n=== MULTILINGUAL & ACCURACY INSTRUCTIONS ===\n1. Use the Knowledge Base above as your primary source of truth for software features (e.g. OLT Management Software, WhatsApp Meta API platform, online store products, FAQs).\n2. Respond in the EXACT SAME LANGUAGE used by the customer (e.g. Hindi, Hinglish, English, or regional languages).\n3. If a customer asks in Hindi/Hinglish (e.g. "OLT software me kya features hai?"), answer warmly and accurately in Hindi/Hinglish with clear bullet points.\n4. If asked about features or prices not listed, politely state what is available and offer human agent assistance.`;
+        }
 
         const temperature = inst.ai_temperature !== null && inst.ai_temperature !== undefined 
             ? parseFloat(inst.ai_temperature) 
@@ -3489,6 +3550,236 @@ app.delete('/api/ai/logs', authenticate, async (req, res) => {
             await pool.query('DELETE FROM ai_automation_logs WHERE instance_id IN (SELECT id FROM instances WHERE user_id = $1)', [req.user.id]);
         }
         res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================
+// AI KNOWLEDGE BASE & SOFTWARE CATALOG APIS
+// ==========================================
+
+// GET /api/ai/knowledge: Retrieve business knowledge base & software catalog articles
+app.get('/api/ai/knowledge', authenticate, async (req, res) => {
+    try {
+        const { instanceId, category } = req.query;
+        let query = 'SELECT * FROM ai_knowledge_base WHERE (user_id = $1 OR user_id IS NULL)';
+        let params = [req.user.id];
+
+        if (instanceId) {
+            params.push(instanceId);
+            query += ` AND (instance_id = $${params.length} OR instance_id IS NULL)`;
+        }
+        if (category && category !== 'all') {
+            params.push(category);
+            query += ` AND category = $${params.length}`;
+        }
+
+        query += ' ORDER BY id DESC';
+        const result = await pool.query(query, params);
+        res.json({ success: true, knowledge: result.rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/ai/knowledge: Create or update a knowledge base document
+app.post('/api/ai/knowledge', authenticate, async (req, res) => {
+    try {
+        const { id, instanceId, category = 'Software Features', title, content, tags = '', isActive = true } = req.body;
+        if (!title || !content) {
+            return res.status(400).json({ error: 'Title and content are required' });
+        }
+
+        if (id) {
+            // Update existing knowledge entry
+            await pool.query(
+                `UPDATE ai_knowledge_base 
+                 SET category = $1, title = $2, content = $3, tags = $4, is_active = $5, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $6 AND user_id = $7`,
+                [category, title, content, tags, !!isActive, id, req.user.id]
+            );
+        } else {
+            // Insert new knowledge entry
+            await pool.query(
+                `INSERT INTO ai_knowledge_base (user_id, instance_id, category, title, content, tags, is_active)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [req.user.id, instanceId || null, category, title, content, tags, !!isActive]
+            );
+        }
+
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// DELETE /api/ai/knowledge/:id: Remove a knowledge base item
+app.delete('/api/ai/knowledge/:id', authenticate, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM ai_knowledge_base WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/ai/knowledge/seed-samples: Seed pre-populated software feature manuals & store FAQs
+app.post('/api/ai/knowledge/seed-samples', authenticate, async (req, res) => {
+    try {
+        const samples = [
+            {
+                category: 'OLT Management Software',
+                title: 'OLT Management Software - Core Features & Specs',
+                content: `OLT Management Software Features:
+- Real-time PON Port & ONU Status Monitoring
+- Automated ONU/ONT Provisioning & Auto-Discovery
+- Optical Power & Rx/Tx Signal Quality Diagnostics
+- Bandwidth Management, VLAN Tagging, and Speed Tier Control
+- Remote Firmware Upgrade & Configuration Backup
+- WhatsApp/SMS Alert Notifications for Fiber Cuts & Power Outages
+- Billing & Subscriber Expiry Integration`,
+                tags: 'olt, fiber, pon, onu, broadband, isp, features'
+            },
+            {
+                category: 'WhatsApp Meta API Platform',
+                title: 'WhatsApp Meta API Platform - Capabilities & Pricing',
+                content: `WhatsApp Official Meta Cloud API Platform Features:
+- Green Badge Verified Business Profile
+- Interactive Buttons, List Menus, and Template Broadcasts
+- Unlimited Concurrent Customer Chats with Zero Ban Risk
+- AI Auto-Responder with Key Failover & Custom Knowledge Base
+- Webhook Integration for CRM, Shopify, and MySQL Stores
+- Multi-Agent Live Chat Inbox with Role-Based Access`,
+                tags: 'whatsapp, meta, cloud api, broadcast, bot, features'
+            },
+            {
+                category: 'Online Store FAQ',
+                title: 'Online Store - Ordering, Delivery & Return Policy',
+                content: `Online Store Frequently Asked Questions:
+- Ordering: Select item -> Pay online or Cash on Delivery -> Instant WhatsApp Confirmation.
+- Delivery Time: Standard shipping takes 2-4 business days. Express shipping available.
+- Order Tracking: Enter Order ID or Phone Number to check real-time courier status.
+- Return & Refund: 7-day hassle-free replacement policy for defective or damaged items.`,
+                tags: 'store, orders, delivery, refund, payment, faq'
+            }
+        ];
+
+        for (const item of samples) {
+            await pool.query(
+                `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
+                 VALUES ($1, $2, $3, $4, $5, TRUE)`,
+                [req.user.id, item.category, item.title, item.content, item.tags]
+            );
+        }
+
+        res.json({ success: true, count: samples.length });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================
+// EXTERNAL MYSQL STORE INTEGRATION APIS
+// ==========================================
+
+// GET /api/ai/mysql-config: Retrieve saved External MySQL Store settings
+app.get('/api/ai/mysql-config', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT host, port, database_name, username, tables_to_sync, api_webhook_url, auto_sync_enabled, last_sync_at, status FROM external_mysql_configs WHERE user_id = $1', [req.user.id]);
+        res.json({ success: true, config: result.rows[0] || null });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/ai/mysql-config: Save External MySQL Store Connection Parameters
+app.post('/api/ai/mysql-config', authenticate, async (req, res) => {
+    try {
+        const { host, port = 3306, databaseName, username, password, tablesToSync, apiWebhookUrl, autoSyncEnabled } = req.body;
+
+        await pool.query(`
+            INSERT INTO external_mysql_configs (user_id, host, port, database_name, username, password, tables_to_sync, api_webhook_url, auto_sync_enabled, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'configured')
+            ON CONFLICT (user_id) DO UPDATE SET
+                host = EXCLUDED.host,
+                port = EXCLUDED.port,
+                database_name = EXCLUDED.database_name,
+                username = EXCLUDED.username,
+                password = COALESCE(NULLIF(EXCLUDED.password, ''), external_mysql_configs.password),
+                tables_to_sync = EXCLUDED.tables_to_sync,
+                api_webhook_url = EXCLUDED.api_webhook_url,
+                auto_sync_enabled = EXCLUDED.auto_sync_enabled,
+                status = 'configured'
+        `, [req.user.id, host, port, databaseName, username, password || '', tablesToSync, apiWebhookUrl, !!autoSyncEnabled]);
+
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/ai/mysql-test: Test external MySQL database connection
+app.post('/api/ai/mysql-test', authenticate, async (req, res) => {
+    try {
+        const { host, port = 3306, databaseName, username, password } = req.body;
+        if (!host || !username || !databaseName) {
+            return res.status(400).json({ error: 'Host, Username, and Database Name are required' });
+        }
+
+        let mysql;
+        try {
+            mysql = require('mysql2/promise');
+        } catch (mErr) {
+            return res.status(500).json({ error: 'mysql2 module not installed on server' });
+        }
+
+        const conn = await mysql.createConnection({
+            host,
+            port: Number(port) || 3306,
+            user: username,
+            password: password || '',
+            database: databaseName,
+            connectTimeout: 5000
+        });
+
+        const [tables] = await conn.query('SHOW TABLES');
+        await conn.end();
+
+        res.json({ 
+            success: true, 
+            message: 'Successfully connected to external MySQL server!',
+            tables: tables.map(t => Object.values(t)[0])
+        });
+    } catch (e) {
+        res.status(400).json({ error: `MySQL Connection Failed: ${e.message}` });
+    }
+});
+
+// POST /api/ai/mysql-sync: Import product tables or custom store SQL data into Knowledge Base
+app.post('/api/ai/mysql-sync', authenticate, async (req, res) => {
+    try {
+        const { rawJsonData, tableName } = req.body;
+        
+        let importedCount = 0;
+        if (rawJsonData && Array.isArray(rawJsonData)) {
+            // Import JSON array payload from MySQL / Store API
+            for (const item of rawJsonData) {
+                const title = item.name || item.title || item.product_name || item.subject || 'Store Knowledge Item';
+                const content = Object.entries(item).map(([k, v]) => `${k}: ${v}`).join('\n');
+                await pool.query(
+                    `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
+                     VALUES ($1, 'External Store Products', $2, $3, $4, TRUE)`,
+                    [req.user.id, title, content, tableName || 'mysql_store']
+                );
+                importedCount++;
+            }
+        }
+
+        // Update last sync timestamp
+        await pool.query("UPDATE external_mysql_configs SET last_sync_at = CURRENT_TIMESTAMP, status = 'synced' WHERE user_id = $1", [req.user.id]);
+
+        res.json({ success: true, importedCount });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
