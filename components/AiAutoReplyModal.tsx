@@ -115,6 +115,41 @@ export default function AiAutoReplyModal({
   const [isSyncingStoreData, setIsSyncingStoreData] = useState(false);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
 
+  // Live Knowledge Base AI response simulator state & handler
+  const [testPrompt, setTestPrompt] = useState('');
+  const [testReply, setTestReply] = useState<string | null>(null);
+  const [isTestingPrompt, setIsTestingPrompt] = useState(false);
+
+  const handleRunTestPrompt = async () => {
+    if (!testPrompt.trim()) return;
+    setIsTestingPrompt(true);
+    setTestReply(null);
+    try {
+      const res = await fetch(`${apiBase}/api/ai/test-chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'X-API-Key': currentUser.apiKey
+        },
+        body: JSON.stringify({
+          message: testPrompt.trim(),
+          instanceId: instance.id
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTestReply(data.reply);
+      } else {
+        setTestReply(`Error: ${data.error || 'Failed to generate test reply'}`);
+      }
+    } catch (e: any) {
+      setTestReply(`Test Error: ${e.message}`);
+    } finally {
+      setIsTestingPrompt(false);
+    }
+  };
+
   // Fetch Knowledge Base items from backend
   const fetchKnowledge = async () => {
     setIsLoadingKnowledge(true);
@@ -765,6 +800,47 @@ export default function AiAutoReplyModal({
               </div>
             </div>
 
+            {/* Live Knowledge Base AI Response Simulator & Product Verification Console */}
+            <div className="bg-[#182229] border border-cyan-500/30 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={16} className="text-cyan-400 animate-pulse" />
+                  <h5 className="font-bold text-white text-xs">Verify AI Knowledge Base Response (Live Test Simulator)</h5>
+                </div>
+                <span className="text-[10px] text-cyan-300 font-mono">Test Product/Software Names In Realtime</span>
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Type product or software name (e.g. OLT software, VSOL GPON, WhatsApp Meta API, price)"
+                  value={testPrompt}
+                  onChange={e => setTestPrompt(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleRunTestPrompt()}
+                  className="flex-1 bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 font-medium"
+                />
+                <button
+                  type="button"
+                  onClick={handleRunTestPrompt}
+                  disabled={isTestingPrompt || !testPrompt.trim()}
+                  className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-600/30 shrink-0"
+                >
+                  {isTestingPrompt ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}
+                  <span>Test AI Output</span>
+                </button>
+              </div>
+
+              {testReply && (
+                <div className="p-3.5 bg-gray-900/90 border border-cyan-500/30 rounded-xl text-xs text-gray-200 space-y-1.5 leading-relaxed">
+                  <div className="flex items-center justify-between text-[11px] text-cyan-400 font-bold border-b border-gray-800 pb-1">
+                    <span>🤖 AI Generated Answer (Using Synced Knowledge Base):</span>
+                    <span className="text-[10px] text-gray-400">Tested on {instance.name}</span>
+                  </div>
+                  <div className="whitespace-pre-wrap font-sans text-gray-100">{testReply}</div>
+                </div>
+              )}
+            </div>
+
             {/* Knowledge Base Article List */}
             {isLoadingKnowledge ? (
               <div className="py-12 text-center text-gray-400 space-y-2">
@@ -1010,18 +1086,21 @@ export default function AiAutoReplyModal({
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs text-gray-400 font-bold">Target Sync Tables</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-gray-400 font-bold">Target Sync Tables (Main & Submenus)</label>
+                    <span className="text-[10px] text-cyan-400 font-mono">Use 'all' or comma-separated tables</span>
+                  </div>
                   <input
                     type="text"
-                    placeholder="e.g. products, software_features"
+                    placeholder="Type 'all' or e.g. app_store, submenus, software_features"
                     value={mysqlTables}
                     onChange={e => setMysqlTables(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
+                    className="w-full bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-gray-800/80">
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-gray-800/80">
                 <button
                   type="button"
                   onClick={handleTestMysql}
@@ -1040,7 +1119,7 @@ export default function AiAutoReplyModal({
                     className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-600/30"
                   >
                     {isSyncingStoreData ? <RefreshCw size={14} className="animate-spin" /> : <Layers size={14} />}
-                    <span>Sync `{mysqlTables || 'app_store'}` into AI Knowledge Base</span>
+                    <span>Sync `{mysqlTables || 'all tables & submenus'}` into AI Knowledge Base</span>
                   </button>
 
                   <button
@@ -1050,25 +1129,54 @@ export default function AiAutoReplyModal({
                     className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-600/30"
                   >
                     {isSavingMysql ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
-                    <span>Save Connection Config</span>
+                    <span>Save Config</span>
                   </button>
                 </div>
               </div>
 
               {mysqlTestResult && (
-                <div className={`p-3.5 rounded-xl border text-xs ${
+                <div className={`p-4 rounded-xl border text-xs space-y-2 ${
                   mysqlTestResult.success 
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
                     : 'bg-red-500/10 border-red-500/30 text-red-300'
                 }`}>
-                  <div className="flex items-center gap-2 font-bold mb-1">
+                  <div className="flex items-center gap-2 font-bold">
                     {mysqlTestResult.success ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
                     <span>{mysqlTestResult.message || mysqlTestResult.error}</span>
                   </div>
-                  {mysqlTestResult.tables && (
-                    <p className="text-[11px] text-gray-300">
-                      Discovered Tables: {mysqlTestResult.tables.join(', ')}
-                    </p>
+                  {mysqlTestResult.tables && mysqlTestResult.tables.length > 0 && (
+                    <div className="pt-2 border-t border-emerald-500/20 space-y-2">
+                      <p className="text-[11px] text-gray-300 font-semibold">
+                        Discovered MySQL Tables ({mysqlTestResult.tables.length}). Click any table below to set sync target:
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setMysqlTables('all')}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition-all border ${
+                            mysqlTables === 'all' || !mysqlTables
+                              ? 'bg-emerald-500 text-black font-bold border-emerald-400'
+                              : 'bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border-emerald-500/40'
+                          }`}
+                        >
+                          ⚡ Sync All Tables & Submenus
+                        </button>
+                        {mysqlTestResult.tables.map((tbl: string) => (
+                          <button
+                            key={tbl}
+                            type="button"
+                            onClick={() => setMysqlTables(tbl)}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition-all border ${
+                              mysqlTables === tbl
+                                ? 'bg-cyan-500 text-black font-bold border-cyan-400'
+                                : 'bg-gray-900 hover:bg-gray-800 text-gray-300 border-gray-700'
+                            }`}
+                          >
+                            📁 {tbl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
               )}
@@ -1079,6 +1187,20 @@ export default function AiAutoReplyModal({
                   <span>External MySQL settings successfully saved!</span>
                 </div>
               )}
+
+              {/* Hardware & Software AI Cross-Checking Guide */}
+              <div className="p-4 bg-cyan-950/40 border border-cyan-500/30 rounded-2xl space-y-2.5 text-xs text-cyan-200">
+                <div className="flex items-center gap-2 font-bold text-cyan-300">
+                  <HelpCircle size={16} />
+                  <span>How to Cross-Check Hardware Compatibility & Software FAQs in WhatsApp Chat</span>
+                </div>
+                <ul className="space-y-1.5 text-[11px] text-gray-300 list-disc list-inside leading-relaxed">
+                  <li><strong>1. Sync All Store Tables & Submenus:</strong> Set Target Sync Tables to <code className="bg-cyan-900/60 px-1 py-0.5 rounded font-mono text-cyan-300">all</code> and click Sync. This imports OLT hardware specs, router models, software features, and submenu collections.</li>
+                  <li><strong>2. Review Knowledge Base Items:</strong> Switch to the <strong>📚 Knowledge Base & FAQs</strong> tab to confirm your hardware specifications (e.g., <em>"Supported OLT Models: VSOL V1600G, Huawei MA5608T, ZTE C320"</em>) are listed and marked active.</li>
+                  <li><strong>3. Test in WhatsApp Chat:</strong> Send a message from your phone to your connected WhatsApp instance number (e.g., <em>"Is VSOL 16 port GPON OLT supported?"</em> or <em>"OLT software me kya features hai?"</em>).</li>
+                  <li><strong>4. Inspect AI Automation Logs:</strong> Go to the <strong>Logs</strong> tab to verify the exact Knowledge Base document retrieved and the generated response in Hindi, Hinglish, or English.</li>
+                </ul>
+              </div>
             </div>
 
             {/* Direct JSON / Store Product Batch Import Card */}

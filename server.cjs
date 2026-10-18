@@ -1048,25 +1048,66 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         // Fetch active Knowledge Base & Software Feature documents for smart context injection
         let knowledgeDocs = [];
         try {
+            // Query all active knowledge base documents for user, instance, or globally active items
             const kbRes = await pool.query(
                 `SELECT category, title, content, tags FROM ai_knowledge_base 
-                 WHERE (user_id = $1 OR instance_id = $2 OR instance_id IS NULL) AND is_active = TRUE 
-                 ORDER BY id DESC LIMIT 20`,
-                [inst.user_id, instanceId]
+                 WHERE is_active = TRUE 
+                   AND (
+                        ($1::text IS NOT NULL AND user_id = $1::text) 
+                        OR ($2::text IS NOT NULL AND instance_id = $2::text) 
+                        OR user_id IS NULL 
+                        OR instance_id IS NULL 
+                        OR user_id = '1'
+                   )
+                 ORDER BY id DESC LIMIT 100`,
+                [inst.user_id ? String(inst.user_id) : null, instanceId ? String(instanceId) : null]
             );
-            knowledgeDocs = kbRes.rows || [];
+            const rawDocs = kbRes.rows || [];
+
+            // Perform smart keyword relevance ranking to bring exact matching product documents to the top
+            const searchTerms = incomingText.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+            if (searchTerms.length > 0 && rawDocs.length > 0) {
+                const scoredDocs = rawDocs.map(doc => {
+                    const haystack = `${doc.title} ${doc.content} ${doc.tags || ''} ${doc.category}`.toLowerCase();
+                    let score = 0;
+                    for (const term of searchTerms) {
+                        if (haystack.includes(term)) score += 5;
+                    }
+                    return { doc, score };
+                });
+                scoredDocs.sort((a, b) => b.score - a.score);
+                knowledgeDocs = scoredDocs.map(sd => sd.doc).slice(0, 35);
+            } else {
+                knowledgeDocs = rawDocs.slice(0, 35);
+            }
         } catch (kbErr) {
             console.warn('[AI Knowledge Base] Context fetch notice:', kbErr.message);
         }
 
-        // Construct knowledge-enhanced system prompt
+        // Construct knowledge-enhanced system prompt forcing AI to prioritize Knowledge Base facts
         let systemPrompt = baseSystemPrompt;
         if (knowledgeDocs.length > 0) {
             const kbText = knowledgeDocs.map((doc, idx) => 
-                `[Document ${idx + 1}] Category: ${doc.category}\nTitle: ${doc.title}\nContent: ${doc.content}\nTags: ${doc.tags || 'N/A'}`
+                `[Item ${idx + 1}] (${doc.category}) ${doc.title}\n${doc.content}\nTags: ${doc.tags || 'N/A'}`
             ).join('\n\n');
 
-            systemPrompt += `\n\n=== OFFICIAL BUSINESS KNOWLEDGE BASE & SOFTWARE CATALOG ===\n${kbText}\n\n=== MULTILINGUAL & ACCURACY INSTRUCTIONS ===\n1. Use the Knowledge Base above as your primary source of truth for software features (e.g. OLT Management Software, WhatsApp Meta API platform, online store products, FAQs).\n2. Respond in the EXACT SAME LANGUAGE used by the customer (e.g. Hindi, Hinglish, English, or regional languages).\n3. If a customer asks in Hindi/Hinglish (e.g. "OLT software me kya features hai?"), answer warmly and accurately in Hindi/Hinglish with clear bullet points.\n4. If asked about features or prices not listed, politely state what is available and offer human agent assistance.`;
+            systemPrompt = `[CRITICAL DIRECTIVE: KNOWLEDGE BASE PRIORITY ACTIVE]
+You are a helpful and knowledgeable WhatsApp assistant for our business.
+You MUST prioritize answering customer inquiries about products, software, hardware, pricing, features, and store items using the official catalog data provided below in the OFFICIAL BUSINESS KNOWLEDGE BASE.
+Do NOT reply with generic static text when product, software, or store details are requested by the customer.
+
+=== BOT PERSONA & SYSTEM INSTRUCTIONS ===
+${baseSystemPrompt}
+
+=== OFFICIAL BUSINESS KNOWLEDGE BASE & SOFTWARE CATALOG (${knowledgeDocs.length} Active Items) ===
+${kbText}
+
+=== MULTILINGUAL & ACCURACY INSTRUCTIONS ===
+1. Use the Knowledge Base above as your primary source of truth for software features (e.g. OLT Management Software, WhatsApp Meta API platform, online store products, FAQs, hardware specs).
+2. Respond in the EXACT SAME LANGUAGE used by the customer (e.g. Hindi, Hinglish, English, or regional languages).
+3. If a customer asks in Hindi/Hinglish (e.g. "OLT software me kya features hai?" or product names), answer warmly and accurately in Hindi/Hinglish with clear point-by-point details.
+4. If asked about features or prices not listed, state what is available and offer human agent assistance.
+5. Do not include prefixes like 'Assistant:' or 'Bot:'.`;
         }
 
         const temperature = inst.ai_temperature !== null && inst.ai_temperature !== undefined 
@@ -3769,10 +3810,12 @@ app.post('/api/ai/mysql-test', authenticate, async (req, res) => {
 });
 
 // POST /api/ai/mysql-fetch-sync: Directly query app_store MySQL table, parse collection JSON arrays (software, products, demos, jobs, etc.), and import into AI Knowledge Base
+// POST /api/ai/mysql-fetch-sync: Query MySQL tables, submenus, child tables, and standard columns into AI Knowledge Base
 app.post('/api/ai/mysql-fetch-sync', authenticate, async (req, res) => {
     try {
-        const { host, port = 3306, databaseName, username, password, targetTable = 'app_store' } = req.body;
+        const { host, port = 3306, databaseName, username, password, targetTable = 'all' } = req.body;
 
+        // Initialize mysql2/promise driver for remote MySQL query
         let mysql = mysqlDriver;
         if (!mysql) {
             try {
@@ -3783,80 +3826,133 @@ app.post('/api/ai/mysql-fetch-sync', authenticate, async (req, res) => {
             }
         }
 
+        // Connect to remote MySQL database
         const conn = await mysql.createConnection({
             host,
             port: Number(port) || 3306,
             user: username,
             password: password || '',
             database: databaseName,
-            connectTimeout: 8000
+            connectTimeout: 10000
         });
 
-        // Clean target table name safely
-        const cleanTable = targetTable.replace(/[^a-zA-Z0-9_]/g, '');
-        const [rows] = await conn.query(`SELECT * FROM \`${cleanTable}\``);
-        await conn.end();
+        // Determine list of tables to query (either 'all', comma-separated list, or single table)
+        let tablesToProcess = [];
+        if (!targetTable || targetTable === 'all' || targetTable === '*') {
+            const [discoveredTables] = await conn.query('SHOW TABLES');
+            tablesToProcess = discoveredTables.map(t => Object.values(t)[0]);
+        } else if (typeof targetTable === 'string' && targetTable.includes(',')) {
+            tablesToProcess = targetTable.split(',').map(t => t.trim()).filter(Boolean);
+        } else {
+            tablesToProcess = [String(targetTable).trim()];
+        }
 
         let syncedCount = 0;
-        let categoriesSynced = [];
+        let tablesSynced = [];
 
-        for (const row of rows) {
-            // Support both collection_name+data schema (e.g. app_store) and standard column schemas
-            const collectionName = row.collection_name || row.category || row.type || 'General Store';
-            const rawData = row.data || row.content || row.json || null;
+        // Loop through each target table to import main rows and submenus/child items
+        for (const tableName of tablesToProcess) {
+            const cleanTable = tableName.replace(/[^a-zA-Z0-9_]/g, '');
+            if (!cleanTable) continue;
 
-            if (rawData) {
-                let parsedItems = [];
-                try {
-                    parsedItems = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
-                } catch (pe) {
-                    parsedItems = [{ title: collectionName, description: String(rawData) }];
-                }
+            try {
+                const [rows] = await conn.query(`SELECT * FROM \`${cleanTable}\` LIMIT 500`);
+                if (!rows || rows.length === 0) continue;
 
-                if (!Array.isArray(parsedItems)) {
-                    parsedItems = [parsedItems];
-                }
-
-                for (const item of parsedItems) {
-                    if (!item || typeof item !== 'object') continue;
-
-                    const title = item.title || item.name || item.product_name || item.subject || `${collectionName} Item`;
+                for (const row of rows) {
+                    const collectionName = row.collection_name || row.category || row.type || row.menu_title || cleanTable;
                     
-                    // Format item fields into clean readable knowledge text
-                    const contentParts = [];
-                    for (const [k, v] of Object.entries(item)) {
-                        if (v !== null && v !== undefined && v !== '') {
-                            const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
-                            contentParts.push(`${k}: ${valStr}`);
+                    // Check if row has JSON array/object in data, content, json, submenus, or features column
+                    let jsonItems = null;
+                    const jsonCandidate = row.data || row.content || row.json || row.submenus || row.items || row.features;
+                    if (jsonCandidate) {
+                        try {
+                            const parsed = typeof jsonCandidate === 'string' ? JSON.parse(jsonCandidate) : jsonCandidate;
+                            if (Array.isArray(parsed) && parsed.length > 0) {
+                                jsonItems = parsed;
+                            } else if (parsed && typeof parsed === 'object') {
+                                jsonItems = [parsed];
+                            }
+                        } catch (e) {
+                            // Ignore JSON parse errors and fallback to standard column extraction
                         }
                     }
-                    const content = contentParts.join('\n');
 
-                    // Delete existing item with same user & title if updating, then insert
+                    // Process extracted JSON items (submenus / sub-collections) if present
+                    if (jsonItems && jsonItems.length > 0) {
+                        for (const item of jsonItems) {
+                            if (!item || typeof item !== 'object') continue;
+                            const title = item.title || item.name || item.product_name || item.submenu_name || item.subject || `${collectionName} Item`;
+                            
+                            // Format JSON item properties into clean readable text
+                            const parts = [];
+                            for (const [k, v] of Object.entries(item)) {
+                                if (v !== null && v !== undefined && v !== '') {
+                                    const valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                                    parts.push(`${k}: ${valStr}`);
+                                }
+                            }
+                            const content = parts.join('\n');
+
+                            // Delete existing item with same user & title to prevent duplicates, then insert
+                            await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [req.user.id, title]);
+                            await pool.query(
+                                `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
+                                 VALUES ($1, $2, $3, $4, $5, TRUE)`,
+                                [req.user.id, `Store: ${collectionName}`, title, content, `${cleanTable}, ${collectionName}`]
+                            );
+                            syncedCount++;
+                        }
+                    }
+
+                    // Always extract standard SQL columns for every row (parent record, submenu, or software item)
+                    const title = row.title || row.name || row.product_name || row.submenu_title || row.submenu_name || row.subject || `${cleanTable} Record #${row.id || syncedCount + 1}`;
+                    const rowParts = [];
+                    for (const [k, v] of Object.entries(row)) {
+                        if (v !== null && v !== undefined && v !== '') {
+                            let valStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                            // If value is stringified JSON, format neatly
+                            if (typeof v === 'string' && (v.startsWith('{') || v.startsWith('['))) {
+                                try {
+                                    const parsedObj = JSON.parse(v);
+                                    valStr = JSON.stringify(parsedObj, null, 2);
+                                } catch (e) { /* keep as is */ }
+                            }
+                            rowParts.push(`${k}: ${valStr}`);
+                        }
+                    }
+                    const rowContent = rowParts.join('\n');
+
+                    // Delete existing item with same user & title to avoid duplicate, then insert standard column item
                     await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [req.user.id, title]);
                     await pool.query(
                         `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
                          VALUES ($1, $2, $3, $4, $5, TRUE)`,
-                        [req.user.id, `Store: ${collectionName}`, title, content, collectionName]
+                        [req.user.id, `Store Table: ${cleanTable}`, title, rowContent, `${cleanTable}, ${collectionName}`]
                     );
                     syncedCount++;
                 }
-                categoriesSynced.push(collectionName);
+
+                tablesSynced.push(cleanTable);
+            } catch (tblErr) {
+                console.warn(`[MySQL Sync Warning] Failed to query table ${cleanTable}:`, tblErr.message);
             }
         }
 
-        // Update last sync timestamp in external_mysql_configs
+        await conn.end();
+
+        // Update last sync timestamp in external_mysql_configs database table
         await pool.query("UPDATE external_mysql_configs SET last_sync_at = CURRENT_TIMESTAMP, status = 'synced' WHERE user_id = $1", [req.user.id]);
 
         res.json({
             success: true,
             syncedCount,
-            categoriesSynced,
-            message: `Successfully imported ${syncedCount} items across ${categoriesSynced.length} collections (${categoriesSynced.join(', ')}) into AI Knowledge Base!`
+            tablesSynced,
+            message: `Successfully imported ${syncedCount} items across ${tablesSynced.length} table(s) [${tablesSynced.join(', ')}] including submenus and child data into AI Knowledge Base!`
         });
     } catch (e) {
-        console.error('MySQL Sync Error:', e);
-        res.status(500).json({ error: `MySQL Fetch & Sync Failed: ${e.message}` });
+        console.error('MySQL Fetch & Sync Error:', e);
+        res.status(500).json({ error: `MySQL Sync Failed: ${e.message}` });
     }
 });
 
@@ -3886,6 +3982,49 @@ app.post('/api/ai/mysql-sync', authenticate, async (req, res) => {
         res.json({ success: true, importedCount });
     } catch (e) {
         res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/ai/test-chat: Simulator endpoint to test AI Knowledge Base response generation
+app.post('/api/ai/test-chat', authenticate, async (req, res) => {
+    try {
+        const { message, instanceId } = req.body;
+        if (!message || typeof message !== 'string' || !message.trim()) {
+            return res.status(400).json({ error: 'Message text is required for testing' });
+        }
+
+        // Determine active instance ID for user
+        let targetInstanceId = instanceId;
+        if (!targetInstanceId) {
+            const instRes = await pool.query('SELECT id FROM instances WHERE user_id = $1 LIMIT 1', [req.user.id]);
+            if (instRes.rows.length > 0) {
+                targetInstanceId = instRes.rows[0].id;
+            } else {
+                return res.status(400).json({ error: 'No WhatsApp instance found for testing. Please create a WhatsApp instance first.' });
+            }
+        }
+
+        // Call generateAiChatReply to run the full Knowledge Base AI pipeline
+        const reply = await generateAiChatReply({
+            instanceId: targetInstanceId,
+            from: 'test_user_simulator@s.whatsapp.net',
+            incomingText: message.trim()
+        });
+
+        // Query top matched knowledge base documents for debugging display
+        const kbRes = await pool.query(
+            `SELECT category, title FROM ai_knowledge_base WHERE is_active = TRUE ORDER BY id DESC LIMIT 10`
+        );
+
+        res.json({
+            success: true,
+            reply: reply || 'AI generated an empty response. Check if Gemini/OpenAI API key is configured or enabled.',
+            instanceId: targetInstanceId,
+            knowledgeDocsCount: kbRes.rows.length,
+            knowledgeDocs: kbRes.rows
+        });
+    } catch (e) {
+        res.status(500).json({ error: `AI Simulator Error: ${e.message}` });
     }
 });
 
