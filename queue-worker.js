@@ -421,10 +421,22 @@ const setupWorker = (instancesMap, saveMessage, io) => {
     // --- CAMPAIGN CANCELLATION CHECK ---
     const activeCampaignId = campaignId || options?.campaignId;
     if (activeCampaignId) {
+        // Short inline comment: Check Redis for campaign cancellation flag
         const isCancelled = await connection.get(`campaign_cancelled:${activeCampaignId}`);
         if (isCancelled) {
-            console.log(`[Worker] Job skipped because campaign ${activeCampaignId} was cancelled by user.`);
+            console.log(`[Worker] Job skipped because campaign ${activeCampaignId} was cancelled by user in Redis.`);
             return;
+        }
+
+        // Short inline comment: Fallback database check in case Redis key expired or missed
+        try {
+            const dbCheck = await pool.query('SELECT status FROM scheduled_campaigns WHERE id = $1', [activeCampaignId]);
+            if (dbCheck.rows.length > 0 && dbCheck.rows[0].status === 'cancelled') {
+                console.log(`[Worker] Job skipped because campaign ${activeCampaignId} status is cancelled in database.`);
+                return;
+            }
+        } catch (dbErr) {
+            // DB resilience
         }
     }
     const userStoppedTs = await connection.get(`user_queue_stopped:${userId}`);

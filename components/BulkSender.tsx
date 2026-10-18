@@ -180,6 +180,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     }
   };
 
+  // Stops or cancels a scheduled campaign immediately and purges pending queue messages
   const handleCancelScheduled = async (id: string, isRunning: boolean = false) => {
     const promptMsg = isRunning 
       ? 'Are you sure you want to STOP this running campaign immediately? Pending drip-feed messages will be cancelled.' 
@@ -187,15 +188,32 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     if (!confirm(promptMsg)) return;
     setActionLoadingId(id);
     try {
+      // Short inline comment: Call scheduled campaign cancellation endpoint
       const res = await fetch(`${apiBase}/api/campaigns/scheduled/${id}/cancel`, {
         method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           'X-User-ID': currentUser.id,
           'Authorization': `Bearer ${currentUser.accessToken}`
         }
       });
+
+      // Short inline comment: Also call stop-active queue endpoint to flush active BullMQ jobs
+      await fetch(`${apiBase}/api/campaigns/stop-active`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': currentUser.id,
+          'Authorization': `Bearer ${currentUser.accessToken}`
+        },
+        body: JSON.stringify({ campaignId: id })
+      }).catch(() => {});
+
       const data = await res.json();
       if (res.ok) {
+        // Short inline comment: Immediately set local campaign state to cancelled for instant UI feedback
+        setScheduledCampaigns(prev => prev.map(c => c.id === id ? { ...c, status: 'cancelled' } : c));
+        setRunningCampaigns(prev => prev.map(c => c.id === id ? { ...c, status: 'cancelled' } : c));
         addLog(isRunning ? `Campaign ${id} stopped by user.` : `Campaign ${id} cancelled.`, 'warning');
         fetchRunningCampaigns();
         fetchScheduledCampaigns();
@@ -209,10 +227,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
     }
   };
 
+  // Stops active outbound campaign queues for a specific campaign or all user queues
   const handleStopActiveCampaign = async (specificCampaignId?: string) => {
     if (!confirm('Are you sure you want to STOP the running outbound campaign immediately? All pending and queued messages will be aborted.')) return;
     setIsStoppingQueue(true);
     try {
+      // Short inline comment: Send stop request with specific campaign ID
       const res = await fetch(`${apiBase}/api/campaigns/stop-active`, {
         method: 'POST',
         headers: {
@@ -226,6 +246,17 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
       if (res.ok && data.success) {
         setIsSending(false);
         setProgress(p => ({ ...p, queued: 0 }));
+        
+        // Short inline comment: Update local state to cancelled immediately
+        const targetId = specificCampaignId || activeCampaignId;
+        if (targetId) {
+          setScheduledCampaigns(prev => prev.map(c => c.id === targetId ? { ...c, status: 'cancelled' } : c));
+          setRunningCampaigns(prev => prev.map(c => c.id === targetId ? { ...c, status: 'cancelled' } : c));
+        } else {
+          setScheduledCampaigns(prev => prev.map(c => c.status === 'processing' || c.status === 'scheduled' ? { ...c, status: 'cancelled' } : c));
+          setRunningCampaigns(prev => prev.map(c => c.status === 'processing' || c.status === 'scheduled' ? { ...c, status: 'cancelled' } : c));
+        }
+
         addLog(`Campaign stopped immediately. ${data.clearedJobs !== undefined ? data.clearedJobs + ' queued messages dropped.' : 'Outbound queue cleared.'}`, 'warning');
         alert('Campaign execution stopped successfully!');
         fetchRunningCampaigns();
