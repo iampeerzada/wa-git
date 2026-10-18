@@ -3609,17 +3609,15 @@ app.delete('/api/ai/logs', authenticate, async (req, res) => {
 // AI KNOWLEDGE BASE & SOFTWARE CATALOG APIS
 // ==========================================
 
-// GET /api/ai/knowledge: Retrieve business knowledge base & software catalog articles
+// GET /api/ai/knowledge: Retrieve business knowledge base & software catalog articles without disappearance
 app.get('/api/ai/knowledge', authenticate, async (req, res) => {
     try {
-        const { instanceId, category } = req.query;
-        let query = 'SELECT * FROM ai_knowledge_base WHERE (user_id = $1 OR user_id IS NULL)';
-        let params = [req.user.id];
+        const { category } = req.query;
+        // Query user, global, or default active knowledge articles so nothing disappears
+        let query = `SELECT * FROM ai_knowledge_base 
+                     WHERE (user_id = $1 OR user_id IS NULL OR user_id = '1' OR user_id = $1::text)`;
+        let params = [String(req.user.id)];
 
-        if (instanceId) {
-            params.push(instanceId);
-            query += ` AND (instance_id = $${params.length} OR instance_id IS NULL)`;
-        }
         if (category && category !== 'all') {
             params.push(category);
             query += ` AND category = $${params.length}`;
@@ -3646,15 +3644,15 @@ app.post('/api/ai/knowledge', authenticate, async (req, res) => {
             await pool.query(
                 `UPDATE ai_knowledge_base 
                  SET category = $1, title = $2, content = $3, tags = $4, is_active = $5, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = $6 AND user_id = $7`,
-                [category, title, content, tags, !!isActive, id, req.user.id]
+                 WHERE id = $6 AND (user_id = $7 OR user_id IS NULL OR user_id = '1')`,
+                [category, title, content, tags, !!isActive, id, String(req.user.id)]
             );
         } else {
-            // Insert new knowledge entry
+            // Insert new knowledge entry with current user ID
             await pool.query(
                 `INSERT INTO ai_knowledge_base (user_id, instance_id, category, title, content, tags, is_active)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                [req.user.id, instanceId || null, category, title, content, tags, !!isActive]
+                [String(req.user.id), instanceId || null, category, title, content, tags, !!isActive]
             );
         }
 
@@ -3667,59 +3665,81 @@ app.post('/api/ai/knowledge', authenticate, async (req, res) => {
 // DELETE /api/ai/knowledge/:id: Remove a knowledge base item
 app.delete('/api/ai/knowledge/:id', authenticate, async (req, res) => {
     try {
-        await pool.query('DELETE FROM ai_knowledge_base WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+        await pool.query('DELETE FROM ai_knowledge_base WHERE id = $1 AND (user_id = $2 OR user_id IS NULL OR user_id = \'1\')', [req.params.id, String(req.user.id)]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// POST /api/ai/knowledge/seed-samples: Seed pre-populated software feature manuals & store FAQs
+// POST /api/ai/knowledge/seed-samples: Seed pre-populated software feature manuals & store FAQs for multi-software businesses
 app.post('/api/ai/knowledge/seed-samples', authenticate, async (req, res) => {
     try {
         const samples = [
             {
                 category: 'OLT Management Software',
-                title: 'OLT Management Software - Core Features & Specs',
+                title: 'OLT Management Software - Features & Hardware Specs',
                 content: `OLT Management Software Features:
 - Real-time PON Port & ONU Status Monitoring
 - Automated ONU/ONT Provisioning & Auto-Discovery
-- Optical Power & Rx/Tx Signal Quality Diagnostics
+- Optical Power & Rx/Tx Signal Quality Diagnostics (-8dBm to -27dBm)
 - Bandwidth Management, VLAN Tagging, and Speed Tier Control
-- Remote Firmware Upgrade & Configuration Backup
-- WhatsApp/SMS Alert Notifications for Fiber Cuts & Power Outages
-- Billing & Subscriber Expiry Integration`,
-                tags: 'olt, fiber, pon, onu, broadband, isp, features'
+- Supported Hardware: VSOL V1600G, Huawei MA5608T/MA5800, ZTE C320/C300, Syrotech EPON/GPON OLTs
+- Fiber Cut & Power Outage WhatsApp/SMS Alert Notifications
+- Integrated Subscriber Expiry & Billing System`,
+                tags: 'olt, fiber, pon, onu, broadband, isp, hardware, features'
+            },
+            {
+                category: 'ISP Billing & RADIUS Software',
+                title: 'ISP Billing & Bandwidth Management Software - Features',
+                content: `ISP Billing & Bandwidth Control Software Features:
+- MikroTik API & RADIUS AAA Authentication Server
+- Automated PPPoE, Hotspot & Static IP User Management
+- Automated Billing Invoicing, Payment Reminders & Auto-Disconnection
+- Online Payment Gateway Integration (UPI, Credit Cards, NetBanking)
+- Subscriber Portal with Usage Graph, Speedometer & Renewal History`,
+                tags: 'isp, billing, radius, mikrotik, pppoe, hotspot, bandwidth'
             },
             {
                 category: 'WhatsApp Meta API Platform',
-                title: 'WhatsApp Meta API Platform - Capabilities & Pricing',
+                title: 'WhatsApp Meta API Platform - Capabilities & Features',
                 content: `WhatsApp Official Meta Cloud API Platform Features:
-- Green Badge Verified Business Profile
-- Interactive Buttons, List Menus, and Template Broadcasts
-- Unlimited Concurrent Customer Chats with Zero Ban Risk
+- Green Badge Verified Official Business Profile
+- Interactive Quick Reply Buttons, List Menus, and Template Broadcasts
+- Unlimited Concurrent Customer Chats with Zero Account Ban Risk
 - AI Auto-Responder with Key Failover & Custom Knowledge Base
-- Webhook Integration for CRM, Shopify, and MySQL Stores
-- Multi-Agent Live Chat Inbox with Role-Based Access`,
+- Webhook Integration for CRM, Shopify, WooCommerce, and MySQL Stores
+- Multi-Agent Live Chat Inbox with Role-Based Permissions`,
                 tags: 'whatsapp, meta, cloud api, broadcast, bot, features'
             },
             {
+                category: 'Software Licensing & Key Management',
+                title: 'Software License Key & Serial Manager - Specs',
+                content: `Software License Key Management Features:
+- Online Serial Key Activation & HWID Device Locking
+- Subscription Expiry & Auto-Renewal Alert System
+- License Tier Levels (Trial, Standard, Professional, Enterprise)
+- Anti-Piracy Protection & Remote Deactivation API`,
+                tags: 'license, activation, software, serial key, hwid, enterprise'
+            },
+            {
                 category: 'Online Store FAQ',
-                title: 'Online Store - Ordering, Delivery & Return Policy',
+                title: 'Online Store - Ordering, Shipping & Warranty Policy',
                 content: `Online Store Frequently Asked Questions:
-- Ordering: Select item -> Pay online or Cash on Delivery -> Instant WhatsApp Confirmation.
-- Delivery Time: Standard shipping takes 2-4 business days. Express shipping available.
-- Order Tracking: Enter Order ID or Phone Number to check real-time courier status.
-- Return & Refund: 7-day hassle-free replacement policy for defective or damaged items.`,
-                tags: 'store, orders, delivery, refund, payment, faq'
+- Ordering: Select software/hardware item -> Pay online -> Instant WhatsApp/Email delivery.
+- Shipping & Hardware Delivery: 2-4 business days via Express Courier with tracking number.
+- Software Delivery: Instant license key & download link sent immediately after payment.
+- Warranty & Support: 1-Year hardware warranty and 24/7 technical support included.`,
+                tags: 'store, orders, shipping, warranty, license, delivery, faq'
             }
         ];
 
         for (const item of samples) {
+            await pool.query('DELETE FROM ai_knowledge_base WHERE user_id = $1 AND title = $2', [String(req.user.id), item.title]);
             await pool.query(
                 `INSERT INTO ai_knowledge_base (user_id, category, title, content, tags, is_active)
                  VALUES ($1, $2, $3, $4, $5, TRUE)`,
-                [req.user.id, item.category, item.title, item.content, item.tags]
+                [String(req.user.id), item.category, item.title, item.content, item.tags]
             );
         }
 
@@ -3733,10 +3753,10 @@ app.post('/api/ai/knowledge/seed-samples', authenticate, async (req, res) => {
 // EXTERNAL MYSQL STORE INTEGRATION APIS
 // ==========================================
 
-// GET /api/ai/mysql-config: Retrieve saved External MySQL Store settings
+// GET /api/ai/mysql-config: Retrieve saved External MySQL Store settings including password
 app.get('/api/ai/mysql-config', authenticate, async (req, res) => {
     try {
-        const result = await pool.query('SELECT host, port, database_name, username, tables_to_sync, api_webhook_url, auto_sync_enabled, last_sync_at, status FROM external_mysql_configs WHERE user_id = $1', [req.user.id]);
+        const result = await pool.query('SELECT host, port, database_name, username, password, tables_to_sync, api_webhook_url, auto_sync_enabled, last_sync_at, status FROM external_mysql_configs WHERE user_id = $1', [String(req.user.id)]);
         res.json({ success: true, config: result.rows[0] || null });
     } catch (e) {
         res.status(500).json({ error: e.message });

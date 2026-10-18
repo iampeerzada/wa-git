@@ -154,7 +154,8 @@ export default function AiAutoReplyModal({
   const fetchKnowledge = async () => {
     setIsLoadingKnowledge(true);
     try {
-      const res = await fetch(`${apiBase}/api/ai/knowledge?instanceId=${instance.id}`, {
+      // Query global and user knowledge base articles so nothing disappears
+      const res = await fetch(`${apiBase}/api/ai/knowledge`, {
         headers: { 'X-User-ID': currentUser.id, 'X-API-Key': currentUser.apiKey }
       });
       if (res.ok) {
@@ -181,7 +182,10 @@ export default function AiAutoReplyModal({
           setMysqlPort(data.config.port || 3306);
           setMysqlDb(data.config.database_name || '');
           setMysqlUser(data.config.username || '');
-          setMysqlTables(data.config.tables_to_sync || 'products, software_features, faqs');
+          if (data.config.password) {
+            setMysqlPassword(data.config.password);
+          }
+          setMysqlTables(data.config.tables_to_sync || 'all');
           setMysqlWebhook(data.config.api_webhook_url || '');
         }
       }
@@ -937,6 +941,83 @@ export default function AiAutoReplyModal({
                   </div>
 
                   <form onSubmit={handleSaveKbItem} className="space-y-4">
+                    {/* Quick Software Preset Quick-Fill Buttons */}
+                    <div className="space-y-1.5 bg-gray-900/80 p-3 rounded-xl border border-gray-800">
+                      <label className="text-[11px] font-bold text-cyan-400 flex items-center gap-1">
+                        <Sparkles size={12} />
+                        <span>1-Click Software Feature Presets (Click to Auto-Fill):</span>
+                      </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setKbCategory('OLT Management Software');
+                            setKbTitle('OLT Management Software - Features & Hardware Compatibility');
+                            setKbContent(`OLT Management Software Features:
+- Real-time PON Port & ONU Status Monitoring
+- Automated ONU/ONT Provisioning & Auto-Discovery
+- Optical Power & Rx/Tx Signal Quality Diagnostics (-8dBm to -27dBm)
+- Bandwidth Management, VLAN Tagging, and Speed Tier Control
+- Supported Hardware: VSOL V1600G, Huawei MA5608T/MA5800, ZTE C320/C300, Syrotech EPON/GPON OLTs
+- WhatsApp/SMS Alert Notifications for Fiber Cuts & Power Outages`);
+                            setKbTags('olt, fiber, pon, onu, broadband, isp, hardware');
+                          }}
+                          className="px-2 py-1 bg-purple-950/60 hover:bg-purple-900 border border-purple-500/40 text-purple-300 rounded-lg text-[10px] font-medium cursor-pointer"
+                        >
+                          ⚡ OLT Management
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setKbCategory('ISP Billing & RADIUS');
+                            setKbTitle('ISP Billing & Bandwidth Control Software - Features');
+                            setKbContent(`ISP Billing & Bandwidth Control Software Features:
+- MikroTik API & RADIUS AAA Authentication Server
+- Automated PPPoE, Hotspot & Static IP User Management
+- Automated Billing Invoicing, Payment Reminders & Auto-Disconnection
+- Online Payment Gateway Integration (UPI, Credit Cards, NetBanking)
+- Subscriber Portal with Usage Graph, Speedometer & Renewal History`);
+                            setKbTags('isp, billing, radius, mikrotik, pppoe, hotspot');
+                          }}
+                          className="px-2 py-1 bg-cyan-950/60 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-300 rounded-lg text-[10px] font-medium cursor-pointer"
+                        >
+                          ⚡ ISP Billing
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setKbCategory('Software Licensing');
+                            setKbTitle('Software License Key & Serial Manager - Features');
+                            setKbContent(`Software License Key Management Features:
+- Online Serial Key Activation & HWID Device Locking
+- Subscription Expiry & Auto-Renewal Alert System
+- License Tier Levels (Trial, Standard, Professional, Enterprise)
+- Anti-Piracy Protection & Remote Deactivation API`);
+                            setKbTags('license, activation, software, serial key, hwid');
+                          }}
+                          className="px-2 py-1 bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-500/40 text-emerald-300 rounded-lg text-[10px] font-medium cursor-pointer"
+                        >
+                          ⚡ License Key Manager
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setKbCategory('WhatsApp Meta API');
+                            setKbTitle('WhatsApp Meta API Platform - Capabilities');
+                            setKbContent(`WhatsApp Official Meta Cloud API Platform Features:
+- Green Badge Verified Official Business Profile
+- Interactive Quick Reply Buttons, List Menus, and Template Broadcasts
+- Unlimited Concurrent Customer Chats with Zero Account Ban Risk
+- AI Auto-Responder with Key Failover & Custom Knowledge Base`);
+                            setKbTags('whatsapp, meta, cloud api, broadcast, bot');
+                          }}
+                          className="px-2 py-1 bg-blue-950/60 hover:bg-blue-900 border border-blue-500/40 text-blue-300 rounded-lg text-[10px] font-medium cursor-pointer"
+                        >
+                          ⚡ WhatsApp Meta API
+                        </button>
+                      </div>
+                    </div>
+
                     <div className="space-y-1.5">
                       <label className="text-xs font-bold text-gray-300">Category</label>
                       <select
@@ -945,10 +1026,12 @@ export default function AiAutoReplyModal({
                         className="w-full bg-[#182229] border border-gray-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
                       >
                         <option value="OLT Management Software">OLT Management Software</option>
+                        <option value="ISP Billing & RADIUS">ISP Billing & RADIUS</option>
+                        <option value="Software Licensing">Software Licensing</option>
                         <option value="WhatsApp Meta API Platform">WhatsApp Meta API Platform</option>
                         <option value="Online Store Products">Online Store Products</option>
                         <option value="Pricing & Plans">Pricing & Plans</option>
-                        <option value="General FAQ">General FAQ</option>
+                        <option value="Custom Software">Custom Software / Other Product</option>
                       </select>
                     </div>
 
