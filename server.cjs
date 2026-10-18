@@ -9,6 +9,15 @@ const { Pool } = require('pg');
 const { Queue } = require('bullmq');
 const IORedis = require('ioredis');
 
+// Load mysql2 driver for external MySQL store connections
+let mysqlDriver = null;
+try {
+    mysqlDriver = require('mysql2/promise');
+    console.log('[Database] mysql2 driver loaded for external store connections.');
+} catch (mErr) {
+    console.warn('[Database] mysql2 driver notice:', mErr.message);
+}
+
 class Redis extends IORedis {
     constructor(...args) {
         super(...args);
@@ -3727,11 +3736,14 @@ app.post('/api/ai/mysql-test', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Host, Username, and Database Name are required' });
         }
 
-        let mysql;
-        try {
-            mysql = require('mysql2/promise');
-        } catch (mErr) {
-            return res.status(500).json({ error: 'mysql2 module not installed on server' });
+        let mysql = mysqlDriver;
+        if (!mysql) {
+            try {
+                mysql = require('mysql2/promise');
+                mysqlDriver = mysql;
+            } catch (mErr) {
+                return res.status(500).json({ error: 'mysql2 module not loaded. Please restart the dev server or verify node_modules.' });
+            }
         }
 
         const conn = await mysql.createConnection({
