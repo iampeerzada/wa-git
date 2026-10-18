@@ -120,31 +120,34 @@ export default function AiAutoReplyModal({
   const [testReply, setTestReply] = useState<string | null>(null);
   const [isTestingPrompt, setIsTestingPrompt] = useState(false);
 
+  // Handler: Run live test query against Knowledge Base AI pipeline
   const handleRunTestPrompt = async () => {
     if (!testPrompt.trim()) return;
     setIsTestingPrompt(true);
     setTestReply(null);
     try {
-      const res = await fetch(`${apiBase}/api/ai/test-chat`, {
+      // Clean trailing slashes from apiBase URL to prevent double-slash fetch errors
+      const cleanBase = (apiBase || '').replace(/\/+$/, '');
+      const res = await fetch(`${cleanBase}/api/ai/test-chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-ID': currentUser.id,
-          'X-API-Key': currentUser.apiKey
+          'X-User-ID': currentUser?.id || '',
+          'X-API-Key': currentUser?.apiKey || ''
         },
         body: JSON.stringify({
           message: testPrompt.trim(),
           instanceId: instance.id
         })
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setTestReply(data.reply);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success !== false) {
+        setTestReply(data.reply || 'No output generated.');
       } else {
-        setTestReply(`Error: ${data.error || 'Failed to generate test reply'}`);
+        setTestReply(`Error: ${data.error || 'Failed to generate test reply. Please check your Gemini or OpenAI API key.'}`);
       }
     } catch (e: any) {
-      setTestReply(`Test Error: ${e.message}`);
+      setTestReply(`Test Error: ${e.message || 'Failed to connect to backend server'}`);
     } finally {
       setIsTestingPrompt(false);
     }
@@ -1705,9 +1708,9 @@ export default function AiAutoReplyModal({
                   </>
                 ) : (
                   <>
-                    <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Ultra-Fast & Smart ~400-700ms - Recommended)</option>
-                    <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Fast Auto-Failover Backup)</option>
-                    <option value="gemini-2.0-flash">⚡ Gemini 2.0 Flash (Secondary Backup)</option>
+                    <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Ultra-Fast & Smart ~400-700ms - Recommended)</option>
+                    <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Ultra Lightweight & Fast)</option>
+                    <option value="gemini-2.0-flash">⚡ Gemini 2.0 Flash (Fast Auto-Failover Backup)</option>
                     <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
                     <option value="gemini-1.5-pro">🧠 Gemini 1.5 Pro (Deep Reasoning)</option>
                   </>

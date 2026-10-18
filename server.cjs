@@ -690,11 +690,12 @@ const keyPoolHealth = new Map();
 
 // Default AI model failover fallback sequence for Gemini and OpenAI engines
 const GEMINI_MODEL_FALLBACKS = [
-    'gemini-3.8-flash',
     'gemini-2.5-flash',
+    'gemini-3.1-flash-lite',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
-    'gemini-1.5-pro'
+    'gemini-1.5-pro',
+    'gemini-2.5-flash-lite'
 ];
 
 const OPENAI_MODEL_FALLBACKS = [
@@ -702,6 +703,22 @@ const OPENAI_MODEL_FALLBACKS = [
     'gpt-4o',
     'gpt-3.5-turbo'
 ];
+
+// Helper: Normalize AI model strings to valid Google Gemini / OpenAI API endpoints
+function normalizeAiModel(provider, model) {
+    if ((provider || '').toLowerCase() === 'openai') {
+        if (!model || model.includes('gemini')) return 'gpt-4o-mini';
+        return model;
+    }
+    if (model === 'gemini-3.1-flash-lite') {
+        return 'gemini-2.5-flash-lite';
+    }
+    // Normalize Gemini models to active API models
+    if (!model || model.includes('3.8') || model.includes('4-argon') || model.includes('gpt')) {
+        return 'gemini-2.5-flash';
+    }
+    return model;
+}
 
 // In-Memory Tracker to monitor active model and auto-shift model failovers per instance
 const instanceActiveModelMap = new Map();
@@ -947,7 +964,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
     }
 }
 
-async function generateAiChatReply({ instanceId, from, incomingText }) {
+async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabledCheck = false }) {
     // Validate input text content
     if (!incomingText || typeof incomingText !== 'string' || !incomingText.trim()) {
         return null;
@@ -968,8 +985,8 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         if (instRes.rows.length === 0) return null;
         const inst = instRes.rows[0];
 
-        // Check if AI auto-responder is toggled ON for this instance
-        if (!inst.ai_enabled) return null;
+        // Check if AI auto-responder is toggled ON for this instance (allow test simulator to bypass)
+        if (!inst.ai_enabled && !bypassEnabledCheck) return null;
 
         // Skip broadcast messages and status updates
         if (from === 'status@broadcast') return null;
@@ -983,7 +1000,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
         const instanceCategory = inst.provider === 'meta' ? 'meta' : 'baileys';
         const provider = (inst.ai_provider || inst.default_ai_provider || 'gemini').toLowerCase();
 
-        // Gather all candidate API keys from instance settings, user profile, and env (trimmed & deduplicated)
+        // Gather all candidate API keys from instance settings, user profile, and env
         const instanceKeys = parseApiKeyList(inst.ai_api_key);
         const userKeys = parseApiKeyList(provider === 'openai' ? inst.openai_api_key : inst.gemini_api_key);
         const envKeys = parseApiKeyList(provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.GEMINI_API_KEY);
@@ -993,6 +1010,9 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
 
         if (allKeys.length === 0) {
             console.warn(`[AI Auto-Reply] Notice: AI enabled for instance ${instanceId} but no ${provider.toUpperCase()} API key configured.`);
+            if (bypassEnabledCheck) {
+                return `⚠️ Notice: No ${provider.toUpperCase()} API Key is configured. Please enter your API key in settings or persona rules to test responses.`;
+            }
             await logAiAutomationEvent({
                 instanceId,
                 instanceName,
@@ -1000,7 +1020,7 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
                 remoteJid: from,
                 userPrompt: incomingText,
                 aiResponse: '',
-                modelUsed: inst.ai_model || 'gemini-3.8-flash',
+                modelUsed: normalizeAiModel(provider, inst.ai_model),
                 apiKeyMasked: 'None Configured',
                 status: 'failed',
                 latencyMs: 0,
@@ -1031,13 +1051,11 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
 
         const prioritizedKeys = [...availableKeys, ...cooldownKeys];
 
-        // Determine primary model and construct fallback model sequence
-        let primaryModel = inst.ai_model || inst.default_ai_model;
-        if (!primaryModel) {
-            primaryModel = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-3.8-flash';
-        }
+        // Determine primary model and normalize to valid API endpoint string
+        let rawPrimary = inst.ai_model || inst.default_ai_model;
+        let primaryModel = normalizeAiModel(provider, rawPrimary);
 
-        const modelFallbackChain = provider === 'openai' ? OPENAI_MODEL_FALLBACKS : GEMINI_MODEL_FALLBACKS;
+        const modelFallbackChain = (provider === 'openai' ? OPENAI_MODEL_FALLBACKS : GEMINI_MODEL_FALLBACKS).map(m => normalizeAiModel(provider, m));
         const candidateModels = Array.from(new Set([primaryModel, ...modelFallbackChain]));
 
         const defaultPrompt = "You are a professional, polite, and helpful WhatsApp customer assistant for our business. Answer customer inquiries politely, thoroughly, and accurately. Do not include prefixes like 'Assistant:' or 'Bot:'.";
@@ -1045,46 +1063,77 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
                              (inst.default_ai_prompt && inst.default_ai_prompt.trim()) || 
                              defaultPrompt;
 
-        // Fetch active Knowledge Base & Software Feature documents for smart context injection
+        // Fetch active Knowledge Base & Store documents for smart context injection
         let knowledgeDocs = [];
         try {
-            // Query all active knowledge base documents for user, instance, or globally active items
             const kbRes = await pool.query(
                 `SELECT category, title, content, tags FROM ai_knowledge_base 
                  WHERE is_active = TRUE 
-                   AND (
-                        ($1::text IS NOT NULL AND user_id = $1::text) 
-                        OR ($2::text IS NOT NULL AND instance_id = $2::text) 
-                        OR user_id IS NULL 
-                        OR instance_id IS NULL 
-                        OR user_id = '1'
-                   )
-                 ORDER BY id DESC LIMIT 100`,
-                [inst.user_id ? String(inst.user_id) : null, instanceId ? String(instanceId) : null]
+                 ORDER BY id DESC LIMIT 150`
             );
             const rawDocs = kbRes.rows || [];
 
-            // Perform smart keyword relevance ranking to bring exact matching product documents to the top
-            const searchTerms = incomingText.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-            if (searchTerms.length > 0 && rawDocs.length > 0) {
+            // Stopwords set to isolate specific product names, software features & specs
+            const stopWords = new Set([
+                'do', 'you', 'have', 'this', 'that', 'the', 'a', 'an', 'is', 'are', 'was', 'were',
+                'what', 'which', 'who', 'how', 'much', 'many', 'does', 'cost', 'price', 'pricing',
+                'product', 'products', 'available', 'availability', 'quantity', 'related',
+                'tell', 'me', 'about', 'show', 'give', 'item', 'items', 'info', 'details', 'feature',
+                'features', 'spec', 'specs', 'store', 'buy', 'order', 'online', 'stock', 'in', 'of',
+                'for', 'to', 'with', 'and', 'or', 'can', 'i', 'get', 'please', 'kya', 'hai', 'kitna',
+                'rate', 'chahiye'
+            ]);
+
+            const cleanText = incomingText.toLowerCase().replace(/[^\w\s]/gi, ' ');
+            const allWords = cleanText.split(/\s+/).filter(w => w.length > 1);
+            const meaningfulWords = allWords.filter(w => !stopWords.has(w));
+
+            if (rawDocs.length > 0) {
                 const scoredDocs = rawDocs.map(doc => {
-                    const haystack = `${doc.title} ${doc.content} ${doc.tags || ''} ${doc.category}`.toLowerCase();
+                    const docTitle = (doc.title || '').toLowerCase();
+                    const docContent = (doc.content || '').toLowerCase();
+                    const docTags = (doc.tags || '').toLowerCase();
+                    const docCategory = (doc.category || '').toLowerCase();
+                    const fullDocText = `${docTitle} ${docContent} ${docTags} ${docCategory}`;
+
                     let score = 0;
-                    for (const term of searchTerms) {
-                        if (haystack.includes(term)) score += 5;
+
+                    // Exact user query phrase match in title or content
+                    if (meaningfulWords.length > 0) {
+                        const searchPhrase = meaningfulWords.join(' ');
+                        if (docTitle.includes(searchPhrase)) score += 100;
+                        else if (fullDocText.includes(searchPhrase)) score += 50;
                     }
+
+                    // Score meaningful words against title (highest priority), tags, category, content
+                    for (const word of meaningfulWords) {
+                        if (docTitle.includes(word)) score += 35;
+                        else if (docTags.includes(word)) score += 20;
+                        else if (docCategory.includes(word)) score += 15;
+                        else if (docContent.includes(word)) score += 10;
+                    }
+
                     return { doc, score };
                 });
+
                 scoredDocs.sort((a, b) => b.score - a.score);
-                knowledgeDocs = scoredDocs.map(sd => sd.doc).slice(0, 35);
+
+                const matchedDocs = scoredDocs.filter(sd => sd.score > 0).map(sd => sd.doc);
+                if (matchedDocs.length > 0) {
+                    const matchedTitles = new Set(matchedDocs.map(d => d.title));
+                    const remaining = rawDocs.filter(d => !matchedTitles.has(d.title));
+                    knowledgeDocs = [...matchedDocs, ...remaining].slice(0, 40);
+                } else {
+                    knowledgeDocs = rawDocs.slice(0, 40);
+                }
             } else {
-                knowledgeDocs = rawDocs.slice(0, 35);
+                knowledgeDocs = [];
             }
         } catch (kbErr) {
             console.warn('[AI Knowledge Base] Context fetch notice:', kbErr.message);
         }
 
-        // Construct knowledge-enhanced system prompt forcing AI to prioritize Knowledge Base facts
+        // Construct knowledge-enhanced system prompt forcing AI to answer product queries directly
         let systemPrompt = baseSystemPrompt;
         if (knowledgeDocs.length > 0) {
             const kbText = knowledgeDocs.map((doc, idx) => 
@@ -1092,22 +1141,29 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
             ).join('\n\n');
 
             systemPrompt = `[CRITICAL DIRECTIVE: KNOWLEDGE BASE PRIORITY ACTIVE]
-You are a helpful and knowledgeable WhatsApp assistant for our business.
-You MUST prioritize answering customer inquiries about products, software, hardware, pricing, features, and store items using the official catalog data provided below in the OFFICIAL BUSINESS KNOWLEDGE BASE.
-Do NOT reply with generic static text when product, software, or store details are requested by the customer.
+You are an official sales & support representative for our business on WhatsApp.
+You MUST prioritize answering customer inquiries about product availability, stock, pricing, software features, hardware specs, and store items using the OFFICIAL BUSINESS KNOWLEDGE BASE below.
 
-=== BOT PERSONA & SYSTEM INSTRUCTIONS ===
+=== INSTRUCTIONS FOR PRODUCT, STOCK & PRICING INQUIRIES ===
+1. When a customer asks about a specific product (e.g., "do you have [product name]?", "available quantity", or "price"), IMMEDIATELY check the OFFICIAL BUSINESS KNOWLEDGE BASE below.
+2. If the requested product/software IS found in the Knowledge Base:
+   - State clearly that the product is AVAILABLE.
+   - Provide its exact features, specs, available quantity/stock status, and pricing as listed in the Knowledge Base.
+3. If the requested product is NOT in the Knowledge Base:
+   - Politely inform the customer that the specific item is currently not listed in our catalog or out of stock.
+   - Suggest relevant matching products or software from the Knowledge Base below, or offer to connect them with a human team member.
+4. ANSWER THE CUSTOMER'S QUESTION DIRECTLY. Do not reply with generic welcome menus when a specific product or software question is asked.
+
+=== BOT PERSONA & CUSTOMER INSTRUCTIONS ===
 ${baseSystemPrompt}
 
-=== OFFICIAL BUSINESS KNOWLEDGE BASE & SOFTWARE CATALOG (${knowledgeDocs.length} Active Items) ===
+=== OFFICIAL BUSINESS KNOWLEDGE BASE & STORE CATALOG (${knowledgeDocs.length} Active Items) ===
 ${kbText}
 
-=== MULTILINGUAL & ACCURACY INSTRUCTIONS ===
-1. Use the Knowledge Base above as your primary source of truth for software features (e.g. OLT Management Software, WhatsApp Meta API platform, online store products, FAQs, hardware specs).
-2. Respond in the EXACT SAME LANGUAGE used by the customer (e.g. Hindi, Hinglish, English, or regional languages).
-3. If a customer asks in Hindi/Hinglish (e.g. "OLT software me kya features hai?" or product names), answer warmly and accurately in Hindi/Hinglish with clear point-by-point details.
-4. If asked about features or prices not listed, state what is available and offer human agent assistance.
-5. Do not include prefixes like 'Assistant:' or 'Bot:'.`;
+=== MULTILINGUAL & FORMATTING INSTRUCTIONS ===
+- Respond in the EXACT SAME LANGUAGE used by the customer (Hindi, Hinglish, English, etc.).
+- If asked in Hindi or Hinglish (e.g. "kya xyz product available hai kitna price hai?"), answer in clear, friendly Hindi/Hinglish with point-by-point details.
+- Be concise, polite, and directly helpful. Do not add prefixes like "Assistant:" or "Bot:".`;
         }
 
         const temperature = inst.ai_temperature !== null && inst.ai_temperature !== undefined 
@@ -4024,11 +4080,12 @@ app.post('/api/ai/test-chat', authenticate, async (req, res) => {
             }
         }
 
-        // Call generateAiChatReply to run the full Knowledge Base AI pipeline
+        // Call generateAiChatReply to run the full Knowledge Base AI pipeline (bypassing instance ai_enabled toggle for test simulator)
         const reply = await generateAiChatReply({
             instanceId: targetInstanceId,
             from: 'test_user_simulator@s.whatsapp.net',
-            incomingText: message.trim()
+            incomingText: message.trim(),
+            bypassEnabledCheck: true
         });
 
         // Query top matched knowledge base documents for debugging display
@@ -4038,13 +4095,14 @@ app.post('/api/ai/test-chat', authenticate, async (req, res) => {
 
         res.json({
             success: true,
-            reply: reply || 'AI generated an empty response. Check if Gemini/OpenAI API key is configured or enabled.',
+            reply: reply || 'AI generated an empty response. Check if Gemini/OpenAI API key is configured or enabled in settings.',
             instanceId: targetInstanceId,
             knowledgeDocsCount: kbRes.rows.length,
             knowledgeDocs: kbRes.rows
         });
     } catch (e) {
-        res.status(500).json({ error: `AI Simulator Error: ${e.message}` });
+        console.error('[AI Simulator Error]', e);
+        res.status(200).json({ success: false, error: `AI Simulator Error: ${e.message}` });
     }
 });
 
