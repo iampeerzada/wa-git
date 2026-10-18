@@ -3,7 +3,7 @@ import {
   Bot, Sparkles, X, Check, Key, Shield, HelpCircle, 
   Send, AlertCircle, RefreshCw, Eye, EyeOff, Sliders, MessageSquare, 
   CheckCircle2, ExternalLink, Zap, Plus, Trash2, ShieldCheck, Gauge, Clock, FileText, History,
-  BookOpen, Database, Layers, Globe, FileCode, Edit3, Copy
+  BookOpen, Database, Layers, Globe, FileCode, Edit3, Copy, Search
 } from 'lucide-react';
 import io from 'socket.io-client';
 import { WhatsAppInstance, User } from '../types';
@@ -98,6 +98,7 @@ export default function AiAutoReplyModal({
   const [kbTags, setKbTags] = useState('');
   const [editingKbId, setEditingKbId] = useState<number | null>(null);
   const [isSavingKb, setIsSavingKb] = useState(false);
+  const [kbSearchQuery, setKbSearchQuery] = useState('');
 
   // External MySQL Database & Webhook Integration state
   const [mysqlHost, setMysqlHost] = useState('');
@@ -535,12 +536,22 @@ export default function AiAutoReplyModal({
   };
 
   // Sync health and quota status of all candidate API keys in pool
-  const handleSyncPool = async (overrideKeys?: string[], overrideProvider?: string) => {
+  const handleSyncPool = async (overrideKeys?: any, overrideProvider?: string) => {
     setIsSyncingPool(true);
     try {
-      const keysToUse = overrideKeys || apiKeys;
-      const providerToUse = overrideProvider || aiProvider;
-      const serializedKeys = keysToUse.map(k => k.trim()).filter(Boolean).join('\n');
+      let keysToUse: string[] = [];
+      if (Array.isArray(overrideKeys)) {
+        keysToUse = overrideKeys;
+      } else if (Array.isArray(apiKeys)) {
+        keysToUse = apiKeys;
+      }
+
+      const providerToUse = (typeof overrideProvider === 'string' ? overrideProvider : aiProvider) || 'gemini';
+      const serializedKeys = keysToUse
+        .filter(k => typeof k === 'string')
+        .map(k => k.trim())
+        .filter(Boolean)
+        .join('\n');
 
       const res = await fetch(`${apiBase}/api/ai/pool-status`, {
         method: 'POST',
@@ -848,6 +859,30 @@ export default function AiAutoReplyModal({
               )}
             </div>
 
+            {/* Knowledge Base Instant Search & Filter Bar */}
+            <div className="flex items-center justify-between gap-3 bg-[#182229] border border-gray-800 rounded-xl p-2.5">
+              <div className="relative flex-1">
+                <Search size={14} className="absolute left-3 top-2.5 text-gray-400" />
+                <input
+                  type="text"
+                  value={kbSearchQuery}
+                  onChange={e => setKbSearchQuery(e.target.value)}
+                  placeholder="Instant Search synced store items or manuals (e.g. OLT, price, stock, specs)..."
+                  className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-yellow-500"
+                />
+              </div>
+              <span className="text-[11px] font-mono text-gray-400 shrink-0">
+                Showing {knowledgeList.filter((doc: any) => {
+                  if (!kbSearchQuery.trim()) return true;
+                  const q = kbSearchQuery.toLowerCase();
+                  return (doc.title || '').toLowerCase().includes(q) || 
+                         (doc.content || '').toLowerCase().includes(q) || 
+                         (doc.tags || '').toLowerCase().includes(q) ||
+                         (doc.category || '').toLowerCase().includes(q);
+                }).length} of {knowledgeList.length} items
+              </span>
+            </div>
+
             {/* Knowledge Base Article List */}
             {isLoadingKnowledge ? (
               <div className="py-12 text-center text-gray-400 space-y-2">
@@ -874,7 +909,16 @@ export default function AiAutoReplyModal({
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {knowledgeList.map((doc: any) => (
+                {knowledgeList
+                  .filter((doc: any) => {
+                    if (!kbSearchQuery.trim()) return true;
+                    const q = kbSearchQuery.toLowerCase();
+                    return (doc.title || '').toLowerCase().includes(q) || 
+                           (doc.content || '').toLowerCase().includes(q) || 
+                           (doc.tags || '').toLowerCase().includes(q) ||
+                           (doc.category || '').toLowerCase().includes(q);
+                  })
+                  .map((doc: any) => (
                   <div key={doc.id} className="bg-[#182229] border border-gray-800 rounded-xl p-4 space-y-2.5 hover:border-purple-500/40 transition-all">
                     <div className="flex items-start justify-between gap-2">
                       <div className="space-y-1">
@@ -1443,7 +1487,7 @@ export default function AiAutoReplyModal({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={handleSyncPool}
+                  onClick={() => handleSyncPool()}
                   disabled={isSyncingPool || apiKeys.filter(k => k.trim()).length === 0}
                   className="text-[11px] text-purple-300 hover:text-white flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 transition-all cursor-pointer disabled:opacity-40"
                   title="Check live quota and failover status of all keys in pool"

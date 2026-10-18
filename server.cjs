@@ -730,6 +730,8 @@ function isRateLimitOrQuotaExhausted(err) {
     return (
         status === 429 ||
         status === 403 ||
+        status === 401 ||
+        status === 400 ||
         msg.includes('429') ||
         msg.includes('resource_exhausted') ||
         msg.includes('quota') ||
@@ -741,7 +743,11 @@ function isRateLimitOrQuotaExhausted(err) {
         msg.includes('per day') ||
         msg.includes('exceeded your current quota') ||
         msg.includes('free tier') ||
-        msg.includes('overloaded')
+        msg.includes('overloaded') ||
+        msg.includes('invalid') ||
+        msg.includes('expired') ||
+        msg.includes('api_key_invalid') ||
+        msg.includes('not found')
     );
 }
 
@@ -905,7 +911,7 @@ async function executeSingleAiCall({ provider, apiKey, model, systemPrompt, hist
             return data.choices?.[0]?.message?.content || null;
         } else {
             // Google Gemini (Fast REST Endpoint with user-customizable maxOutputTokens)
-            const chosenModel = model || 'gemini-3.8-flash';
+            const chosenModel = normalizeAiModel(provider, model || 'gemini-2.5-flash');
             const historySummary = historyRows.slice(-4).map(r => (r.from_me ? "Assistant: " : "Customer: ") + (r.text || '')).join('\n');
             const userPromptText = historySummary 
                 ? `Recent chat:\n${historySummary}\nCustomer: ${incomingText}\nAssistant:` 
@@ -986,7 +992,23 @@ async function generateAiChatReply({ instanceId, from, incomingText, bypassEnabl
         const inst = instRes.rows[0];
 
         // Check if AI auto-responder is toggled ON for this instance (allow test simulator to bypass)
-        if (!inst.ai_enabled && !bypassEnabledCheck) return null;
+        if (!inst.ai_enabled && !bypassEnabledCheck) {
+            console.log(`[AI Auto-Reply Notice] Incoming message for instance ${instanceId} ignored because AI Auto-Responder toggle is OFF.`);
+            await logAiAutomationEvent({
+                instanceId,
+                instanceName: inst.name || 'WhatsApp Instance',
+                provider: inst.provider === 'meta' ? 'meta' : 'baileys',
+                remoteJid: from,
+                userPrompt: incomingText,
+                aiResponse: '',
+                modelUsed: normalizeAiModel(inst.ai_provider, inst.ai_model),
+                apiKeyMasked: 'Disabled',
+                status: 'failed',
+                latencyMs: 0,
+                errorMessage: `AI Auto-Responder toggle is OFF for this WhatsApp instance. Enable it in "Configure AI Persona & Rules".`
+            });
+            return null;
+        }
 
         // Skip broadcast messages and status updates
         if (from === 'status@broadcast') return null;
@@ -1298,7 +1320,26 @@ ${kbText}
             }
         }
 
-        if (!replyText || !replyText.trim()) return null;
+        if (!replyText || !replyText.trim()) {
+            console.error(`[AI Auto-Reply Pool Exhausted] All ${prioritizedKeys.length} candidate API key(s) failed or hit quota limits for instance ${instanceId}.`);
+            await logAiAutomationEvent({
+                instanceId,
+                instanceName,
+                provider: instanceCategory,
+                remoteJid: from,
+                userPrompt: incomingText,
+                aiResponse: '',
+                modelUsed: primaryModel,
+                apiKeyMasked: 'All Keys Failed',
+                status: 'failed',
+                latencyMs: 0,
+                errorMessage: `All ${prioritizedKeys.length} API key(s) in pool hit rate limits or errors. Please check your API keys or quota.`
+            });
+            if (bypassEnabledCheck) {
+                return `⚠️ Error: All ${prioritizedKeys.length} candidate API key(s) in your pool failed or hit quota/rate limits. Please enter valid API key(s) in settings.`;
+            }
+            return null;
+        }
 
         // Strip unwanted leading prefixes
         replyText = replyText.replace(/^(assistant|bot|ai):\s*/i, '').trim();
@@ -3665,12 +3706,12 @@ app.delete('/api/ai/logs', authenticate, async (req, res) => {
 // AI KNOWLEDGE BASE & SOFTWARE CATALOG APIS
 // ==========================================
 
-// GET /api/ai/knowledge: Retrieve business knowledge base & software catalog articles without disappearance
+// GET /api/ai/knowledge: Retrieve business knowledge base & software catalog articles efficiently
 app.get('/api/ai/knowledge', authenticate, async (req, res) => {
     try {
-        const { category } = req.query;
-        // Query user, global, or default active knowledge articles so nothing disappears
-        let query = `SELECT * FROM ai_knowledge_base 
+        const { category, search, limit = 200 } = req.query;
+        let query = `SELECT id, user_id, instance_id, category, title, content, tags, is_active, created_at 
+                     FROM ai_knowledge_base 
                      WHERE (user_id = $1 OR user_id IS NULL OR user_id = '1' OR user_id = $1::text)`;
         let params = [String(req.user.id)];
 
@@ -3679,7 +3720,17 @@ app.get('/api/ai/knowledge', authenticate, async (req, res) => {
             query += ` AND category = $${params.length}`;
         }
 
+        if (search && typeof search === 'string' && search.trim()) {
+            params.push(`%${search.trim().toLowerCase()}%`);
+            query += ` AND (LOWER(title) LIKE $${params.length} OR LOWER(content) LIKE $${params.length} OR LOWER(tags) LIKE $${params.length})`;
+        }
+
         query += ' ORDER BY id DESC';
+
+        const parsedLimit = Math.min(Math.max(parseInt(limit) || 200, 1), 500);
+        params.push(parsedLimit);
+        query += ` LIMIT $${params.length}`;
+
         const result = await pool.query(query, params);
         res.json({ success: true, knowledge: result.rows });
     } catch (e) {
