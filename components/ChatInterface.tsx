@@ -48,6 +48,32 @@ const getCleanPhone = (jid: string) => {
   return jid.split('@')[0].replace(/[^0-9]/g, '');
 };
 
+// Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
+// Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions or TDZ errors
+const safeParseDate = (raw: string | number | undefined | null): Date => {
+  if (!raw) return new Date();
+  if (typeof raw === 'number') {
+    return new Date(raw > 1e11 ? raw : raw * 1000);
+  }
+  const str = String(raw).trim();
+  if (/^\d+$/.test(str)) {
+    const num = Number(str);
+    return new Date(num > 1e11 ? num : num * 1000);
+  }
+  // Try direct parse first (handles ISO strings with timezone offset)
+  let d = new Date(str);
+  if (!isNaN(d.getTime())) return d;
+
+  // Handle SQL datetime format like "2026-10-19 16:20:00"
+  const formatted = str.replace(' ', 'T');
+  d = new Date(formatted);
+  if (!isNaN(d.getTime())) return d;
+
+  return new Date();
+};
+
+
+
 const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
   const cleanPhone = getCleanPhone(jid);
   if (!cleanPhone) return;
@@ -810,7 +836,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
 
   // Instruction: Dynamic contact/group profile metadata fetcher
-  // Logic: Fetches verified group subjects or contact names on demand from the backend socket and caches them
+  // Logic: Fetches verified group subjects or contact names on demand from active backend server
   const fetchProfileInfo = async (jid: string, targetInstId?: string) => {
       const instId = targetInstId || activeInstanceRef.current || selectedInstanceId;
       if (!instId || !jid || profileCache[jid]?.name) return;
@@ -834,7 +860,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       }
   };
 
-  // Fetch sessions from server with race-condition & stale-instance protection
+  // Fetch sessions from active backend server with race-condition & stale-instance protection
   useEffect(() => {
     if (!selectedInstanceId) return;
 
@@ -850,6 +876,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             'X-API-Key': currentUser.apiKey
           }
         });
+
         if (res.ok) {
           const data = await res.json();
           // Ensure we only update state if the user is still on this instance
@@ -881,8 +908,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
       } catch (err: any) {
-        if (err.name !== 'AbortError') {
-          console.error('Failed to fetch sessions', err);
+        if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
+          console.error('Failed to fetch sessions from backend server', err);
         }
       } finally {
         if (activeInstanceRef.current === currentInstId) {
@@ -942,6 +969,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             'X-API-Key': currentUser.apiKey
           }
         });
+
         if (res.ok) {
           const data = await res.json();
           messagesCacheRef.current[cacheKey] = data;
@@ -954,8 +982,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
       } catch (err: any) {
-        if (err.name !== 'AbortError') {
-          console.error('Failed to fetch messages', err);
+        if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
+          console.error('Failed to fetch messages from backend server', err);
         }
       } finally {
         if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
@@ -1265,30 +1293,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       return tsB - tsA;
     });
   }, [sessions, searchTerm, selectedLabelFilter, chatFilter, currentTimeTick]);
-
-  // Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
-  // Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions
-  const safeParseDate = (raw: string | number | undefined | null): Date => {
-    if (!raw) return new Date();
-    if (typeof raw === 'number') {
-      return new Date(raw > 1e11 ? raw : raw * 1000);
-    }
-    const str = String(raw).trim();
-    if (/^\d+$/.test(str)) {
-      const num = Number(str);
-      return new Date(num > 1e11 ? num : num * 1000);
-    }
-    // Try direct parse first (handles ISO strings with timezone offset, e.g. 2026-10-19T04:20:00.000Z)
-    let d = new Date(str);
-    if (!isNaN(d.getTime())) return d;
-
-    // Handle SQL datetime format like "2026-10-19 16:20:00"
-    const formatted = str.replace(' ', 'T');
-    d = new Date(formatted);
-    if (!isNaN(d.getTime())) return d;
-
-    return new Date();
-  };
 
   // Instruction: Format timestamp to localized 12-hour time (e.g., 04:20 PM)
   // Logic: Parses raw timestamp safely and returns formatted hour:minute
