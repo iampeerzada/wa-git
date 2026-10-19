@@ -4,7 +4,7 @@ import {
   X, Tag, Plus, Trash2, Filter, LayoutTemplate, ArrowLeft, MessageSquare, Copy, Eye,
   Mic, Square, ExternalLink, Clock, AlertTriangle, FileText, Image, Film, Music, 
   Download, Bell, BellOff, Info, RefreshCw, Volume2, ShieldCheck, HelpCircle, Sparkles,
-  CheckCircle2, ClipboardList, ChevronDown, ChevronUp, Folder, Bot
+  CheckCircle2, ClipboardList, ChevronDown, ChevronUp, Folder, Bot, Building2, MapPin, Mail, Globe
 } from 'lucide-react';
 import { WhatsAppInstance, ChatMessage, ChatSession, User as AppUser, ChatLabel, MediaAsset, normalizePhoneNumber } from '../types';
 import { io, Socket } from 'socket.io-client';
@@ -602,7 +602,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         }
     });
 
-    socket.on('presence_update', (data: { instanceId: string, remoteJid: string, userJid: string, status: string }) => {
+    // Instruction: Live Presence Socket Listener (Online / Offline / Last Seen)
+    // Logic: Updates both typing status and profileCache presence state when contact comes online or goes offline
+    socket.on('presence_update', (data: { instanceId: string, remoteJid: string, userJid: string, status: string, lastSeen?: number }) => {
         const currentInstanceId = selectedInstanceIdRef.current;
         if (data.instanceId === currentInstanceId) {
             if (data.status === 'composing' || data.status === 'recording') {
@@ -614,11 +616,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                 setTypingStatus(prev => ({ ...prev, [data.remoteJid]: false }));
             }
             
-            if (data.status === 'available') {
-                setPresenceStatus(prev => ({ ...prev, [data.remoteJid]: 'online' }));
-            } else {
-                setPresenceStatus(prev => ({ ...prev, [data.remoteJid]: 'offline' }));
-            }
+            const isOnline = data.status === 'available' || data.status === 'composing' || data.status === 'recording';
+            setPresenceStatus(prev => ({ ...prev, [data.remoteJid]: isOnline ? 'online' : 'offline' }));
+            
+            setProfileCache(prev => ({
+                ...prev,
+                [data.remoteJid]: {
+                    ...prev[data.remoteJid],
+                    presence: {
+                        status: isOnline ? 'online' : 'offline',
+                        lastSeen: data.lastSeen || Date.now()
+                    }
+                }
+            }));
         }
     });
 
@@ -821,17 +831,29 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
     const isGroup = remoteJid.endsWith('@g.us');
     const isBroadcast = remoteJid.includes('@broadcast');
-    const cleanDigits = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+
+    let cleanDigits = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+    let realJid = cachedItem?.realJid || remoteJid;
+
+    if (cachedItem?.phoneNumber) {
+      const pDigits = cachedItem.phoneNumber.replace(/\D/g, '');
+      if (pDigits && pDigits.length <= 13) cleanDigits = pDigits;
+    } else if (realJid && !realJid.endsWith('@lid')) {
+      const rDigits = realJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (rDigits && rDigits.length <= 13) cleanDigits = rDigits;
+    }
+
+    const isLid = remoteJid.endsWith('@lid') || (cleanDigits.length > 13 && cleanDigits.startsWith('173'));
 
     let formattedNumber = '';
-    if (cleanDigits) {
+    if (cachedItem?.phoneNumber) {
+      formattedNumber = cachedItem.phoneNumber;
+    } else if (!isLid && cleanDigits) {
       if (cleanDigits.length === 10) {
         formattedNumber = `+91 ${cleanDigits.slice(0, 5)} ${cleanDigits.slice(5)}`;
       } else if (cleanDigits.length === 12 && cleanDigits.startsWith('91')) {
         formattedNumber = `+91 ${cleanDigits.slice(2, 7)} ${cleanDigits.slice(7)}`;
-      } else if (cleanDigits.length >= 7 && cleanDigits.length <= 15) {
-        formattedNumber = `+${cleanDigits}`;
-      } else {
+      } else if (cleanDigits.length >= 7 && cleanDigits.length <= 13) {
         formattedNumber = `+${cleanDigits}`;
       }
     }
@@ -857,12 +879,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       };
     }
 
-    const finalName = resolvedName ? resolvedName : (formattedNumber || remoteJid.split('@')[0]);
+    const displayJid = realJid && realJid.endsWith('@s.whatsapp.net') ? realJid : (remoteJid.includes('@') ? remoteJid : `${remoteJid}@s.whatsapp.net`);
+    const finalName = resolvedName ? resolvedName : (formattedNumber || (isLid ? 'WhatsApp Contact' : displayJid.split('@')[0]));
 
     return {
       name: finalName,
-      number: formattedNumber || cleanDigits || remoteJid.split('@')[0],
-      id: remoteJid,
+      number: formattedNumber || (isLid ? 'WhatsApp Contact' : displayJid.split('@')[0]),
+      id: displayJid,
       isGroup: false
     };
   };
@@ -3179,15 +3202,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               {(() => {
                 const details = getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]);
                 const cached = profileCache[selectedSession.remoteJid];
+                const isOnline = presenceStatus[selectedSession.remoteJid] === 'online' || cached?.presence?.status === 'online';
                 return (
-                  <div className="flex flex-col items-center text-center p-6 bg-[#202c33]/70 rounded-2xl border border-gray-800 shadow-inner">
+                  <div className="flex flex-col items-center text-center p-6 bg-[#202c33]/70 rounded-2xl border border-gray-800 shadow-inner space-y-3">
                     <div 
                       onClick={() => {
                         if (cached?.imgUrl) {
                           setLightboxMedia({ url: cached.imgUrl, type: 'image' });
                         }
                       }}
-                      className="w-28 h-28 rounded-full bg-gray-700 flex items-center justify-center text-gray-300 overflow-hidden mb-4 relative shadow-xl border-2 border-gray-600 group/avatar cursor-pointer"
+                      className="w-28 h-28 rounded-full bg-gray-700 flex items-center justify-center text-gray-300 overflow-hidden relative shadow-xl border-2 border-gray-600 group/avatar cursor-pointer"
                     >
                       {cached?.imgUrl ? (
                         <img src={cached.imgUrl} alt={details.name} className="w-full h-full object-cover group-hover/avatar:scale-105 transition-transform" />
@@ -3201,15 +3225,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                       )}
                     </div>
 
-                    <h2 className="text-lg font-extrabold text-white mb-1 break-words max-w-full">
-                      {details.name}
-                    </h2>
+                    <div className="space-y-1">
+                      <h2 className="text-lg font-extrabold text-white break-words max-w-full">
+                        {details.name}
+                      </h2>
 
-                    <div className="text-xs font-semibold text-emerald-400 font-mono mb-2">
-                      {details.number}
+                      <div className="text-xs font-semibold text-emerald-400 font-mono">
+                        {details.number}
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-2 bg-[#111b21] px-3 py-1.5 rounded-lg border border-gray-800 text-[11px] font-mono text-gray-400 max-w-full break-all">
+                    {/* Instruction: Exact WhatsApp JID Display with copy button */}
+                    <div className="flex items-center gap-2 bg-[#111b21] px-3 py-1.5 rounded-lg border border-gray-800 text-[11px] font-mono text-gray-300 max-w-full break-all">
                       <span>JID: {details.id}</span>
                       <button 
                         onClick={() => {
@@ -3217,15 +3244,32 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                           setCopiedDetailText('JID Copied!');
                           setTimeout(() => setCopiedDetailText(null), 2000);
                         }}
-                        className="text-gray-400 hover:text-white shrink-0 ml-1 p-0.5"
+                        className="text-gray-400 hover:text-white shrink-0 ml-1 p-0.5 cursor-pointer"
                         title="Copy JID"
                       >
                         <Copy size={13} />
                       </button>
                     </div>
 
+                    {/* Instruction: Live Online / Offline / Last Seen Presence Badge */}
+                    <div className="flex items-center gap-2 bg-[#111b21]/80 px-3 py-1 rounded-full border border-gray-800 text-xs font-medium">
+                      {isOnline ? (
+                        <>
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-emerald-400 font-bold">Online</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="w-2 h-2 rounded-full bg-gray-500" />
+                          <span className="text-gray-400">
+                            Offline {cached?.presence?.lastSeen ? `• Last seen ${new Date(cached.presence.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
+                          </span>
+                        </>
+                      )}
+                    </div>
+
                     {copiedDetailText && (
-                      <span className="text-[10px] font-bold text-[#25D366] mt-2 animate-bounce">
+                      <span className="text-[10px] font-bold text-[#25D366] animate-bounce">
                         {copiedDetailText}
                       </span>
                     )}
@@ -3237,7 +3281,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               <div className="grid grid-cols-2 gap-2.5">
                 <button
                   onClick={() => openInWhatsAppWeb(selectedSession.remoteJid)}
-                  className="flex items-center justify-center gap-2 bg-[#25D366]/15 hover:bg-[#25D366]/25 border border-[#25D366]/30 text-[#25D366] py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95"
+                  className="flex items-center justify-center gap-2 bg-[#25D366]/15 hover:bg-[#25D366]/25 border border-[#25D366]/30 text-[#25D366] py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95 cursor-pointer"
                 >
                   <ExternalLink size={14} />
                   <span>Open wa.me</span>
@@ -3252,14 +3296,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                       setTimeout(() => setCopiedDetailText(null), 2000);
                     }
                   }}
-                  className="flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95"
+                  className="flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95 cursor-pointer"
                 >
                   <Copy size={14} />
                   <span>Copy Number</span>
                 </button>
               </div>
 
-              {/* About / Status Info (for 1-on-1 chats) */}
+              {/* Instruction: WhatsApp About / Bio Status Section */}
               {!selectedSession.remoteJid.endsWith('@g.us') && (
                 <div className="bg-[#202c33]/70 p-4 rounded-2xl border border-gray-800 space-y-2">
                   <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider block">
@@ -3268,6 +3312,80 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                   <p className="text-xs text-gray-200 italic leading-relaxed">
                     {profileCache[selectedSession.remoteJid]?.status || "Hey there! I am using WhatsApp."}
                   </p>
+                </div>
+              )}
+
+              {/* Instruction: WhatsApp Business Details Section (Address, Category, Description, Email, Websites) */}
+              {profileCache[selectedSession.remoteJid]?.businessProfile && (
+                <div className="bg-[#202c33]/70 p-4 rounded-2xl border border-gray-800 space-y-3">
+                  <div className="flex items-center justify-between border-b border-gray-800 pb-2">
+                    <span className="text-[10px] font-extrabold text-[#25D366] uppercase tracking-wider flex items-center gap-1.5">
+                      <Building2 size={14} /> WhatsApp Business Details
+                    </span>
+                    <span className="text-[9px] bg-[#25D366]/20 text-[#25D366] px-2 py-0.5 rounded font-bold uppercase">
+                      Verified Business
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 text-xs">
+                    {profileCache[selectedSession.remoteJid].businessProfile.category && (
+                      <div className="flex items-start gap-2.5 text-gray-300">
+                        <Tag size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-[10px] text-gray-500 uppercase block font-bold">Category</span>
+                          <span>{profileCache[selectedSession.remoteJid].businessProfile.category}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {profileCache[selectedSession.remoteJid].businessProfile.address && (
+                      <div className="flex items-start gap-2.5 text-gray-300">
+                        <MapPin size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-[10px] text-gray-500 uppercase block font-bold">Address</span>
+                          <span>{profileCache[selectedSession.remoteJid].businessProfile.address}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {profileCache[selectedSession.remoteJid].businessProfile.description && (
+                      <div className="flex items-start gap-2.5 text-gray-300">
+                        <Info size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-[10px] text-gray-500 uppercase block font-bold">Description</span>
+                          <span className="leading-relaxed">{profileCache[selectedSession.remoteJid].businessProfile.description}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {profileCache[selectedSession.remoteJid].businessProfile.email && (
+                      <div className="flex items-start gap-2.5 text-gray-300">
+                        <Mail size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-[10px] text-gray-500 uppercase block font-bold">Email</span>
+                          <a href={`mailto:${profileCache[selectedSession.remoteJid].businessProfile.email}`} className="text-[#25D366] hover:underline font-mono">
+                            {profileCache[selectedSession.remoteJid].businessProfile.email}
+                          </a>
+                        </div>
+                      </div>
+                    )}
+
+                    {profileCache[selectedSession.remoteJid].businessProfile.website && profileCache[selectedSession.remoteJid].businessProfile.website.length > 0 && (
+                      <div className="flex items-start gap-2.5 text-gray-300">
+                        <Globe size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-[10px] text-gray-500 uppercase block font-bold">Websites</span>
+                          <div className="space-y-1 mt-0.5">
+                            {profileCache[selectedSession.remoteJid].businessProfile.website.map((web, wIdx) => (
+                              <a key={wIdx} href={web.startsWith('http') ? web : `https://${web}`} target="_blank" rel="noreferrer" className="text-[#25D366] hover:underline block font-mono text-[11px] truncate">
+                                {web}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

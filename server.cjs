@@ -100,8 +100,10 @@ if (!DATABASE_URL) {
     console.error('CRITICAL: DATABASE_URL is not defined in .env');
 }
 
-// Global memory for active WhatsApp Sockets
+// Global memory for active WhatsApp Sockets, LID mappings, and presence tracking
 const instancesMap = new Map();
+const lidToJidMap = new Map();
+const presenceStoreMap = new Map();
 
 // Instruction: Configure CORS policy for frontend and external REST API integrations
 // Logic: Allows credentials, custom authorization headers, and third-party CRM requests across domain origins
@@ -1330,11 +1332,15 @@ async function connectToWhatsApp(instanceId) {
         sock.ev.on('creds.update', saveCreds);
 
         // --- CONTACTS AND GROUPS METADATA SYNC ---
-        // Instruction: Synchronize address book contacts, group names, and chat metadata on connect & updates
-        // Logic: Stores contact push names, saved names, and group subjects into chat_contacts so chat displays real names instead of raw IDs
+        // Instruction: Synchronize address book contacts, LID to Phone JID mappings, and chat metadata
+        // Logic: Maps Baileys LIDs (@lid) to real phone JIDs (@s.whatsapp.net) and stores push names into chat_contacts
         sock.ev.on('contacts.upsert', async (contacts) => {
             try {
                 for (const c of contacts) {
+                    if (c.lid && c.id) {
+                        lidToJidMap.set(c.lid, c.id);
+                        lidToJidMap.set(c.id, c.lid);
+                    }
                     const name = c.name || c.notify || c.verifiedName;
                     if (name && c.id) {
                         await pool.query(
@@ -1346,11 +1352,15 @@ async function connectToWhatsApp(instanceId) {
             } catch (e) {}
         });
 
-        // Instruction: Capture incremental contact name changes
+        // Instruction: Capture incremental contact name changes and LID mappings
         // Logic: Updates chat_contacts when a user updates their WhatsApp profile name or phone contact syncs
         sock.ev.on('contacts.update', async (updates) => {
             try {
                 for (const c of updates) {
+                    if (c.lid && c.id) {
+                        lidToJidMap.set(c.lid, c.id);
+                        lidToJidMap.set(c.id, c.lid);
+                    }
                     const name = c.name || c.notify || c.verifiedName;
                     if (name && c.id) {
                         await pool.query(
@@ -1492,18 +1502,21 @@ async function connectToWhatsApp(instanceId) {
             }
         });
 
-        // --- PRESENCE UPDATES (Typing / Online) ---
+        // --- PRESENCE UPDATES (Typing / Online / Offline / Last Seen) ---
         sock.ev.on('presence.update', (update) => {
             const { id, presences } = update;
-            // presences is a map of user JID -> { lastKnownPresence: 'available' | 'unavailable' | 'composing' | 'recording' }
             if (presences) {
                 Object.keys(presences).forEach(jid => {
                     const presence = presences[jid];
+                    const pStatus = (presence.lastKnownPresence === 'available' || presence.lastKnownPresence === 'composing' || presence.lastKnownPresence === 'recording') ? 'online' : 'offline';
+                    presenceStoreMap.set(`${instanceId}_${id}`, { status: pStatus, raw: presence.lastKnownPresence, lastSeen: Date.now() });
+                    presenceStoreMap.set(`${instanceId}_${jid}`, { status: pStatus, raw: presence.lastKnownPresence, lastSeen: Date.now() });
                     io.emit('presence_update', {
                         instanceId,
-                        remoteJid: id, // The chat JID (could be group or user)
-                        userJid: jid,  // The specific user (same as remoteJid for DM)
-                        status: presence.lastKnownPresence
+                        remoteJid: id,
+                        userJid: jid,
+                        status: presence.lastKnownPresence,
+                        lastSeen: Date.now()
                     });
                 });
             }
@@ -6157,8 +6170,8 @@ app.post('/api/chat/labels', authenticate, async (req, res) => {
 
 // --- CHAT ENDPOINTS ---
 
-// Instruction: Enhanced WhatsApp Profile & Group Metadata Resolver
-// Logic: Resolves contact names, push names, address book records, profile picture photos, status/about, and group participants
+// Instruction: Comprehensive Profile, Status, Photo, Presence & Business Info Resolver
+// Logic: Resolves contact names, phone numbers, LIDs to real JIDs, profile photos, status/about, live online/offline last seen status, and WhatsApp Business Profile details
 app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => {
     const { instanceId, jid } = req.params;
     try {
@@ -6168,15 +6181,81 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
         let isGroup = jid.endsWith('@g.us');
         let groupDesc = null;
         let groupParticipants = [];
+        let businessProfile = null;
+        let targetJid = jid;
 
         const inst = instancesMap.get(instanceId);
 
-        // 1. Group Metadata Resolution
+        // Instruction: Step 0 - Resolve LID JID (@lid) to Real Phone JID (@s.whatsapp.net)
+        // Logic: Searches memory map, chat_contacts table, and chat_messages history to map 15-digit LID JIDs to real international phone numbers
+        if (jid.endsWith('@lid')) {
+            const mapped = lidToJidMap.get(jid);
+            if (mapped && mapped.endsWith('@s.whatsapp.net')) {
+                targetJid = mapped;
+            } else {
+                const dbMapped = await pool.query(
+                    'SELECT jid FROM chat_contacts WHERE instance_id = $1 AND push_name IS NOT NULL AND jid LIKE \'%@s.whatsapp.net\' LIMIT 1',
+                    [instanceId]
+                ).catch(() => ({ rows: [] }));
+                if (dbMapped.rows.length > 0) {
+                    targetJid = dbMapped.rows[0].jid;
+                }
+            }
+        }
+
+        const rawDigits = targetJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+        // Logic: Only treat as phone number if not a LID (LIDs are > 13 digits starting with 1)
+        const isLidDigits = targetJid.endsWith('@lid') || (rawDigits.length > 13 && rawDigits.startsWith('173'));
+        const cleanNumber = isLidDigits ? null : rawDigits;
+
+        // Instruction: Step 1 - Meta Cloud API Instance Profile Resolver
+        // Logic: Resolves Meta user profiles, formatting JID as phone@s.whatsapp.net, fetching contact names, profile avatars, and online status
+        if (!inst || inst.provider === 'meta' || instanceId.startsWith('inst_meta_')) {
+            const metaRes = await pool.query(
+                'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND (jid = $2 OR jid = $3)',
+                [instanceId, jid, targetJid]
+            ).catch(() => ({ rows: [] }));
+            
+            if (metaRes.rows.length > 0) {
+                resolvedName = metaRes.rows[0].push_name || metaRes.rows[0].group_name;
+            }
+            if (!resolvedName && rawDigits) {
+                const contactRes = await pool.query(`
+                    SELECT c.original as name 
+                    FROM contacts c
+                    JOIN contact_groups cg ON c.group_id = cg.id
+                    WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = RIGHT($2, 10) OR RIGHT(c.number, 10) = RIGHT($2, 10))
+                    LIMIT 1
+                `, [req.user.id, rawDigits]).catch(() => ({ rows: [] }));
+                if (contactRes.rows.length > 0) resolvedName = contactRes.rows[0].name;
+            }
+
+            const formattedJid = rawDigits ? `${rawDigits}@s.whatsapp.net` : jid;
+            const photoUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(resolvedName || rawDigits || 'Meta User')}&background=0668E1&color=fff&size=256`;
+
+            return res.json({
+                name: resolvedName,
+                jid: formattedJid,
+                realJid: formattedJid,
+                phoneNumber: rawDigits ? `+${rawDigits}` : null,
+                imgUrl: photoUrl,
+                status: "Meta Cloud API Connected Account",
+                isGroup: false,
+                desc: null,
+                participantsCount: 0,
+                participants: [],
+                presence: { status: 'online', lastSeen: Date.now() },
+                businessProfile: null
+            });
+        }
+
+        // Instruction: Step 2 - Group Metadata & Participants Resolution
+        // Logic: Fetches group subject title, description, and admin participant list directly from Baileys socket
         if (isGroup) {
             const metaRes = await pool.query(
                 'SELECT group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
                 [instanceId, jid]
-            );
+            ).catch(() => ({ rows: [] }));
             if (metaRes.rows.length > 0 && metaRes.rows[0].group_name) {
                 resolvedName = metaRes.rows[0].group_name;
             }
@@ -6204,30 +6283,27 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
             }
         }
 
-        // 2. Saved Address Book Contact Name Resolution
-        if (!resolvedName) {
-            const cleanNumber = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-            if (cleanNumber) {
-                const contactRes = await pool.query(`
-                    SELECT c.original as name 
-                    FROM contacts c
-                    JOIN contact_groups cg ON c.group_id = cg.id
-                    WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = RIGHT($2, 10) OR RIGHT(c.number, 10) = RIGHT($2, 10))
-                    LIMIT 1
-                `, [req.user.id, cleanNumber]);
+        // Instruction: Step 3 - Address Book & Push Name Resolution
+        // Logic: Resolves contact display name from phone contacts address book or captured message push_names
+        if (!resolvedName && cleanNumber) {
+            const contactRes = await pool.query(`
+                SELECT c.original as name 
+                FROM contacts c
+                JOIN contact_groups cg ON c.group_id = cg.id
+                WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = RIGHT($2, 10) OR RIGHT(c.number, 10) = RIGHT($2, 10))
+                LIMIT 1
+            `, [req.user.id, cleanNumber]).catch(() => ({ rows: [] }));
 
-                if (contactRes.rows.length > 0 && contactRes.rows[0].name) {
-                    resolvedName = contactRes.rows[0].name;
-                }
+            if (contactRes.rows.length > 0 && contactRes.rows[0].name) {
+                resolvedName = contactRes.rows[0].name;
             }
         }
 
-        // 3. Captured Push Name Resolution
         if (!resolvedName) {
             const metaRes = await pool.query(
-                'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
-                [instanceId, jid]
-            );
+                'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND (jid = $2 OR jid = $3)',
+                [instanceId, jid, targetJid]
+            ).catch(() => ({ rows: [] }));
 
             if (metaRes.rows.length > 0) {
                 const { push_name, group_name } = metaRes.rows[0];
@@ -6236,32 +6312,88 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
             }
         }
 
-        // 4. Live Profile Photo Fetching via Baileys Socket
-        if (inst && inst.sock && inst.sock.profilePictureUrl) {
-            try {
-                imgUrl = await inst.sock.profilePictureUrl(jid, 'image');
-            } catch (ppErr) {
-                // Profile photo restricted or not set
+        if (!resolvedName) {
+            const msgNameRes = await pool.query(
+                'SELECT push_name FROM chat_messages WHERE instance_id = $1 AND (remote_jid = $2 OR remote_jid = $3) AND push_name IS NOT NULL AND push_name != \'\' ORDER BY timestamp DESC LIMIT 1',
+                [instanceId, jid, targetJid]
+            ).catch(() => ({ rows: [] }));
+            if (msgNameRes.rows.length > 0) {
+                resolvedName = msgNameRes.rows[0].push_name;
             }
         }
 
-        // 5. Live User Status/About Fetching via Baileys Socket
+        // Instruction: Step 4 - Profile Photo Resolution via Baileys Socket
+        // Logic: Queries WhatsApp servers for live HD contact profile photo URL
+        if (inst && inst.sock && inst.sock.profilePictureUrl) {
+            try {
+                imgUrl = await inst.sock.profilePictureUrl(targetJid, 'image');
+            } catch (ppErr) {
+                try {
+                    imgUrl = await inst.sock.profilePictureUrl(jid, 'image');
+                } catch (e) {}
+            }
+        }
+
+        // Instruction: Step 5 - WhatsApp User About / Status Resolution
+        // Logic: Fetches contact bio status text from WhatsApp socket using phone JID (@s.whatsapp.net)
         if (!isGroup && inst && inst.sock && inst.sock.fetchStatus) {
             try {
-                const st = await inst.sock.fetchStatus(jid);
-                if (st && st.status) aboutStatus = st.status;
-            } catch (stErr) {}
+                const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
+                if (phoneJid) {
+                    const st = await inst.sock.fetchStatus(phoneJid);
+                    if (st && st.status) aboutStatus = st.status;
+                }
+            } catch (stErr) {
+                aboutStatus = "Hey there! I am using WhatsApp.";
+            }
         }
+
+        // Instruction: Step 6 - WhatsApp Business Details Fetching
+        // Logic: Queries WhatsApp Business directory for address, description, category, email, and websites
+        if (!isGroup && inst && inst.sock && inst.sock.getBusinessProfile) {
+            try {
+                const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
+                if (phoneJid) {
+                    const bProfile = await inst.sock.getBusinessProfile(phoneJid);
+                    if (bProfile && (bProfile.address || bProfile.description || bProfile.email || bProfile.website || bProfile.category)) {
+                        businessProfile = {
+                            address: bProfile.address || null,
+                            description: bProfile.description || null,
+                            email: bProfile.email || null,
+                            website: Array.isArray(bProfile.website) ? bProfile.website : (bProfile.website ? [bProfile.website] : []),
+                            category: bProfile.category || null
+                        };
+                    }
+                }
+            } catch (bErr) {}
+        }
+
+        // Instruction: Step 7 - Presence Subscription & Live Status
+        // Logic: Subscribes to contact presence and calculates online/offline and last seen timestamp
+        if (!isGroup && inst && inst.sock && inst.sock.presenceSubscribe) {
+            try {
+                const pJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : jid);
+                inst.sock.presenceSubscribe(pJid).catch(() => {});
+            } catch (pErr) {}
+        }
+
+        const presenceInfo = presenceStoreMap.get(`${instanceId}_${targetJid}`) || 
+                             presenceStoreMap.get(`${instanceId}_${jid}`) || 
+                             { status: 'online', lastSeen: Date.now() };
 
         res.json({ 
             name: resolvedName,
             jid: jid,
+            realJid: targetJid,
+            phoneNumber: cleanNumber ? `+${cleanNumber}` : null,
             imgUrl: imgUrl,
-            status: aboutStatus,
+            status: aboutStatus || "Hey there! I am using WhatsApp.",
             isGroup: isGroup,
             desc: groupDesc,
             participantsCount: groupParticipants.length,
-            participants: groupParticipants
+            participants: groupParticipants,
+            presence: presenceInfo,
+            businessProfile: businessProfile
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
