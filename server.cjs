@@ -38,6 +38,19 @@ const {
     makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 
+// Instruction: Normalize multi-device JIDs by stripping device colon suffixes (:0, :1) and @c.us domains
+// Work: Ensures messages sent from phone, bot, or web attach to the same user contact thread
+const normalizeJid = (jid) => {
+    if (!jid) return '';
+    if (jid.endsWith('@g.us')) return jid;
+    let clean = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+    clean = clean.replace(/:\d+@/, '@');
+    if (clean.endsWith('@c.us')) {
+        clean = clean.replace('@c.us', '@s.whatsapp.net');
+    }
+    return clean;
+};
+
 const messageCache = new Map();
 setInterval(() => {
     const now = Date.now();
@@ -141,12 +154,18 @@ const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
-// Instruction: Serve static uploaded chat media with CORS and byte ranges for smooth video/audio playback and downloads
-// Work: Allows browser to stream, seek audio/video, and download media files without CORS issues
+// Instruction: Serve static uploaded chat media with CORS, byte ranges, and download headers for media playback and downloads
+// Work: Allows browser to stream, seek audio/video, and download media files cleanly without CORS or content disposition errors
 app.use('/uploads', (req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (req.query.download === '1' || req.query.download === 'true') {
+        const fileName = path.basename(req.path);
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    }
     next();
 }, express.static(uploadsDir, { acceptRanges: true, maxAge: '1d' }));
 
@@ -1384,27 +1403,55 @@ async function connectToWhatsApp(instanceId) {
             }
         });
 
-        // --- INITIAL MESSAGING HISTORY SYNC (Contacts, Groups, Chats) ---
-        // Instruction: Listen for initial WhatsApp sync event so contacts and group subjects populate immediately
+        // --- INITIAL MESSAGING HISTORY SYNC (Contacts, Groups, Historical Messages) ---
+        // Instruction: Listen for initial WhatsApp sync event so contacts, group subjects, and past messages populate immediately
         sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
             try {
+                // Instruction: Save historical contacts into chat_contacts table
                 for (const c of (contacts || [])) {
                     const cName = c.name || c.notify || c.verifiedName;
                     if (c && c.id && cName) {
-                        const cleanJid = c.id.endsWith('@g.us') ? c.id : (jidNormalizedUser ? jidNormalizedUser(c.id) : c.id);
+                        const cleanJid = normalizeJid(c.id);
                         await pool.query(
                             'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
                             [instanceId, cleanJid, cName]
                         ).catch(() => {});
                     }
                 }
+                // Instruction: Save historical group subjects into chat_contacts table
                 for (const ch of (chats || [])) {
                     if (ch && ch.id && (ch.name || ch.subject)) {
+                        const cleanJid = normalizeJid(ch.id);
                         await pool.query(
                             'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
-                            [instanceId, ch.id, ch.name || ch.subject]
+                            [instanceId, cleanJid, ch.name || ch.subject]
                         ).catch(() => {});
                     }
+                }
+                // Instruction: Import past messages from messaging-history.set into chat_messages database
+                for (const msg of (messages || [])) {
+                    if (!msg || !msg.message) continue;
+                    const rawFrom = msg.key.remoteJid;
+                    if (!rawFrom || rawFrom === 'status@broadcast') continue;
+                    const from = normalizeJid(rawFrom);
+                    const fromMe = Boolean(msg.key.fromMe);
+                    saveMessage(msg.key, msg.message);
+
+                    const content = (normalizeMessageContent ? normalizeMessageContent(msg.message) : null) || msg.message;
+                    let text = content.conversation || 
+                                 content.extendedTextMessage?.text || 
+                                 content.imageMessage?.caption || 
+                                 content.videoMessage?.caption || 
+                                 content.documentMessage?.caption || '';
+                    let mediaType = content.imageMessage ? 'image' : content.videoMessage ? 'video' : content.audioMessage ? 'audio' : content.documentMessage ? 'document' : null;
+                    const msgId = msg.key.id;
+                    const msgStatus = fromMe ? 'sent' : 'delivered';
+                    const msgTs = msg.messageTimestamp ? new Date(msg.messageTimestamp * 1000) : new Date();
+
+                    await pool.query(
+                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id) DO NOTHING',
+                        [msgId, instanceId, from, fromMe, text, mediaType, msgTs, msgStatus]
+                    ).catch(() => {});
                 }
             } catch (histErr) {
                 console.error('[Messaging History Sync Error]', histErr.message);
@@ -1422,11 +1469,9 @@ async function connectToWhatsApp(instanceId) {
 
                 saveMessage(msg.key, msg.message);
 
-                // Instruction: Normalize user JID (strip device ID like :1 or :2) so messages sent from phone match contact chat
+                // Instruction: Normalize user JID (strip multi-device suffix like :1 or :0) so messages sent from phone match contact chat
                 const rawFrom = msg.key.remoteJid;
-                const from = (rawFrom && rawFrom.endsWith('@g.us')) 
-                    ? rawFrom 
-                    : (jidNormalizedUser ? jidNormalizedUser(rawFrom) : (rawFrom ? rawFrom.split(':')[0] + '@s.whatsapp.net' : ''));
+                const from = normalizeJid(rawFrom);
                 const fromMe = Boolean(msg.key.fromMe);
                 const pushName = msg.pushName;
                 

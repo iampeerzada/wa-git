@@ -48,6 +48,43 @@ const getCleanPhone = (jid: string) => {
   return jid.split('@')[0].replace(/[^0-9]/g, '');
 };
 
+// Instruction: Resolve media URL against backend API base URL so relative paths (/uploads/...) don't hit frontend origin
+// Work: Converts relative paths into full API URLs while preserving data URIs and full HTTP links
+const resolveMediaUrlHelper = (url: string | undefined | null, apiBase: string): string => {
+  if (!url) return '';
+  if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  
+  const cleanApiBase = apiBase ? apiBase.replace(/\/+$/, '') : '';
+  if (url.startsWith('/')) {
+    return `${cleanApiBase}${url}`;
+  }
+  return `${cleanApiBase}/${url}`;
+};
+
+// Instruction: Download media files safely as binary Blobs to prevent browser HTML fallback corruption
+// Work: Fetches media file as Blob and triggers direct browser download with proper file extension
+const downloadMediaBlob = async (url: string, fileName: string) => {
+  try {
+    const downloadUrl = url.includes('?') ? `${url}&download=1` : `${url}?download=1`;
+    const res = await fetch(downloadUrl, { mode: 'cors' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = fileName || 'media_attachment';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(blobUrl);
+  } catch (err) {
+    // Fallback to direct window open if fetch or CORS fails
+    const fallbackUrl = url.includes('?') ? `${url}&download=1` : `${url}?download=1`;
+    window.open(fallbackUrl, '_blank');
+  }
+};
+
 const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
   const cleanPhone = getCleanPhone(jid);
   if (!cleanPhone) return;
@@ -1635,9 +1672,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#202c33]" />
                   )}
                 </div>
+                {/* Instruction: Displays the contact or group name prominently, with the formatted international phone number or group identifier underneath */}
+                {/* Work: Fixes contact resolution so real names and group titles are visible prominently above phone numbers */}
                 <div className="min-w-0">
-                  <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2 truncate">
-                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="truncate font-bold text-white">{profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid)}</span>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2 truncate">
+                    <span className="truncate font-bold text-white">
+                      {profileCache[selectedSession.remoteJid]?.name || selectedSession.contactName || selectedSession.groupName || selectedSession.pushName || formatDisplayJid(selectedSession.remoteJid)}
+                    </span>
                     {selectedSession.labels && selectedSession.labels.length > 0 && (
                         <div className="flex -space-x-1 shrink-0">
                             {selectedSession.labels.map(l => (
@@ -1647,11 +1688,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     )}
                   </h3>
                   <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="font-mono font-bold text-white">{formatDisplayJid(selectedSession.remoteJid)}</span>
+                    <span className="font-mono text-gray-300 font-medium">
+                      {formatDisplayJid(selectedSession.remoteJid)}
+                    </span>
                     {typingStatus[selectedSession.remoteJid] ? (
                       <span className="text-emerald-400 font-medium">typing...</span>
                     ) : presenceStatus[selectedSession.remoteJid] === 'online' ? (
-                      <span className="text-emerald-400">online</span>
+                      <span className="text-emerald-400 font-medium">online</span>
                     ) : null}
                   </div>
                 </div>
@@ -1764,15 +1807,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             >
               <div className="flex flex-col space-y-3">
                 {Object.entries(groupedMessages).map(([dateKey, msgsForDate]) => (
-                  /* Instruction: Wrap each day in its own relative container so sticky date bubbles push each other out instead of overlapping */
-                  /* Logic: Prevents subsequent and previous date popups from stacking or mixing together when scrolling through history */
-                  <div key={dateKey} className="relative space-y-2 pb-1">
-                    <div className="flex justify-center my-3 sticky top-2 z-10 pointer-events-none">
-                      <span className="bg-[#182229] text-gray-200 text-[11px] font-semibold px-3.5 py-1 rounded-md shadow-md uppercase tracking-wider border border-gray-700/80 backdrop-blur-md pointer-events-auto select-none">
+                  /* Instruction: Clean inline date separator between daily conversation groups to eliminate popup collisions and overlapping sticky headers */
+                  /* Work: Prevents date headers from stacking or overlapping while scrolling message history */
+                  <div key={dateKey} className="space-y-2 pb-1">
+                    <div className="flex items-center justify-center my-4 select-none">
+                      <div className="flex-1 border-t border-gray-800/80" />
+                      <span className="bg-[#182229] text-gray-300 text-[11px] font-semibold px-3 py-1 rounded-md shadow-xs uppercase tracking-wider border border-gray-700/60 mx-3">
                         {getRelativeDate(dateKey)}
                       </span>
+                      <div className="flex-1 border-t border-gray-800/80" />
                     </div>
-                    {msgsForDate.map((msg, idx) => (
+                    {msgsForDate.map((msg, idx) => {
+                      const resolvedMediaUrl = resolveMediaUrlHelper(msg.mediaUrl, apiBase);
+                      return (
                       <div
                         key={msg.id || idx}
                         className={`flex ${msg.fromMe ? 'justify-end' : 'justify-start'} group/msg relative`}
@@ -1821,32 +1868,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                             </div>
                           )}
 
-                          {msg.mediaUrl && (
+                          {/* Instruction: Render media with resolved backend URL and safe Blob downloader */}
+                          {/* Work: Resolves relative media paths against apiBase and downloads clean binary files with proper extensions */}
+                          {resolvedMediaUrl && (
                               <div className="mb-1">
-                                  {(msg.mediaType === 'image' || (!msg.mediaType && (msg.mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || msg.mediaUrl.includes('image') || msg.mediaUrl.includes('/media/')))) ? (
+                                  {(msg.mediaType === 'image' || (!msg.mediaType && (resolvedMediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || resolvedMediaUrl.includes('image') || resolvedMediaUrl.includes('/media/')))) ? (
                                       <div className="relative group/media my-0.5">
                                         <img 
-                                          src={msg.mediaUrl} 
+                                          src={resolvedMediaUrl} 
                                           alt="Media" 
                                           className="rounded-lg max-w-full max-h-[320px] object-cover cursor-pointer hover:opacity-95 transition-opacity" 
-                                          onClick={() => setLightboxMedia({ url: msg.mediaUrl!, type: 'image' })}
+                                          onClick={() => setLightboxMedia({ url: resolvedMediaUrl, type: 'image' })}
                                         />
                                         <button
                                           type="button"
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            window.open(msg.mediaUrl, '_blank');
+                                            downloadMediaBlob(resolvedMediaUrl, msg.fileName || `image_${msg.id || Date.now()}.jpg`);
                                           }}
                                           className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow"
-                                          title="Open Fullscreen"
+                                          title="Download Image"
                                         >
                                           <Download size={13} />
                                         </button>
                                       </div>
                                   ) : (msg.mediaType === 'video' || msg.mediaType === 'gif') ? (
-                                      <div className="my-0.5 rounded-lg overflow-hidden bg-black/30">
+                                      <div className="relative group/media my-0.5 rounded-lg overflow-hidden bg-black/30">
                                         <video 
-                                            src={msg.mediaUrl} 
+                                            src={resolvedMediaUrl} 
                                             controls={msg.mediaType !== 'gif'} 
                                             autoPlay={msg.mediaType === 'gif'} 
                                             loop={msg.mediaType === 'gif'} 
@@ -1854,6 +1903,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                             playsInline 
                                             className="rounded-lg max-w-full max-h-[320px]" 
                                         />
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadMediaBlob(resolvedMediaUrl, msg.fileName || `video_${msg.id || Date.now()}.mp4`);
+                                          }}
+                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow"
+                                          title="Download Video"
+                                        >
+                                          <Download size={13} />
+                                        </button>
                                       </div>
                                   ) : (msg.mediaType === 'audio' || msg.mediaType === 'voice') ? (
                                       <div className="flex items-center gap-2.5 bg-black/30 p-2.5 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1">
@@ -1864,8 +1924,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                           <span className="text-[10px] text-gray-300 font-medium uppercase tracking-wide block mb-1">
                                             {msg.mediaType === 'voice' ? 'Voice Message' : 'Audio Note'}
                                           </span>
-                                          <audio src={msg.mediaUrl} controls className="w-full h-8" />
+                                          <audio src={resolvedMediaUrl} controls className="w-full h-8" />
                                         </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadMediaBlob(resolvedMediaUrl, msg.fileName || `audio_${msg.id || Date.now()}.${msg.mediaType === 'voice' ? 'ogg' : 'mp3'}`)}
+                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0"
+                                          title="Download Audio"
+                                        >
+                                          <Download size={14} />
+                                        </button>
                                       </div>
                                   ) : (
                                       <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1 hover:bg-black/40 transition-colors">
@@ -1880,16 +1948,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                             <span className="text-[10px] text-gray-400 uppercase font-mono">Document File</span>
                                           </div>
                                         </div>
-                                        <a 
-                                          href={msg.mediaUrl.startsWith('/api/meta/media') ? `${msg.mediaUrl}?download=1` : msg.mediaUrl} 
-                                          download={msg.fileName || `attachment_${msg.id}`} 
-                                          target="_blank" 
-                                          rel="noopener noreferrer" 
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadMediaBlob(resolvedMediaUrl, msg.fileName || `document_${msg.id || Date.now()}.pdf`)}
                                           className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0"
                                           title="Download document"
                                         >
                                           <Download size={15} />
-                                        </a>
+                                        </button>
                                       </div>
                                   )}
                               </div>
@@ -2131,7 +2197,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                           </div>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ))}
                 <div ref={messagesEndRef} />
@@ -2799,16 +2866,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         >
           <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
             <div className="absolute -top-12 right-0 flex items-center gap-3">
-              <a
-                href={lightboxMedia.url.startsWith('/api/meta/media') ? `${lightboxMedia.url}?download=1` : lightboxMedia.url}
-                download={lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg'}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3"
+              <button
+                type="button"
+                onClick={() => {
+                  const resolved = resolveMediaUrlHelper(lightboxMedia.url, apiBase);
+                  downloadMediaBlob(resolved, lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg');
+                }}
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3 border border-white/20"
+                title="Download Media File"
               >
                 <Download size={14} />
                 <span>Download</span>
-              </a>
+              </button>
               <button
                 type="button"
                 onClick={() => setLightboxMedia(null)}
@@ -2819,13 +2888,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             </div>
             {lightboxMedia.type === 'image' ? (
               <img 
-                src={lightboxMedia.url} 
+                src={resolveMediaUrlHelper(lightboxMedia.url, apiBase)} 
                 alt="Full preview" 
                 className="max-w-full max-h-[82vh] rounded-xl object-contain shadow-2xl" 
               />
             ) : (
               <video 
-                src={lightboxMedia.url} 
+                src={resolveMediaUrlHelper(lightboxMedia.url, apiBase)} 
                 controls 
                 autoPlay 
                 className="max-w-full max-h-[82vh] rounded-xl shadow-2xl" 
