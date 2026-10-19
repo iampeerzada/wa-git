@@ -66,6 +66,52 @@ const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
   }
 };
 
+// Instruction: Resolve relative media paths (/uploads/..., /api/...) with full backend URL
+// Logic: Prevents media from 404ing against frontend origin and getting corrupted with HTML error pages
+const resolveMediaUrlHelper = (url: string | undefined | null, apiBase: string): string => {
+  if (!url) return '';
+  if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  const base = apiBase.replace(/\/+$/, '');
+  const cleanPath = url.startsWith('/') ? url : `/${url}`;
+  return `${base}${cleanPath}`;
+};
+
+// Instruction: Safe media downloader via Blob
+// Logic: Downloads images, audio, video, documents directly into user's downloads folder without iframe sandbox blocking or corruption
+const downloadMediaBlob = async (url: string, filename: string, apiBase: string) => {
+  try {
+    const fullUrl = resolveMediaUrlHelper(url, apiBase);
+    const downloadUrl = fullUrl.includes('/api/meta/media') 
+      ? `${fullUrl}${fullUrl.includes('?') ? '&' : '?'}download=1` 
+      : fullUrl;
+
+    const res = await fetch(downloadUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objectUrl = window.URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename || url.split('/').pop()?.split('?')[0] || 'whatsapp_media';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => window.URL.revokeObjectURL(objectUrl), 2000);
+  } catch (err) {
+    console.error('[Media Download] Fallback trigger:', err);
+    const fullUrl = resolveMediaUrlHelper(url, apiBase);
+    const a = document.createElement('a');
+    a.href = fullUrl;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.download = filename || 'whatsapp_media';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+};
+
 interface ParsedFlowData {
   title: string;
   fields: Array<{ key: string; value: string }>;
@@ -277,6 +323,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   // In-memory instant caches for zero-delay UI
   const sessionsCacheRef = useRef<Record<string, ChatSession[]>>({});
   const messagesCacheRef = useRef<Record<string, ChatMessage[]>>({});
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const activeInstanceRef = useRef(selectedInstanceId);
   
   // Label State
   const [labels, setLabels] = useState<ChatLabel[]>([]);
@@ -323,7 +371,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const soundEnabledRef = useRef(soundEnabled);
   const currentActiveJidRef = useRef<string | null>(null);
   
-  useEffect(() => { selectedInstanceIdRef.current = selectedInstanceId; }, [selectedInstanceId]);
+  // Instruction: Sync refs synchronously on instance change
+  // Logic: Prevents socket message events and fetch callbacks from reading stale instance data
+  useEffect(() => { 
+    selectedInstanceIdRef.current = selectedInstanceId; 
+    activeInstanceRef.current = selectedInstanceId;
+  }, [selectedInstanceId]);
   useEffect(() => { selectedSessionRef.current = selectedSession; }, [selectedSession]);
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
@@ -520,8 +573,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               ...prev.filter(s => s.remoteJid !== existing.remoteJid)
             ];
           } else {
+            // Instruction: Initialize new incoming/outgoing conversation in session list
+            // Logic: Populates contactName from profile cache or pushName so real name displays immediately
+            const inferredName = profileCache[msg.remoteJid]?.name || (msg as any).pushName || null;
             return [{
               remoteJid: msg.remoteJid,
+              contactName: inferredName,
               lastMessage: msg,
               unreadCount: matchesCurrent ? 0 : 1,
               lastInboundTimestamp: !msg.fromMe ? msg.timestamp : null,
@@ -655,10 +712,32 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     fetchTemplatesForInstance();
   }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
 
+  // Instruction: Synchronous instance shifting handler
+  // Logic: Instantly updates activeInstanceRef, clears old session and message state to prevent cross-instance data bleeding, and checks local cache immediately
+  const handleInstanceChange = (nextId: string) => {
+    activeInstanceRef.current = nextId;
+    selectedInstanceIdRef.current = nextId;
+    setSelectedInstanceId(nextId);
+    setSelectedSession(null);
+    setMessages([]);
+    currentActiveJidRef.current = null;
+    localStorage.setItem('wa_chat_selected_instance', nextId);
+
+    if (nextId && sessionsCacheRef.current[nextId]?.length) {
+      setSessions(sessionsCacheRef.current[nextId]);
+      setIsLoadingSessions(false);
+    } else {
+      setSessions([]);
+      setIsLoadingSessions(true);
+    }
+  };
+
   // Reset active session and messages immediately when instance changes to avoid showing previous instance data
   useEffect(() => {
     if (!selectedInstanceId) return;
 
+    activeInstanceRef.current = selectedInstanceId;
+    selectedInstanceIdRef.current = selectedInstanceId;
     setSelectedSession(null);
     setMessages([]);
     currentActiveJidRef.current = null;
@@ -666,8 +745,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     // Check in-memory cache first for 0ms load
     if (sessionsCacheRef.current[selectedInstanceId]?.length) {
       setSessions(sessionsCacheRef.current[selectedInstanceId]);
+      setIsLoadingSessions(false);
     } else {
-      // Check sessionStorage fallback
       try {
         const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
         if (cached) {
@@ -675,17 +754,50 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           if (Array.isArray(parsed) && parsed.length > 0) {
             setSessions(parsed);
             sessionsCacheRef.current[selectedInstanceId] = parsed;
+            setIsLoadingSessions(false);
           } else {
             setSessions([]);
+            setIsLoadingSessions(true);
           }
         } else {
           setSessions([]);
+          setIsLoadingSessions(true);
         }
       } catch(e) {
         setSessions([]);
+        setIsLoadingSessions(true);
       }
     }
   }, [selectedInstanceId]);
+
+  // Instruction: Contact profile and group metadata cache
+  // Logic: Stores contact names, avatars, and group subjects in React state for instant synchronous lookup
+  const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
+
+  // Instruction: Dynamic contact/group profile metadata fetcher
+  // Logic: Fetches verified group subjects or contact names on demand from the backend socket and caches them
+  const fetchProfileInfo = async (jid: string, targetInstId?: string) => {
+      const instId = targetInstId || activeInstanceRef.current || selectedInstanceId;
+      if (!instId || !jid || profileCache[jid]?.name) return;
+      
+      try {
+          const res = await fetch(`${apiBase}/api/chat/profile/${instId}/${jid}`, {
+             headers: {
+                'X-User-ID': currentUser.id,
+                'X-API-Key': currentUser.apiKey
+             }
+          });
+          if (res.ok) {
+              const data = await res.json();
+              if (data?.name || data?.imgUrl) {
+                setProfileCache(prev => ({ ...prev, [jid]: data }));
+                setSessions(prev => prev.map(s => (s.remoteJid === jid && !s.contactName) ? { ...s, contactName: data.name } : s));
+              }
+          }
+      } catch (e) {
+          // Ignore network errors
+      }
+  };
 
   // Fetch sessions from server with race-condition & stale-instance protection
   useEffect(() => {
@@ -706,7 +818,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         if (res.ok) {
           const data = await res.json();
           // Ensure we only update state if the user is still on this instance
-          if (selectedInstanceIdRef.current === currentInstId) {
+          if (activeInstanceRef.current === currentInstId) {
             setSessions(data);
             sessionsCacheRef.current[currentInstId] = data;
             try {
@@ -717,6 +829,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             data.forEach((session: any) => {
               if (session.contactName || session.pushName) {
                 initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
+              } else if (session.remoteJid && session.remoteJid.endsWith('@g.us')) {
+                // Instruction: Proactively fetch group subject metadata for group sessions
+                // Logic: Resolves real group names from backend Baileys socket so groups never display raw numerical IDs
+                fetchProfileInfo(session.remoteJid, currentInstId);
               }
             });
             if (Object.keys(initialProfiles).length > 0) {
@@ -728,6 +844,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         if (err.name !== 'AbortError') {
           console.error('Failed to fetch sessions', err);
         }
+      } finally {
+        if (activeInstanceRef.current === currentInstId) {
+          setIsLoadingSessions(false);
+        }
       }
     };
 
@@ -737,29 +857,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       controller.abort();
     };
   }, [selectedInstanceId, currentUser.id, currentUser.apiKey, apiBase]);
-
-  const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
-
-  const fetchProfileInfo = async (jid: string) => {
-      if (profileCache[jid]) return;
-      
-      try {
-          const res = await fetch(`${apiBase}/api/chat/profile/${selectedInstanceId}/${jid}`, {
-             headers: {
-                'X-User-ID': currentUser.id,
-                'X-API-Key': currentUser.apiKey
-             }
-          });
-          if (res.ok) {
-              const data = await res.json();
-              if (data?.name || data?.imgUrl) {
-                setProfileCache(prev => ({ ...prev, [jid]: data }));
-              }
-          }
-      } catch (e) {
-          // Ignore errors
-      }
-  };
 
   // Fetch messages for selected session with abort controller & cache-bleed protection
   useEffect(() => {
@@ -811,8 +908,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           try {
             sessionStorage.setItem(`wa_msgs_${cacheKey}`, JSON.stringify(data));
           } catch(e) {}
-          // Ensure we don't display stale response if user switched to another contact
-          if (currentActiveJidRef.current === targetJid) {
+          // Ensure we don't display stale response if user switched to another contact or instance
+          if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
             setMessages(data);
           }
         }
@@ -821,7 +918,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           console.error('Failed to fetch messages', err);
         }
       } finally {
-        if (currentActiveJidRef.current === targetJid) {
+        if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
           setIsLoading(false);
         }
       }
@@ -1148,12 +1245,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
-  const formatDisplayJid = (jid: string) => {
+  // Instruction: Format JID into friendly phone number, group name, or contact label
+  // Logic: Formats numbers as international phone numbers (+91 98765 43210) and handles group JIDs
+  const formatDisplayJid = (jid: string, fallbackName?: string | null) => {
+    if (fallbackName && fallbackName.trim()) return fallbackName;
     if (!jid) return 'Unknown';
     
     // Handle Groups
     if (jid.includes('@g.us')) {
-        return `Group: ${jid.split('@')[0]}`;
+        return fallbackName || `Group (${jid.split('@')[0].slice(-6)})`;
     }
     
     // Handle Broadcasts
@@ -1162,17 +1262,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     }
     
     // Handle Users (Standard JID or LID)
-    const id = jid.split('@')[0].split(':')[0];
+    const id = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
     
-    // Format standard phone numbers (7 to 13 digits) with +
-    if (/^\d+$/.test(id)) {
-        if (id.length >= 7 && id.length <= 13) {
+    if (id) {
+        if (id.length === 10) {
+            return `+91 ${id.slice(0, 5)} ${id.slice(5)}`;
+        } else if (id.length === 12 && id.startsWith('91')) {
+            return `+91 ${id.slice(2, 7)} ${id.slice(7)}`;
+        } else if (id.length >= 7 && id.length <= 15) {
             return `+${id}`;
         }
-        return `WhatsApp ID: ${id}`;
+        return `+${id}`;
     }
     
-    return id;
+    return jid.split('@')[0];
   };
 
   const handleExtract24hActiveNumbers = () => {
@@ -1273,7 +1376,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             {/* Logic: Choose which WhatsApp phone number instance to view messages for */}
             <select
               value={selectedInstanceId}
-              onChange={(e) => setSelectedInstanceId(e.target.value)}
+              onChange={(e) => handleInstanceChange(e.target.value)}
               className="flex-1 bg-[#202c33] text-white border border-gray-700/80 rounded-lg px-3 py-2 min-h-[40px] text-sm outline-none focus:ring-1 ring-[#25D366] transition-all"
             >
               <option value="">Select WhatsApp Instance</option>
@@ -1501,8 +1604,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         )}
 
         {/* Sessions List with Infinite Virtual Windowing for High Performance */}
+        {/* Instruction: Render loading state or session items with verified contact/group names */}
+        {/* Logic: Prevents stale conversation list showing during instance switch and displays real contact names */}
         <div className="flex-1 overflow-y-auto overscroll-y-contain" onScroll={handleSessionsScroll}>
-          {filteredSessions.length === 0 ? (
+          {isLoadingSessions ? (
+            <div className="p-8 text-center text-gray-400 text-sm flex flex-col items-center justify-center gap-2">
+              <div className="w-5 h-5 border-2 border-[#25D366] border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-gray-400">Loading conversations...</span>
+            </div>
+          ) : filteredSessions.length === 0 ? (
             <div className="p-8 text-center text-gray-500 text-sm">
               No conversations found in this view
             </div>
@@ -1510,6 +1620,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             filteredSessions.slice(0, visibleCount).map((session) => {
               const win = getWindowCountdown(session.lastInboundTimestamp);
               const isSelected = selectedSession?.remoteJid === session.remoteJid;
+              const displayName = session.contactName || profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid, session.contactName);
               return (
                 <div
                   key={session.remoteJid}
@@ -1531,7 +1642,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                   <div className="flex-1 min-w-0 text-left">
                     <div className="flex justify-between items-baseline gap-2 min-w-0">
                       <h3 className="text-sm font-medium text-gray-100 truncate">
-                        {profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid)}
+                        {displayName}
                       </h3>
                       {session.lastMessage && (
                         <span className="text-[10px] text-gray-500 shrink-0">
@@ -1635,9 +1746,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#202c33]" />
                   )}
                 </div>
+                {/* Instruction: Render active contact/group name and phone number subtitle */}
+                {/* Logic: Accurately displays the saved contact name or group subject on top, and phone number or group ID on bottom */}
                 <div className="min-w-0">
                   <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2 truncate">
-                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="truncate font-bold text-white">{profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid)}</span>
+                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="truncate font-bold text-white">
+                      {selectedSession.contactName || profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid, selectedSession.contactName)}
+                    </span>
                     {selectedSession.labels && selectedSession.labels.length > 0 && (
                         <div className="flex -space-x-1 shrink-0">
                             {selectedSession.labels.map(l => (
@@ -1647,7 +1762,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     )}
                   </h3>
                   <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="font-mono font-bold text-white">{formatDisplayJid(selectedSession.remoteJid)}</span>
+                    <span style={{ fontWeight: 'normal', color: '#9ca3af' }} className="font-mono text-gray-400">
+                      {formatDisplayJid(selectedSession.remoteJid)}
+                    </span>
                     {typingStatus[selectedSession.remoteJid] ? (
                       <span className="text-emerald-400 font-medium">typing...</span>
                     ) : presenceStatus[selectedSession.remoteJid] === 'online' ? (
@@ -1764,11 +1881,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             >
               <div className="flex flex-col space-y-3">
                 {Object.entries(groupedMessages).map(([dateKey, msgsForDate]) => (
-                  /* Instruction: Wrap each day in its own relative container so sticky date bubbles push each other out instead of overlapping */
-                  /* Logic: Prevents subsequent and previous date popups from stacking or mixing together when scrolling through history */
-                  <div key={dateKey} className="relative space-y-2 pb-1">
-                    <div className="flex justify-center my-3 sticky top-2 z-10 pointer-events-none">
-                      <span className="bg-[#182229] text-gray-200 text-[11px] font-semibold px-3.5 py-1 rounded-md shadow-md uppercase tracking-wider border border-gray-700/80 backdrop-blur-md pointer-events-auto select-none">
+                  <div key={dateKey} className="space-y-2 pb-1">
+                    {/* Instruction: Clean inline date separator badge between daily message groups */}
+                    {/* Logic: Eliminates overlapping and sticky collisions where previous date popups mix together when scrolling through history */}
+                    <div className="flex justify-center my-3 select-none">
+                      <span className="bg-[#182229]/90 text-gray-300 text-[11px] font-semibold px-3 py-1 rounded-md shadow-sm uppercase tracking-wider border border-gray-700/60 backdrop-blur-xs">
                         {getRelativeDate(dateKey)}
                       </span>
                     </div>
@@ -1821,32 +1938,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                             </div>
                           )}
 
+                          {/* Instruction: Render chat media (images, videos, audio/voice notes, documents) */}
+                          {/* Logic: Uses resolveMediaUrlHelper to connect to backend apiBase so media files never 404 or corrupt with HTML responses, and attaches safe blob downloads */}
                           {msg.mediaUrl && (
                               <div className="mb-1">
                                   {(msg.mediaType === 'image' || (!msg.mediaType && (msg.mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || msg.mediaUrl.includes('image') || msg.mediaUrl.includes('/media/')))) ? (
                                       <div className="relative group/media my-0.5">
                                         <img 
-                                          src={msg.mediaUrl} 
+                                          src={resolveMediaUrlHelper(msg.mediaUrl, apiBase)} 
                                           alt="Media" 
                                           className="rounded-lg max-w-full max-h-[320px] object-cover cursor-pointer hover:opacity-95 transition-opacity" 
-                                          onClick={() => setLightboxMedia({ url: msg.mediaUrl!, type: 'image' })}
+                                          onClick={() => setLightboxMedia({ url: resolveMediaUrlHelper(msg.mediaUrl, apiBase), type: 'image' })}
                                         />
                                         <button
                                           type="button"
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            window.open(msg.mediaUrl, '_blank');
+                                            downloadMediaBlob(msg.mediaUrl!, (msg.fileName || 'image.jpg'), apiBase);
                                           }}
-                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow"
-                                          title="Open Fullscreen"
+                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow cursor-pointer"
+                                          title="Download Image"
                                         >
                                           <Download size={13} />
                                         </button>
                                       </div>
                                   ) : (msg.mediaType === 'video' || msg.mediaType === 'gif') ? (
-                                      <div className="my-0.5 rounded-lg overflow-hidden bg-black/30">
+                                      <div className="my-0.5 rounded-lg overflow-hidden bg-black/30 relative group/video">
                                         <video 
-                                            src={msg.mediaUrl} 
+                                            src={resolveMediaUrlHelper(msg.mediaUrl, apiBase)} 
                                             controls={msg.mediaType !== 'gif'} 
                                             autoPlay={msg.mediaType === 'gif'} 
                                             loop={msg.mediaType === 'gif'} 
@@ -1854,6 +1973,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                             playsInline 
                                             className="rounded-lg max-w-full max-h-[320px]" 
                                         />
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadMediaBlob(msg.mediaUrl!, (msg.fileName || 'video.mp4'), apiBase);
+                                          }}
+                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/video:opacity-100 transition-opacity shadow cursor-pointer"
+                                          title="Download Video"
+                                        >
+                                          <Download size={13} />
+                                        </button>
                                       </div>
                                   ) : (msg.mediaType === 'audio' || msg.mediaType === 'voice') ? (
                                       <div className="flex items-center gap-2.5 bg-black/30 p-2.5 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1">
@@ -1864,8 +1994,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                           <span className="text-[10px] text-gray-300 font-medium uppercase tracking-wide block mb-1">
                                             {msg.mediaType === 'voice' ? 'Voice Message' : 'Audio Note'}
                                           </span>
-                                          <audio src={msg.mediaUrl} controls className="w-full h-8" />
+                                          <audio src={resolveMediaUrlHelper(msg.mediaUrl, apiBase)} controls className="w-full h-8" preload="metadata" />
                                         </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadMediaBlob(msg.mediaUrl!, (msg.fileName || (msg.mediaType === 'voice' ? 'voice_note.ogg' : 'audio.mp3')), apiBase)}
+                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0 cursor-pointer"
+                                          title="Download Audio"
+                                        >
+                                          <Download size={14} />
+                                        </button>
                                       </div>
                                   ) : (
                                       <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1 hover:bg-black/40 transition-colors">
@@ -1880,16 +2018,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                             <span className="text-[10px] text-gray-400 uppercase font-mono">Document File</span>
                                           </div>
                                         </div>
-                                        <a 
-                                          href={msg.mediaUrl.startsWith('/api/meta/media') ? `${msg.mediaUrl}?download=1` : msg.mediaUrl} 
-                                          download={msg.fileName || `attachment_${msg.id}`} 
-                                          target="_blank" 
-                                          rel="noopener noreferrer" 
-                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0"
+                                        <button 
+                                          type="button"
+                                          onClick={() => downloadMediaBlob(msg.mediaUrl!, (msg.fileName || 'document.pdf'), apiBase)}
+                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0 cursor-pointer"
                                           title="Download document"
                                         >
                                           <Download size={15} />
-                                        </a>
+                                        </button>
                                       </div>
                                   )}
                               </div>
@@ -2798,34 +2934,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           onClick={() => setLightboxMedia(null)}
         >
           <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+            {/* Instruction: Lightbox Action Bar with secure Blob download */}
+            {/* Logic: Uses downloadMediaBlob to fetch binary file directly, preventing browser popup blocking or file corruption */}
             <div className="absolute -top-12 right-0 flex items-center gap-3">
-              <a
-                href={lightboxMedia.url.startsWith('/api/meta/media') ? `${lightboxMedia.url}?download=1` : lightboxMedia.url}
-                download={lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg'}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3"
+              <button
+                type="button"
+                onClick={() => downloadMediaBlob(lightboxMedia.url, (lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg'), apiBase)}
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3 cursor-pointer"
+                title="Download media file"
               >
                 <Download size={14} />
                 <span>Download</span>
-              </a>
+              </button>
               <button
                 type="button"
                 onClick={() => setLightboxMedia(null)}
-                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors"
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors cursor-pointer"
               >
                 <X size={18} />
               </button>
             </div>
             {lightboxMedia.type === 'image' ? (
               <img 
-                src={lightboxMedia.url} 
+                src={resolveMediaUrlHelper(lightboxMedia.url, apiBase)} 
                 alt="Full preview" 
                 className="max-w-full max-h-[82vh] rounded-xl object-contain shadow-2xl" 
               />
             ) : (
               <video 
-                src={lightboxMedia.url} 
+                src={resolveMediaUrlHelper(lightboxMedia.url, apiBase)} 
                 controls 
                 autoPlay 
                 className="max-w-full max-h-[82vh] rounded-xl shadow-2xl" 
