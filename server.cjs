@@ -6195,40 +6195,43 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
         // Logic: Joins chat_contacts and address book contacts so names and groups display correctly instead of raw IDs
         const [sessionsRes, unreadRes, inboundRes, labelsRes] = await Promise.all([
             pool.query(`
-                SELECT DISTINCT ON (m.remote_jid)
-                    m.id,
-                    m.instance_id,
-                    m.remote_jid,
-                    m.from_me,
-                    m.text,
-                    m.media_url,
-                    m.media_type,
-                    m.status,
-                    m.timestamp,
-                    COALESCE(
-                        cc.group_name, 
+                SELECT * FROM (
+                    SELECT DISTINCT ON (m.remote_jid)
+                        m.id,
+                        m.instance_id,
+                        m.remote_jid,
+                        m.from_me,
+                        m.text,
+                        m.media_url,
+                        m.media_type,
+                        m.status,
+                        m.timestamp,
+                        COALESCE(
+                            cc.group_name, 
+                            cc.push_name,
+                            (
+                                SELECT c.original 
+                                FROM contacts c 
+                                JOIN contact_groups cg ON c.group_id = cg.id 
+                                WHERE cg.user_id = (SELECT user_id FROM instances WHERE id = $1 LIMIT 1)
+                                  AND (
+                                      c.number = regexp_replace(split_part(m.remote_jid, '@', 1), '\\D', '', 'g')
+                                      OR RIGHT(c.number, 10) = RIGHT(regexp_replace(split_part(m.remote_jid, '@', 1), '\\D', '', 'g'), 10)
+                                  )
+                                LIMIT 1
+                            )
+                        ) AS contact_name,
                         cc.push_name,
-                        (
-                            SELECT c.original 
-                            FROM contacts c 
-                            JOIN contact_groups cg ON c.group_id = cg.id 
-                            WHERE cg.user_id = (SELECT user_id FROM instances WHERE id = $1 LIMIT 1)
-                              AND (
-                                  c.number = regexp_replace(split_part(m.remote_jid, '@', 1), '\\D', '', 'g')
-                                  OR RIGHT(c.number, 10) = RIGHT(regexp_replace(split_part(m.remote_jid, '@', 1), '\\D', '', 'g'), 10)
-                              )
-                            LIMIT 1
-                        )
-                    ) AS contact_name,
-                    cc.push_name,
-                    cc.group_name
-                FROM chat_messages m
-                LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND (
-                    cc.jid = m.remote_jid 
-                    OR split_part(split_part(cc.jid, '@', 1), ':', 1) = split_part(split_part(m.remote_jid, '@', 1), ':', 1)
-                )
-                WHERE m.instance_id = $1
-                ORDER BY m.remote_jid, m.timestamp DESC
+                        cc.group_name
+                    FROM chat_messages m
+                    LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND (
+                        cc.jid = m.remote_jid 
+                        OR split_part(split_part(cc.jid, '@', 1), ':', 1) = split_part(split_part(m.remote_jid, '@', 1), ':', 1)
+                    )
+                    WHERE m.instance_id = $1
+                    ORDER BY m.remote_jid, m.timestamp DESC
+                ) sub
+                ORDER BY sub.timestamp DESC
             `, [instanceId]),
             pool.query(`
                 SELECT remote_jid, COUNT(*) as count

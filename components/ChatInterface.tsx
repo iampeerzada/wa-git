@@ -400,6 +400,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const targetJid = session.remoteJid;
     currentActiveJidRef.current = targetJid;
     setSelectedSession(session);
+    if (selectedInstanceId) {
+      try {
+        localStorage.setItem(`wa_last_active_${selectedInstanceId}`, session.remoteJid);
+      } catch(e) {}
+    }
 
     // Instant zero-delay cached messages display if available
     const cacheKey = `${selectedInstanceId}_${targetJid}`;
@@ -713,7 +718,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
 
   // Instruction: Synchronous instance shifting handler
-  // Logic: Instantly updates activeInstanceRef, clears old session and message state to prevent cross-instance data bleeding, and checks local cache immediately
+  // Logic: Instantly updates refs, loads instance session cache, and auto-restores last selected thread for this instance without wiping sessions
   const handleInstanceChange = (nextId: string) => {
     activeInstanceRef.current = nextId;
     selectedInstanceIdRef.current = nextId;
@@ -723,12 +728,38 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     currentActiveJidRef.current = null;
     localStorage.setItem('wa_chat_selected_instance', nextId);
 
-    if (nextId && sessionsCacheRef.current[nextId]?.length) {
-      setSessions(sessionsCacheRef.current[nextId]);
+    const cachedMem = sessionsCacheRef.current[nextId];
+    if (cachedMem && cachedMem.length > 0) {
+      setSessions(cachedMem);
       setIsLoadingSessions(false);
+      const lastActiveJid = localStorage.getItem(`wa_last_active_${nextId}`);
+      if (lastActiveJid) {
+        const found = cachedMem.find(s => s.remoteJid === lastActiveJid);
+        if (found) setSelectedSession(found);
+      }
     } else {
-      setSessions([]);
-      setIsLoadingSessions(true);
+      try {
+        const cachedStorage = sessionStorage.getItem(`wa_cached_sessions_${nextId}`);
+        if (cachedStorage) {
+          const parsed = JSON.parse(cachedStorage);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setSessions(parsed);
+            sessionsCacheRef.current[nextId] = parsed;
+            setIsLoadingSessions(false);
+            const lastActiveJid = localStorage.getItem(`wa_last_active_${nextId}`);
+            if (lastActiveJid) {
+              const found = parsed.find((s: any) => s.remoteJid === lastActiveJid);
+              if (found) setSelectedSession(found);
+            }
+          } else {
+            setIsLoadingSessions(true);
+          }
+        } else {
+          setIsLoadingSessions(true);
+        }
+      } catch(e) {
+        setIsLoadingSessions(true);
+      }
     }
   };
 
@@ -738,33 +769,37 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
     activeInstanceRef.current = selectedInstanceId;
     selectedInstanceIdRef.current = selectedInstanceId;
-    setSelectedSession(null);
-    setMessages([]);
-    currentActiveJidRef.current = null;
 
-    // Check in-memory cache first for 0ms load
-    if (sessionsCacheRef.current[selectedInstanceId]?.length) {
-      setSessions(sessionsCacheRef.current[selectedInstanceId]);
+    const cachedMem = sessionsCacheRef.current[selectedInstanceId];
+    if (cachedMem && cachedMem.length > 0) {
+      setSessions(cachedMem);
       setIsLoadingSessions(false);
+      const lastActiveJid = localStorage.getItem(`wa_last_active_${selectedInstanceId}`);
+      if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== selectedInstanceId)) {
+        const found = cachedMem.find(s => s.remoteJid === lastActiveJid);
+        if (found) setSelectedSession(found);
+      }
     } else {
       try {
-        const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
-        if (cached) {
-          const parsed = JSON.parse(cached);
+        const cachedStorage = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
+        if (cachedStorage) {
+          const parsed = JSON.parse(cachedStorage);
           if (Array.isArray(parsed) && parsed.length > 0) {
             setSessions(parsed);
             sessionsCacheRef.current[selectedInstanceId] = parsed;
             setIsLoadingSessions(false);
+            const lastActiveJid = localStorage.getItem(`wa_last_active_${selectedInstanceId}`);
+            if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== selectedInstanceId)) {
+              const found = parsed.find((s: any) => s.remoteJid === lastActiveJid);
+              if (found) setSelectedSession(found);
+            }
           } else {
-            setSessions([]);
             setIsLoadingSessions(true);
           }
         } else {
-          setSessions([]);
           setIsLoadingSessions(true);
         }
       } catch(e) {
-        setSessions([]);
         setIsLoadingSessions(true);
       }
     }
@@ -825,13 +860,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               sessionStorage.setItem(`wa_cached_sessions_${currentInstId}`, JSON.stringify(data));
             } catch(e) {}
 
+            // Auto-restore last selected active session for this instance
+            const lastActiveJid = localStorage.getItem(`wa_last_active_${currentInstId}`);
+            if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== currentInstId)) {
+              const found = data.find((s: any) => s.remoteJid === lastActiveJid);
+              if (found) setSelectedSession(found);
+            }
+
             const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
             data.forEach((session: any) => {
               if (session.contactName || session.pushName) {
                 initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
               } else if (session.remoteJid && session.remoteJid.endsWith('@g.us')) {
-                // Instruction: Proactively fetch group subject metadata for group sessions
-                // Logic: Resolves real group names from backend Baileys socket so groups never display raw numerical IDs
                 fetchProfileInfo(session.remoteJid, currentInstId);
               }
             });
@@ -1169,17 +1209,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const now = currentTimeTick;
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
-    return sessions.filter(s => {
+    const filtered = sessions.filter(s => {
       if (!s.remoteJid || s.remoteJid.includes('status@broadcast')) return false;
 
-      // 1. Search filter matching (Name, Message text, or Phone number digits)
+      // 1. Search filter matching (Name, PushName, Message text, or Phone number digits)
       if (searchLower) {
         const jidLower = s.remoteJid.toLowerCase();
         const nameLower = s.contactName ? s.contactName.toLowerCase() : '';
+        const pushLower = (s as any).pushName ? (s as any).pushName.toLowerCase() : '';
         const msgLower = s.lastMessage?.text ? s.lastMessage.text.toLowerCase() : '';
         const cleanPhone = getCleanPhone(s.remoteJid);
 
-        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || msgLower.includes(searchLower);
+        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || pushLower.includes(searchLower) || msgLower.includes(searchLower);
         const matchesDigits = Boolean(cleanSearchDigits && (
           cleanPhone.includes(cleanSearchDigits) ||
           (cleanSearchDigits.length >= 3 && cleanPhone.endsWith(cleanSearchDigits)) ||
@@ -1211,6 +1252,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       }
 
       return true;
+    });
+
+    // Instruction: Priority sorting for chat sessions list (Unread & Newest chats first, past chats follow after)
+    // Logic: Unread chats stay at the top, followed by most recent activity timestamp, keeping all older history accessible and instantly searchable
+    return filtered.sort((a, b) => {
+      if (a.unreadCount > 0 && b.unreadCount <= 0) return -1;
+      if (b.unreadCount > 0 && a.unreadCount <= 0) return 1;
+
+      const tsA = a.lastMessage?.timestamp ? safeParseDate(a.lastMessage.timestamp).getTime() : 0;
+      const tsB = b.lastMessage?.timestamp ? safeParseDate(b.lastMessage.timestamp).getTime() : 0;
+      return tsB - tsA;
     });
   }, [sessions, searchTerm, selectedLabelFilter, chatFilter, currentTimeTick]);
 
