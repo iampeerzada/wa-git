@@ -6209,16 +6209,22 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
         const cleanNumber = isLidDigits ? null : rawDigits;
 
         // Instruction: Step 1 - Meta Cloud API Instance Profile Resolver
-        // Logic: Resolves Meta user profiles, formatting JID as phone@s.whatsapp.net, fetching contact names, profile avatars, and online status
+        // Logic: Resolves Meta user profiles, formatting JID as phone@s.whatsapp.net, fetching contact names, profile photos from chat media history or custom avatar, and presence based on activity
         if (!inst || inst.provider === 'meta' || instanceId.startsWith('inst_meta_')) {
             const metaRes = await pool.query(
-                'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND (jid = $2 OR jid = $3)',
+                'SELECT push_name, group_name, profile_picture_url, about_status FROM chat_contacts WHERE instance_id = $1 AND (jid = $2 OR jid = $3)',
                 [instanceId, jid, targetJid]
             ).catch(() => ({ rows: [] }));
             
+            let metaPhotoUrl = null;
+            let metaAbout = "Available via Meta WhatsApp Cloud API";
+
             if (metaRes.rows.length > 0) {
                 resolvedName = metaRes.rows[0].push_name || metaRes.rows[0].group_name;
+                if (metaRes.rows[0].profile_picture_url) metaPhotoUrl = metaRes.rows[0].profile_picture_url;
+                if (metaRes.rows[0].about_status) metaAbout = metaRes.rows[0].about_status;
             }
+
             if (!resolvedName && rawDigits) {
                 const contactRes = await pool.query(`
                     SELECT c.original as name 
@@ -6230,21 +6236,51 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
                 if (contactRes.rows.length > 0) resolvedName = contactRes.rows[0].name;
             }
 
+            // Logic: Check if contact sent an image in recent messages to use as profile photo
+            if (!metaPhotoUrl) {
+                const mediaRes = await pool.query(
+                    'SELECT media_url FROM chat_messages WHERE instance_id = $1 AND (remote_jid = $2 OR remote_jid = $3) AND from_me = false AND media_type = \'image\' AND media_url IS NOT NULL ORDER BY timestamp DESC LIMIT 1',
+                    [instanceId, jid, targetJid]
+                ).catch(() => ({ rows: [] }));
+                if (mediaRes.rows.length > 0 && mediaRes.rows[0].media_url) {
+                    metaPhotoUrl = mediaRes.rows[0].media_url;
+                }
+            }
+
+            if (!metaPhotoUrl) {
+                metaPhotoUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(resolvedName || rawDigits || 'Meta Contact')}&background=128C7E&color=fff&size=256&bold=true`;
+            }
+
+            // Logic: Calculate Meta contact presence based on last message activity timestamp
+            const lastMsgRes = await pool.query(
+                'SELECT timestamp FROM chat_messages WHERE instance_id = $1 AND (remote_jid = $2 OR remote_jid = $3) ORDER BY timestamp DESC LIMIT 1',
+                [instanceId, jid, targetJid]
+            ).catch(() => ({ rows: [] }));
+
+            let metaPresence = { status: 'offline', lastSeen: Date.now() - 3600000 };
+            if (lastMsgRes.rows.length > 0 && lastMsgRes.rows[0].timestamp) {
+                const lastTs = new Date(lastMsgRes.rows[0].timestamp).getTime();
+                const isOnline = (Date.now() - lastTs) < 5 * 60 * 1000;
+                metaPresence = {
+                    status: isOnline ? 'online' : 'offline',
+                    lastSeen: lastTs
+                };
+            }
+
             const formattedJid = rawDigits ? `${rawDigits}@s.whatsapp.net` : jid;
-            const photoUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(resolvedName || rawDigits || 'Meta User')}&background=0668E1&color=fff&size=256`;
 
             return res.json({
                 name: resolvedName,
                 jid: formattedJid,
                 realJid: formattedJid,
                 phoneNumber: rawDigits ? `+${rawDigits}` : null,
-                imgUrl: photoUrl,
-                status: "Meta Cloud API Connected Account",
+                imgUrl: metaPhotoUrl,
+                status: metaAbout,
                 isGroup: false,
                 desc: null,
                 participantsCount: 0,
                 participants: [],
-                presence: { status: 'online', lastSeen: Date.now() },
+                presence: metaPresence,
                 businessProfile: null
             });
         }
@@ -6335,16 +6371,30 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
         }
 
         // Instruction: Step 5 - WhatsApp User About / Status Resolution
-        // Logic: Fetches contact bio status text from WhatsApp socket using phone JID (@s.whatsapp.net)
+        // Logic: Fetches contact bio status text from WhatsApp socket using phone JID (@s.whatsapp.net) and persists to DB
         if (!isGroup && inst && inst.sock && inst.sock.fetchStatus) {
             try {
                 const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
                 if (phoneJid) {
                     const st = await inst.sock.fetchStatus(phoneJid);
-                    if (st && st.status) aboutStatus = st.status;
+                    if (st && st.status) {
+                        aboutStatus = st.status;
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, about_status) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET about_status = EXCLUDED.about_status',
+                            [instanceId, jid, st.status]
+                        ).catch(() => {});
+                    }
                 }
             } catch (stErr) {
-                aboutStatus = "Hey there! I am using WhatsApp.";
+                const savedRes = await pool.query(
+                    'SELECT about_status FROM chat_contacts WHERE instance_id = $1 AND (jid = $2 OR jid = $3)',
+                    [instanceId, jid, targetJid]
+                ).catch(() => ({ rows: [] }));
+                if (savedRes.rows.length > 0 && savedRes.rows[0].about_status) {
+                    aboutStatus = savedRes.rows[0].about_status;
+                } else {
+                    aboutStatus = "Hey there! I am using WhatsApp.";
+                }
             }
         }
 
@@ -6369,7 +6419,7 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
         }
 
         // Instruction: Step 7 - Presence Subscription & Live Status
-        // Logic: Subscribes to contact presence and calculates online/offline and last seen timestamp
+        // Logic: Subscribes to contact presence and calculates live online/offline status and last seen timestamp
         if (!isGroup && inst && inst.sock && inst.sock.presenceSubscribe) {
             try {
                 const pJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : jid);
@@ -6377,9 +6427,24 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
             } catch (pErr) {}
         }
 
-        const presenceInfo = presenceStoreMap.get(`${instanceId}_${targetJid}`) || 
-                             presenceStoreMap.get(`${instanceId}_${jid}`) || 
-                             { status: 'online', lastSeen: Date.now() };
+        let presenceInfo = presenceStoreMap.get(`${instanceId}_${targetJid}`) || presenceStoreMap.get(`${instanceId}_${jid}`);
+        if (!presenceInfo) {
+            const lastMsgRes = await pool.query(
+                'SELECT timestamp FROM chat_messages WHERE instance_id = $1 AND (remote_jid = $2 OR remote_jid = $3) ORDER BY timestamp DESC LIMIT 1',
+                [instanceId, jid, targetJid]
+            ).catch(() => ({ rows: [] }));
+
+            if (lastMsgRes.rows.length > 0 && lastMsgRes.rows[0].timestamp) {
+                const lastTs = new Date(lastMsgRes.rows[0].timestamp).getTime();
+                const isOnline = (Date.now() - lastTs) < 5 * 60 * 1000;
+                presenceInfo = {
+                    status: isOnline ? 'online' : 'offline',
+                    lastSeen: lastTs
+                };
+            } else {
+                presenceInfo = { status: 'offline', lastSeen: Date.now() - 1800000 };
+            }
+        }
 
         res.json({ 
             name: resolvedName,
@@ -7169,9 +7234,15 @@ async function startup() {
                 jid TEXT NOT NULL,
                 push_name TEXT,
                 group_name TEXT,
+                profile_picture_url TEXT,
+                about_status TEXT,
+                lid TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (instance_id, jid)
             );
+            ALTER TABLE chat_contacts ADD COLUMN IF NOT EXISTS profile_picture_url TEXT;
+            ALTER TABLE chat_contacts ADD COLUMN IF NOT EXISTS about_status TEXT;
+            ALTER TABLE chat_contacts ADD COLUMN IF NOT EXISTS lid TEXT;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT[];
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent';
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS quoted_msg_id VARCHAR(100);
