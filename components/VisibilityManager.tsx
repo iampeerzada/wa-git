@@ -76,7 +76,8 @@ const VisibilityManager: React.FC<VisibilityManagerProps> = ({ currentUser, hidd
             <div>
                 <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
                     <LayoutPanelLeft size={18} className="text-[#25D366]" />
-                    <span>Visibility Manager</span>
+                    {/* Instruction: Apply black text color (#000000) to Visibility Manager title */}
+                    <span style={{ color: '#000000' }}>Visibility Manager</span>
                 </h2>
                 <p className="text-gray-400 text-xs mt-0.5">Control which modules are visible across the platform.</p>
             </div>

@@ -29,19 +29,8 @@ import LoginPage from './components/LoginPage';
 import ProvisionInstanceModal from './components/ProvisionInstanceModal';
 import LandingPage from './components/LandingPage';
 
-// Instruction: Determine API Base URL dynamically
-// Logic: Uses environment variable VITE_API_BASE if set; otherwise falls back to window.location.origin in browser/preview environments to ensure frontend connects directly to its local server
 const getApiBase = () => {
-  if (import.meta.env.VITE_API_BASE) {
-    return import.meta.env.VITE_API_BASE;
-  }
-  if (typeof window !== 'undefined') {
-    const origin = window.location.origin;
-    if (origin && !origin.includes('wa-api.ifastx.in')) {
-      return origin;
-    }
-  }
-  return 'https://wa-api.ifastx.in';
+  return 'https://wa-api.ifastx.in'; // Localhost ko VPS se connect kar do
 };
 
 const API_BASE = getApiBase();
@@ -316,24 +305,18 @@ const App: React.FC = () => {
         'X-API-Key': currentUser.apiKey
       };
 
-      // Instruction: Fetch active WhatsApp instances from backend
-      // Logic: Queries /api/instances endpoint with extended 25s timeout controller to prevent false network aborts on cold starts
       const fetchInstances = async () => {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 25000);
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
           const instRes = await fetch(`${API_BASE}/api/instances?_t=${Date.now()}`, { headers, signal: controller.signal });
           clearTimeout(timeoutId);
           if (instRes.ok) {
             setInstances(await instRes.json());
             setIsBackendConnected(true);
           }
-        } catch (err: any) {
-          // Instruction: Filter out intentional request timeouts from system logs
-          // Logic: Prevents logging noise when signal is aborted during tab switching or unmounting
-          if (err?.name !== 'AbortError') {
-            console.warn("Backend connection notice:", err?.message || err);
-          }
+        } catch (err) {
+          console.warn("Backend connection failing:", err);
           setIsBackendConnected(false);
         }
       };
@@ -378,9 +361,8 @@ const App: React.FC = () => {
     const interval = setInterval(fetchAllData, 15000);
     fetchAllData();
     
-    // Instruction: Initialize real-time Socket.IO WebSocket connection
-    // Logic: Listens for instant instance status changes, QR code generation, and wallet updates
-    const socket = io(API_BASE || (typeof window !== 'undefined' ? window.location.origin : ''));
+    // Add real-time Socket.IO listeners
+    const socket = io(API_BASE);
     socket.on('connect', () => {
         setIsBackendConnected(true);
         fetchAllData(); // Refresh data on reconnect

@@ -269,7 +269,8 @@ export default function MetaAutomations({ instances = [], currentUser, apiBase, 
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-sm sm:text-base md:text-lg font-bold flex items-center gap-2 text-white">
               <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400 shrink-0" />
-              <span>Meta Auto-Responder & Flow Studio</span>
+              {/* Instruction: Apply black text color (#000000) to Meta auto-responder header title */}
+              <span style={{ color: '#000000' }}>Meta Auto-Responder & Flow Studio</span>
             </h2>
             <span className="text-[9px] sm:text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/20 font-bold uppercase tracking-wider flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>

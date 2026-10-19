@@ -1,17 +1,10 @@
-// Instruction: Import Vite configuration helpers and React plugin
-// Logic: Configures Vite bundler for React SPA with Tailwind CSS v4 support
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
 
-// Instruction: Export Vite configuration object
-// Logic: Specifies build output, plugins, asset paths, and dev server options
+// https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [
-    react(),
-    tailwindcss(), // Instruction: Mount Tailwind CSS v4 compiler plugin
-  ],
-  base: './', // Instruction: Relative base path ensures assets load seamlessly across local dev, preview, and production hosts
+  plugins: [react()],
+  base: '/wa/', // CRITICAL: This ensures all assets (JS, CSS, Images) are loaded from https://ifastx.in/wa/ instead of the root.
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
@@ -21,7 +14,5 @@ export default defineConfig({
   server: {
     port: 3000,
     strictPort: true,
-    host: '0.0.0.0', // Instruction: Bind dev server to 0.0.0.0 for container & preview proxy compatibility
-    hmr: false, // Instruction: Disable Vite HMR WebSockets to prevent "WebSocket closed without opened" errors in iframe environments
   }
 });

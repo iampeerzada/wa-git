@@ -250,7 +250,8 @@ export default function Templates({ instances = [], currentUser, apiBase, mediaA
         <div>
           <h2 className="text-xs sm:text-sm md:text-base font-bold text-white flex items-center gap-2">
             <LayoutTemplate size={18} className="text-[#25D366] shrink-0" />
-            <span>Meta Templates</span>
+            {/* Instruction: Apply black text color (#000000) to Meta Templates title */}
+            <span style={{ color: '#000000' }}>Meta Templates</span>
           </h2>
           <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">Manage and sync official Meta WhatsApp message templates</p>
         </div>

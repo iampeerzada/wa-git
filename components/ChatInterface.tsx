@@ -48,32 +48,6 @@ const getCleanPhone = (jid: string) => {
   return jid.split('@')[0].replace(/[^0-9]/g, '');
 };
 
-// Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
-// Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions or TDZ errors
-const safeParseDate = (raw: string | number | undefined | null): Date => {
-  if (!raw) return new Date();
-  if (typeof raw === 'number') {
-    return new Date(raw > 1e11 ? raw : raw * 1000);
-  }
-  const str = String(raw).trim();
-  if (/^\d+$/.test(str)) {
-    const num = Number(str);
-    return new Date(num > 1e11 ? num : num * 1000);
-  }
-  // Try direct parse first (handles ISO strings with timezone offset)
-  let d = new Date(str);
-  if (!isNaN(d.getTime())) return d;
-
-  // Handle SQL datetime format like "2026-10-19 16:20:00"
-  const formatted = str.replace(' ', 'T');
-  d = new Date(formatted);
-  if (!isNaN(d.getTime())) return d;
-
-  return new Date();
-};
-
-
-
 const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
   const cleanPhone = getCleanPhone(jid);
   if (!cleanPhone) return;
@@ -426,11 +400,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const targetJid = session.remoteJid;
     currentActiveJidRef.current = targetJid;
     setSelectedSession(session);
-    if (selectedInstanceId) {
-      try {
-        localStorage.setItem(`wa_last_active_${selectedInstanceId}`, session.remoteJid);
-      } catch(e) {}
-    }
 
     // Instant zero-delay cached messages display if available
     const cacheKey = `${selectedInstanceId}_${targetJid}`;
@@ -744,7 +713,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
 
   // Instruction: Synchronous instance shifting handler
-  // Logic: Instantly updates refs, loads instance session cache, and auto-restores last selected thread for this instance without wiping sessions
+  // Logic: Instantly updates activeInstanceRef, clears old session and message state to prevent cross-instance data bleeding, and checks local cache immediately
   const handleInstanceChange = (nextId: string) => {
     activeInstanceRef.current = nextId;
     selectedInstanceIdRef.current = nextId;
@@ -754,38 +723,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     currentActiveJidRef.current = null;
     localStorage.setItem('wa_chat_selected_instance', nextId);
 
-    const cachedMem = sessionsCacheRef.current[nextId];
-    if (cachedMem && cachedMem.length > 0) {
-      setSessions(cachedMem);
+    if (nextId && sessionsCacheRef.current[nextId]?.length) {
+      setSessions(sessionsCacheRef.current[nextId]);
       setIsLoadingSessions(false);
-      const lastActiveJid = localStorage.getItem(`wa_last_active_${nextId}`);
-      if (lastActiveJid) {
-        const found = cachedMem.find(s => s.remoteJid === lastActiveJid);
-        if (found) setSelectedSession(found);
-      }
     } else {
-      try {
-        const cachedStorage = sessionStorage.getItem(`wa_cached_sessions_${nextId}`);
-        if (cachedStorage) {
-          const parsed = JSON.parse(cachedStorage);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setSessions(parsed);
-            sessionsCacheRef.current[nextId] = parsed;
-            setIsLoadingSessions(false);
-            const lastActiveJid = localStorage.getItem(`wa_last_active_${nextId}`);
-            if (lastActiveJid) {
-              const found = parsed.find((s: any) => s.remoteJid === lastActiveJid);
-              if (found) setSelectedSession(found);
-            }
-          } else {
-            setIsLoadingSessions(true);
-          }
-        } else {
-          setIsLoadingSessions(true);
-        }
-      } catch(e) {
-        setIsLoadingSessions(true);
-      }
+      setSessions([]);
+      setIsLoadingSessions(true);
     }
   };
 
@@ -795,51 +738,60 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
     activeInstanceRef.current = selectedInstanceId;
     selectedInstanceIdRef.current = selectedInstanceId;
+    setSelectedSession(null);
+    setMessages([]);
+    currentActiveJidRef.current = null;
 
-    const cachedMem = sessionsCacheRef.current[selectedInstanceId];
-    if (cachedMem && cachedMem.length > 0) {
-      setSessions(cachedMem);
+    // Check in-memory cache first for 0ms load
+    if (sessionsCacheRef.current[selectedInstanceId]?.length) {
+      setSessions(sessionsCacheRef.current[selectedInstanceId]);
       setIsLoadingSessions(false);
-      const lastActiveJid = localStorage.getItem(`wa_last_active_${selectedInstanceId}`);
-      if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== selectedInstanceId)) {
-        const found = cachedMem.find(s => s.remoteJid === lastActiveJid);
-        if (found) setSelectedSession(found);
-      }
     } else {
       try {
-        const cachedStorage = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
-        if (cachedStorage) {
-          const parsed = JSON.parse(cachedStorage);
+        const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
           if (Array.isArray(parsed) && parsed.length > 0) {
             setSessions(parsed);
             sessionsCacheRef.current[selectedInstanceId] = parsed;
             setIsLoadingSessions(false);
-            const lastActiveJid = localStorage.getItem(`wa_last_active_${selectedInstanceId}`);
-            if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== selectedInstanceId)) {
-              const found = parsed.find((s: any) => s.remoteJid === lastActiveJid);
-              if (found) setSelectedSession(found);
-            }
           } else {
+            setSessions([]);
             setIsLoadingSessions(true);
           }
         } else {
+          setSessions([]);
           setIsLoadingSessions(true);
         }
       } catch(e) {
+        setSessions([]);
         setIsLoadingSessions(true);
       }
     }
   }, [selectedInstanceId]);
 
+  // Instruction: Profile Drawer State for WhatsApp contact / group profile inspector
+  const [showProfileDrawer, setShowProfileDrawer] = useState<boolean>(false);
+  const [copiedDetailText, setCopiedDetailText] = useState<string | null>(null);
+
   // Instruction: Contact profile and group metadata cache
-  // Logic: Stores contact names, avatars, and group subjects in React state for instant synchronous lookup
-  const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
+  // Logic: Stores contact names, avatars, group subjects, status, and participants in React state
+  const [profileCache, setProfileCache] = useState<Record<string, { 
+    name?: string; 
+    imgUrl?: string;
+    status?: string;
+    isGroup?: boolean;
+    desc?: string;
+    participantsCount?: number;
+    participants?: Array<{ id: string; admin?: string | null }>;
+  }>>({});
 
   // Instruction: Dynamic contact/group profile metadata fetcher
-  // Logic: Fetches verified group subjects or contact names on demand from active backend server
-  const fetchProfileInfo = async (jid: string, targetInstId?: string) => {
+  // Logic: Fetches verified group subjects, contact names, profile photos, and status on demand and caches them
+  const fetchProfileInfo = async (jid: string, targetInstId?: string, forceRefresh = false) => {
       const instId = targetInstId || activeInstanceRef.current || selectedInstanceId;
-      if (!instId || !jid || profileCache[jid]?.name) return;
+      if (!instId || !jid) return;
+      if (!forceRefresh && profileCache[jid] && (profileCache[jid].name || profileCache[jid].imgUrl)) return;
       
       try {
           const res = await fetch(`${apiBase}/api/chat/profile/${instId}/${jid}`, {
@@ -850,9 +802,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           });
           if (res.ok) {
               const data = await res.json();
-              if (data?.name || data?.imgUrl) {
-                setProfileCache(prev => ({ ...prev, [jid]: data }));
-                setSessions(prev => prev.map(s => (s.remoteJid === jid && !s.contactName) ? { ...s, contactName: data.name } : s));
+              if (data) {
+                setProfileCache(prev => ({ ...prev, [jid]: { ...prev[jid], ...data } }));
+                if (data.name) {
+                  setSessions(prev => prev.map(s => (s.remoteJid === jid && !s.contactName) ? { ...s, contactName: data.name } : s));
+                }
               }
           }
       } catch (e) {
@@ -860,7 +814,60 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       }
   };
 
-  // Fetch sessions from active backend server with race-condition & stale-instance protection
+  // Instruction: Comprehensive Contact & Group Display Resolver
+  // Logic: Resolves contact name, formatted phone number (+91 98765 43210), and exact WhatsApp JID ID
+  const getContactDisplayDetails = (remoteJid: string, contactName?: string | null, cachedItem?: any) => {
+    if (!remoteJid) return { name: 'Unknown', number: '', id: '', isGroup: false };
+
+    const isGroup = remoteJid.endsWith('@g.us');
+    const isBroadcast = remoteJid.includes('@broadcast');
+    const cleanDigits = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+
+    let formattedNumber = '';
+    if (cleanDigits) {
+      if (cleanDigits.length === 10) {
+        formattedNumber = `+91 ${cleanDigits.slice(0, 5)} ${cleanDigits.slice(5)}`;
+      } else if (cleanDigits.length === 12 && cleanDigits.startsWith('91')) {
+        formattedNumber = `+91 ${cleanDigits.slice(2, 7)} ${cleanDigits.slice(7)}`;
+      } else if (cleanDigits.length >= 7 && cleanDigits.length <= 15) {
+        formattedNumber = `+${cleanDigits}`;
+      } else {
+        formattedNumber = `+${cleanDigits}`;
+      }
+    }
+
+    const resolvedName = (contactName || cachedItem?.name || cachedItem?.groupName || cachedItem?.pushName || '').trim();
+
+    if (isGroup) {
+      const groupTitle = resolvedName || `Group (${cleanDigits.slice(-6) || 'Chat'})`;
+      return {
+        name: groupTitle,
+        number: cachedItem?.participantsCount ? `${cachedItem.participantsCount} Members` : 'Group Chat',
+        id: remoteJid,
+        isGroup: true
+      };
+    }
+
+    if (isBroadcast) {
+      return {
+        name: 'Broadcast List',
+        number: 'Broadcast',
+        id: remoteJid,
+        isGroup: false
+      };
+    }
+
+    const finalName = resolvedName ? resolvedName : (formattedNumber || remoteJid.split('@')[0]);
+
+    return {
+      name: finalName,
+      number: formattedNumber || cleanDigits || remoteJid.split('@')[0],
+      id: remoteJid,
+      isGroup: false
+    };
+  };
+
+  // Fetch sessions from server with race-condition & stale-instance protection
   useEffect(() => {
     if (!selectedInstanceId) return;
 
@@ -876,7 +883,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             'X-API-Key': currentUser.apiKey
           }
         });
-
         if (res.ok) {
           const data = await res.json();
           // Ensure we only update state if the user is still on this instance
@@ -887,18 +893,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               sessionStorage.setItem(`wa_cached_sessions_${currentInstId}`, JSON.stringify(data));
             } catch(e) {}
 
-            // Auto-restore last selected active session for this instance
-            const lastActiveJid = localStorage.getItem(`wa_last_active_${currentInstId}`);
-            if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== currentInstId)) {
-              const found = data.find((s: any) => s.remoteJid === lastActiveJid);
-              if (found) setSelectedSession(found);
-            }
-
             const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
             data.forEach((session: any) => {
               if (session.contactName || session.pushName) {
                 initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
               } else if (session.remoteJid && session.remoteJid.endsWith('@g.us')) {
+                // Instruction: Proactively fetch group subject metadata for group sessions
+                // Logic: Resolves real group names from backend Baileys socket so groups never display raw numerical IDs
                 fetchProfileInfo(session.remoteJid, currentInstId);
               }
             });
@@ -908,8 +909,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
       } catch (err: any) {
-        if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
-          console.error('Failed to fetch sessions from backend server', err);
+        if (err.name !== 'AbortError') {
+          console.error('Failed to fetch sessions', err);
         }
       } finally {
         if (activeInstanceRef.current === currentInstId) {
@@ -969,7 +970,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             'X-API-Key': currentUser.apiKey
           }
         });
-
         if (res.ok) {
           const data = await res.json();
           messagesCacheRef.current[cacheKey] = data;
@@ -982,8 +982,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
       } catch (err: any) {
-        if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
-          console.error('Failed to fetch messages from backend server', err);
+        if (err.name !== 'AbortError') {
+          console.error('Failed to fetch messages', err);
         }
       } finally {
         if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
@@ -1237,18 +1237,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const now = currentTimeTick;
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
-    const filtered = sessions.filter(s => {
+    return sessions.filter(s => {
       if (!s.remoteJid || s.remoteJid.includes('status@broadcast')) return false;
 
-      // 1. Search filter matching (Name, PushName, Message text, or Phone number digits)
+      // 1. Search filter matching (Name, Message text, or Phone number digits)
       if (searchLower) {
         const jidLower = s.remoteJid.toLowerCase();
         const nameLower = s.contactName ? s.contactName.toLowerCase() : '';
-        const pushLower = (s as any).pushName ? (s as any).pushName.toLowerCase() : '';
         const msgLower = s.lastMessage?.text ? s.lastMessage.text.toLowerCase() : '';
         const cleanPhone = getCleanPhone(s.remoteJid);
 
-        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || pushLower.includes(searchLower) || msgLower.includes(searchLower);
+        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || msgLower.includes(searchLower);
         const matchesDigits = Boolean(cleanSearchDigits && (
           cleanPhone.includes(cleanSearchDigits) ||
           (cleanSearchDigits.length >= 3 && cleanPhone.endsWith(cleanSearchDigits)) ||
@@ -1281,18 +1280,31 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
       return true;
     });
-
-    // Instruction: Priority sorting for chat sessions list (Unread & Newest chats first, past chats follow after)
-    // Logic: Unread chats stay at the top, followed by most recent activity timestamp, keeping all older history accessible and instantly searchable
-    return filtered.sort((a, b) => {
-      if (a.unreadCount > 0 && b.unreadCount <= 0) return -1;
-      if (b.unreadCount > 0 && a.unreadCount <= 0) return 1;
-
-      const tsA = a.lastMessage?.timestamp ? safeParseDate(a.lastMessage.timestamp).getTime() : 0;
-      const tsB = b.lastMessage?.timestamp ? safeParseDate(b.lastMessage.timestamp).getTime() : 0;
-      return tsB - tsA;
-    });
   }, [sessions, searchTerm, selectedLabelFilter, chatFilter, currentTimeTick]);
+
+  // Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
+  // Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions
+  const safeParseDate = (raw: string | number | undefined | null): Date => {
+    if (!raw) return new Date();
+    if (typeof raw === 'number') {
+      return new Date(raw > 1e11 ? raw : raw * 1000);
+    }
+    const str = String(raw).trim();
+    if (/^\d+$/.test(str)) {
+      const num = Number(str);
+      return new Date(num > 1e11 ? num : num * 1000);
+    }
+    // Try direct parse first (handles ISO strings with timezone offset, e.g. 2026-10-19T04:20:00.000Z)
+    let d = new Date(str);
+    if (!isNaN(d.getTime())) return d;
+
+    // Handle SQL datetime format like "2026-10-19 16:20:00"
+    const formatted = str.replace(' ', 'T');
+    d = new Date(formatted);
+    if (!isNaN(d.getTime())) return d;
+
+    return new Date();
+  };
 
   // Instruction: Format timestamp to localized 12-hour time (e.g., 04:20 PM)
   // Logic: Parses raw timestamp safely and returns formatted hour:minute
@@ -1676,7 +1688,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             filteredSessions.slice(0, visibleCount).map((session) => {
               const win = getWindowCountdown(session.lastInboundTimestamp);
               const isSelected = selectedSession?.remoteJid === session.remoteJid;
-              const displayName = session.contactName || profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid, session.contactName);
+              const details = getContactDisplayDetails(session.remoteJid, session.contactName, profileCache[session.remoteJid]);
               return (
                 <div
                   key={session.remoteJid}
@@ -1685,20 +1697,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     isSelected ? 'bg-[#2a3942] border-l-2 border-[#25D366]' : 'bg-[#111b21] hover:bg-[#202c33]'
                   }`}
                 >
-                  <div style={{ width: '35px', height: '35px' }} className="w-[35px] h-[35px] bg-gray-700 rounded-full flex items-center justify-center text-gray-300 shrink-0 overflow-hidden relative">
+                  <div style={{ width: '38px', height: '38px' }} className="w-[38px] h-[38px] bg-gray-700 rounded-full flex items-center justify-center text-gray-300 shrink-0 overflow-hidden relative shadow-sm">
                     {profileCache[session.remoteJid]?.imgUrl ? (
                       <img src={profileCache[session.remoteJid].imgUrl} alt="" className="w-full h-full object-cover" />
                     ) : (
-                      <User size={15} style={{ width: '15px', height: '15px' }} />
+                      <User size={16} style={{ width: '16px', height: '16px' }} />
                     )}
                     {win.isActive && (
                       <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#111b21]" title="24h Service Window Active" />
                     )}
                   </div>
                   <div className="flex-1 min-w-0 text-left">
-                    <div className="flex justify-between items-baseline gap-2 min-w-0">
-                      <h3 className="text-sm font-medium text-gray-100 truncate">
-                        {displayName}
+                    <div className="flex justify-between items-baseline gap-1.5 min-w-0">
+                      <h3 className="text-sm font-bold text-gray-100 truncate">
+                        {details.name}
                       </h3>
                       {session.lastMessage && (
                         <span className="text-[10px] text-gray-500 shrink-0">
@@ -1706,7 +1718,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-gray-400 truncate mt-0.5 flex items-center gap-1">
+                    {/* Instruction: Render formatted phone number and raw JID badge */}
+                    {/* Logic: Ensures user sees clear formatted phone number (+91 98765 43210) AND raw JID ID simultaneously */}
+                    <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mt-0.5 truncate">
+                      <span className="font-medium text-emerald-400/90 truncate">{details.number}</span>
+                      <span className="text-gray-600 shrink-0">•</span>
+                      <span className="font-mono text-[10px] text-gray-400 truncate bg-gray-800/80 px-1 py-0.2 rounded shrink-0 max-w-[120px]" title={details.id}>
+                        {details.id}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-400 truncate mt-1 flex items-center gap-1">
                       {session.lastMessage?.fromMe && (
                         session.lastMessage.status === 'read' ? (
                           <CheckCheck size={13} className="text-[#53bdeb] shrink-0" />
@@ -1790,9 +1811,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           <>
             {/* Header */}
             <div className="h-16 min-h-[64px] shrink-0 bg-[#202c33] flex items-center justify-between px-3 md:px-4 border-b border-gray-800 gap-2 z-10">
-              <div className="flex items-center gap-3 min-w-0">
-                <button onClick={() => setSelectedSession(null)} className="md:hidden p-1 -ml-1 text-gray-400 hover:text-white"><ArrowLeft size={20} /></button>
-                <div className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-gray-300 overflow-hidden shrink-0 relative">
+              <div 
+                onClick={() => {
+                  fetchProfileInfo(selectedSession.remoteJid, selectedInstanceId, true);
+                  setShowProfileDrawer(true);
+                }}
+                className="flex items-center gap-3 min-w-0 cursor-pointer group/header p-1 -ml-1 rounded-xl hover:bg-[#2a3942]/60 transition-all"
+                title="Click to view full WhatsApp profile details & photo"
+              >
+                <button onClick={(e) => { e.stopPropagation(); setSelectedSession(null); }} className="md:hidden p-1 text-gray-400 hover:text-white"><ArrowLeft size={20} /></button>
+                <div className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-gray-300 overflow-hidden shrink-0 relative group-hover/header:ring-2 ring-[#25D366] transition-all shadow-md">
                   {profileCache[selectedSession.remoteJid]?.imgUrl ? (
                       <img src={profileCache[selectedSession.remoteJid].imgUrl} alt="" className="w-full h-full object-cover" />
                   ) : (
@@ -1802,12 +1830,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#202c33]" />
                   )}
                 </div>
-                {/* Instruction: Render active contact/group name and phone number subtitle */}
-                {/* Logic: Accurately displays the saved contact name or group subject on top, and phone number or group ID on bottom */}
-                <div className="min-w-0">
-                  <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2 truncate">
-                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="truncate font-bold text-white">
-                      {selectedSession.contactName || profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid, selectedSession.contactName)}
+                {/* Instruction: Render active contact/group name, phone number, and JID ID */}
+                {/* Logic: Accurately displays contact name, formatted phone number (+91 98765 43210), and raw JID ID */}
+                <div className="min-w-0 text-left">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2 truncate group-hover/header:text-[#25D366] transition-colors">
+                    <span className="truncate font-bold text-white">
+                      {getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]).name}
                     </span>
                     {selectedSession.labels && selectedSession.labels.length > 0 && (
                         <div className="flex -space-x-1 shrink-0">
@@ -1817,9 +1845,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         </div>
                     )}
                   </h3>
-                  <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                    <span style={{ fontWeight: 'normal', color: '#9ca3af' }} className="font-mono text-gray-400">
-                      {formatDisplayJid(selectedSession.remoteJid)}
+                  <div className="flex items-center gap-2 text-[11px] text-gray-300">
+                    <span className="font-semibold text-emerald-400">
+                      {getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]).number}
+                    </span>
+                    <span className="text-gray-500">•</span>
+                    <span className="font-mono text-gray-400 text-[10px] bg-gray-800/80 px-1 py-0.2 rounded truncate max-w-[140px]" title={selectedSession.remoteJid}>
+                      {selectedSession.remoteJid}
                     </span>
                     {typingStatus[selectedSession.remoteJid] ? (
                       <span className="text-emerald-400 font-medium">typing...</span>
@@ -3119,6 +3151,213 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           onClose={() => setShowChatAiModal(false)}
           onSaved={() => setShowChatAiModal(false)}
         />
+      )}
+      {/* WhatsApp Contact & Group Profile Inspector Drawer Modal */}
+      {showProfileDrawer && selectedSession && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#111b21] border-l border-gray-800 w-full max-w-md h-full flex flex-col shadow-2xl overflow-hidden animate-in slide-in-from-right duration-200">
+            {/* Header Bar */}
+            <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-[#202c33]">
+              <div className="flex items-center gap-2.5">
+                <Info className="w-5 h-5 text-[#25D366]" />
+                <h3 className="text-sm font-bold text-white">
+                  {selectedSession.remoteJid.endsWith('@g.us') ? 'Group Info' : 'Contact Info'}
+                </h3>
+              </div>
+              <button 
+                onClick={() => setShowProfileDrawer(false)}
+                className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
+                title="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Profile Drawer Body */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar">
+              {/* Profile Photo & Primary Title Card */}
+              {(() => {
+                const details = getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]);
+                const cached = profileCache[selectedSession.remoteJid];
+                return (
+                  <div className="flex flex-col items-center text-center p-6 bg-[#202c33]/70 rounded-2xl border border-gray-800 shadow-inner">
+                    <div 
+                      onClick={() => {
+                        if (cached?.imgUrl) {
+                          setLightboxMedia({ url: cached.imgUrl, type: 'image' });
+                        }
+                      }}
+                      className="w-28 h-28 rounded-full bg-gray-700 flex items-center justify-center text-gray-300 overflow-hidden mb-4 relative shadow-xl border-2 border-gray-600 group/avatar cursor-pointer"
+                    >
+                      {cached?.imgUrl ? (
+                        <img src={cached.imgUrl} alt={details.name} className="w-full h-full object-cover group-hover/avatar:scale-105 transition-transform" />
+                      ) : (
+                        <User size={52} className="text-gray-400" />
+                      )}
+                      {cached?.imgUrl && (
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/avatar:opacity-100 flex items-center justify-center transition-opacity text-white text-xs font-semibold">
+                          <Eye size={18} className="mr-1" /> View Photo
+                        </div>
+                      )}
+                    </div>
+
+                    <h2 className="text-lg font-extrabold text-white mb-1 break-words max-w-full">
+                      {details.name}
+                    </h2>
+
+                    <div className="text-xs font-semibold text-emerald-400 font-mono mb-2">
+                      {details.number}
+                    </div>
+
+                    <div className="flex items-center gap-2 bg-[#111b21] px-3 py-1.5 rounded-lg border border-gray-800 text-[11px] font-mono text-gray-400 max-w-full break-all">
+                      <span>JID: {details.id}</span>
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(details.id);
+                          setCopiedDetailText('JID Copied!');
+                          setTimeout(() => setCopiedDetailText(null), 2000);
+                        }}
+                        className="text-gray-400 hover:text-white shrink-0 ml-1 p-0.5"
+                        title="Copy JID"
+                      >
+                        <Copy size={13} />
+                      </button>
+                    </div>
+
+                    {copiedDetailText && (
+                      <span className="text-[10px] font-bold text-[#25D366] mt-2 animate-bounce">
+                        {copiedDetailText}
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Quick Contact Actions */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  onClick={() => openInWhatsAppWeb(selectedSession.remoteJid)}
+                  className="flex items-center justify-center gap-2 bg-[#25D366]/15 hover:bg-[#25D366]/25 border border-[#25D366]/30 text-[#25D366] py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95"
+                >
+                  <ExternalLink size={14} />
+                  <span>Open wa.me</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    const phone = getCleanPhone(selectedSession.remoteJid);
+                    if (phone) {
+                      navigator.clipboard.writeText(`+${phone}`);
+                      setCopiedDetailText('Phone Copied!');
+                      setTimeout(() => setCopiedDetailText(null), 2000);
+                    }
+                  }}
+                  className="flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95"
+                >
+                  <Copy size={14} />
+                  <span>Copy Number</span>
+                </button>
+              </div>
+
+              {/* About / Status Info (for 1-on-1 chats) */}
+              {!selectedSession.remoteJid.endsWith('@g.us') && (
+                <div className="bg-[#202c33]/70 p-4 rounded-2xl border border-gray-800 space-y-2">
+                  <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider block">
+                    WhatsApp About / Status
+                  </span>
+                  <p className="text-xs text-gray-200 italic leading-relaxed">
+                    {profileCache[selectedSession.remoteJid]?.status || "Hey there! I am using WhatsApp."}
+                  </p>
+                </div>
+              )}
+
+              {/* Group Description & Participants List (for group chats) */}
+              {selectedSession.remoteJid.endsWith('@g.us') && (
+                <div className="space-y-4">
+                  {profileCache[selectedSession.remoteJid]?.desc && (
+                    <div className="bg-[#202c33]/70 p-4 rounded-2xl border border-gray-800 space-y-2">
+                      <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider block">
+                        Group Description
+                      </span>
+                      <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">
+                        {profileCache[selectedSession.remoteJid].desc}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="bg-[#202c33]/70 p-4 rounded-2xl border border-gray-800 space-y-3">
+                    <div className="flex items-center justify-between border-b border-gray-800 pb-2">
+                      <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider">
+                        Group Members ({profileCache[selectedSession.remoteJid]?.participantsCount || 0})
+                      </span>
+                      <span className="text-[10px] text-[#25D366] font-bold font-mono">Synced</span>
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                      {profileCache[selectedSession.remoteJid]?.participants && profileCache[selectedSession.remoteJid].participants!.length > 0 ? (
+                        profileCache[selectedSession.remoteJid].participants!.map((p, idx) => {
+                          const pDetails = getContactDisplayDetails(p.id);
+                          return (
+                            <div key={idx} className="flex items-center justify-between bg-[#111b21] p-2.5 rounded-xl border border-gray-800 text-xs">
+                              <div className="min-w-0 pr-2">
+                                <div className="font-bold text-white truncate">{pDetails.name}</div>
+                                <div className="text-[10px] font-mono text-emerald-400">{pDetails.number}</div>
+                              </div>
+                              {p.admin && (
+                                <span className="text-[9px] font-bold bg-[#25D366]/20 text-[#25D366] px-2 py-0.5 rounded border border-[#25D366]/30 uppercase shrink-0">
+                                  {p.admin}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <p className="text-xs text-gray-500 italic py-2 text-center">
+                          Group member details synced live from WhatsApp socket.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Chat Session Details & Labels Card */}
+              <div className="bg-[#202c33]/70 p-4 rounded-2xl border border-gray-800 space-y-3">
+                <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider block">
+                  Chat Tags & Labels
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedSession.labels && selectedSession.labels.length > 0 ? (
+                    selectedSession.labels.map(l => (
+                      <span key={l.id} className="text-xs px-2.5 py-1 rounded-full text-[#0b141a] font-bold flex items-center gap-1" style={{ backgroundColor: l.color }}>
+                        <Tag size={12} /> {l.name}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs text-gray-500 italic">No labels assigned to this chat.</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowChatLabelModal(true)}
+                  className="w-full mt-2 text-center text-xs text-[#25D366] hover:underline font-bold cursor-pointer"
+                >
+                  + Assign or Edit Labels
+                </button>
+              </div>
+            </div>
+
+            {/* Drawer Footer */}
+            <div className="p-4 border-t border-gray-800 bg-[#202c33] flex justify-end">
+              <button
+                onClick={() => setShowProfileDrawer(false)}
+                className="w-full bg-[#25D366] hover:bg-[#128c7e] text-[#0b141a] font-extrabold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+              >
+                Close Profile Info
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

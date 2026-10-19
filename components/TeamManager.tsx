@@ -130,7 +130,8 @@ const TeamManager: React.FC<TeamManagerProps> = ({ currentUser, apiBase }) => {
         <div>
           <h2 className="text-base sm:text-lg md:text-xl font-bold text-white flex items-center gap-2">
             <Users className="w-5 h-5 text-[#25D366] shrink-0" />
-            <span>Team Management</span>
+            {/* Instruction: Apply black text color (#000000) to Team Management title */}
+            <span style={{ color: '#000000' }}>Team Management</span>
           </h2>
           <p className="text-xs sm:text-sm text-gray-400 mt-1">Manage access roles and permissions for your team members.</p>
         </div>

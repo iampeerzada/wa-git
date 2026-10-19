@@ -332,7 +332,8 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, currentUser, set
         <div>
           <h2 className="text-base sm:text-lg md:text-xl font-bold text-white flex items-center gap-2">
             <Users className="w-5 h-5 text-[#25D366] shrink-0" />
-            <span>{currentUser.role === UserRole.RESELLER ? 'My Sub-Admins' : 'Global User Directory'}</span>
+            {/* Instruction: Apply black text color (#000000) to User Directory title */}
+            <span style={{ color: '#000000' }}>{currentUser.role === UserRole.RESELLER ? 'My Sub-Admins' : 'Global User Directory'}</span>
           </h2>
           <p className="text-[10px] sm:text-xs text-gray-500 mt-1 uppercase tracking-widest font-black">
             Total Management: {users.length} Account(s)

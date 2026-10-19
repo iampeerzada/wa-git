@@ -6157,66 +6157,112 @@ app.post('/api/chat/labels', authenticate, async (req, res) => {
 
 // --- CHAT ENDPOINTS ---
 
+// Instruction: Enhanced WhatsApp Profile & Group Metadata Resolver
+// Logic: Resolves contact names, push names, address book records, profile picture photos, status/about, and group participants
 app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => {
     const { instanceId, jid } = req.params;
     try {
-        // Instruction: Check group metadata dynamically for WhatsApp groups
-        // Logic: If remoteJid is a group (@g.us), fetch real subject from Baileys socket if not yet in chat_contacts
-        if (jid.endsWith('@g.us')) {
+        let resolvedName = null;
+        let imgUrl = null;
+        let aboutStatus = null;
+        let isGroup = jid.endsWith('@g.us');
+        let groupDesc = null;
+        let groupParticipants = [];
+
+        const inst = instancesMap.get(instanceId);
+
+        // 1. Group Metadata Resolution
+        if (isGroup) {
             const metaRes = await pool.query(
                 'SELECT group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
                 [instanceId, jid]
             );
             if (metaRes.rows.length > 0 && metaRes.rows[0].group_name) {
-                return res.json({ name: metaRes.rows[0].group_name });
+                resolvedName = metaRes.rows[0].group_name;
             }
 
-            const inst = instancesMap.get(instanceId);
             if (inst && inst.sock && inst.sock.groupMetadata) {
                 try {
                     const gMeta = await inst.sock.groupMetadata(jid);
-                    if (gMeta && gMeta.subject) {
-                        await pool.query(
-                            'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
-                            [instanceId, jid, gMeta.subject]
-                        ).catch(() => {});
-                        return res.json({ name: gMeta.subject });
+                    if (gMeta) {
+                        if (gMeta.subject) {
+                            resolvedName = gMeta.subject;
+                            await pool.query(
+                                'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                                [instanceId, jid, gMeta.subject]
+                            ).catch(() => {});
+                        }
+                        if (gMeta.desc) groupDesc = typeof gMeta.desc === 'string' ? gMeta.desc : (gMeta.desc.toString ? gMeta.desc.toString() : null);
+                        if (Array.isArray(gMeta.participants)) {
+                            groupParticipants = gMeta.participants.map(p => ({
+                                id: p.id,
+                                admin: p.admin || null
+                            }));
+                        }
                     }
                 } catch (gmErr) {}
             }
         }
 
-        // Instruction: Check user's saved contacts with country-code agnostic matching
-        // Logic: Matches both full number (919876543210) and last 10 digits (9876543210) so saved address book names always resolve
-        const cleanNumber = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-        if (cleanNumber) {
-            const contactRes = await pool.query(`
-                SELECT c.original as name 
-                FROM contacts c
-                JOIN contact_groups cg ON c.group_id = cg.id
-                WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = RIGHT($2, 10) OR RIGHT(c.number, 10) = RIGHT($2, 10))
-                LIMIT 1
-            `, [req.user.id, cleanNumber]);
+        // 2. Saved Address Book Contact Name Resolution
+        if (!resolvedName) {
+            const cleanNumber = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+            if (cleanNumber) {
+                const contactRes = await pool.query(`
+                    SELECT c.original as name 
+                    FROM contacts c
+                    JOIN contact_groups cg ON c.group_id = cg.id
+                    WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = RIGHT($2, 10) OR RIGHT(c.number, 10) = RIGHT($2, 10))
+                    LIMIT 1
+                `, [req.user.id, cleanNumber]);
 
-            if (contactRes.rows.length > 0 && contactRes.rows[0].name) {
-                return res.json({ name: contactRes.rows[0].name });
+                if (contactRes.rows.length > 0 && contactRes.rows[0].name) {
+                    resolvedName = contactRes.rows[0].name;
+                }
             }
         }
 
-        // Instruction: Check captured metadata in chat_contacts
-        // Logic: Returns push name or group name stored from incoming/history sync
-        const metaRes = await pool.query(
-            'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
-            [instanceId, jid]
-        );
+        // 3. Captured Push Name Resolution
+        if (!resolvedName) {
+            const metaRes = await pool.query(
+                'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
+                [instanceId, jid]
+            );
 
-        if (metaRes.rows.length > 0) {
-            const { push_name, group_name } = metaRes.rows[0];
-            if (group_name) return res.json({ name: group_name });
-            if (push_name) return res.json({ name: push_name });
+            if (metaRes.rows.length > 0) {
+                const { push_name, group_name } = metaRes.rows[0];
+                if (group_name) resolvedName = group_name;
+                else if (push_name) resolvedName = push_name;
+            }
         }
 
-        res.json({ name: null });
+        // 4. Live Profile Photo Fetching via Baileys Socket
+        if (inst && inst.sock && inst.sock.profilePictureUrl) {
+            try {
+                imgUrl = await inst.sock.profilePictureUrl(jid, 'image');
+            } catch (ppErr) {
+                // Profile photo restricted or not set
+            }
+        }
+
+        // 5. Live User Status/About Fetching via Baileys Socket
+        if (!isGroup && inst && inst.sock && inst.sock.fetchStatus) {
+            try {
+                const st = await inst.sock.fetchStatus(jid);
+                if (st && st.status) aboutStatus = st.status;
+            } catch (stErr) {}
+        }
+
+        res.json({ 
+            name: resolvedName,
+            jid: jid,
+            imgUrl: imgUrl,
+            status: aboutStatus,
+            isGroup: isGroup,
+            desc: groupDesc,
+            participantsCount: groupParticipants.length,
+            participants: groupParticipants
+        });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
