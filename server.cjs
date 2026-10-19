@@ -1179,8 +1179,16 @@ async function generateAiChatReply({ instanceId, from, incomingText }) {
 
 // --- WHATSAPP ENGINE ---
 const offlineAlerts = new Map();
+const reconnectAttemptsMap = new Map();
+const connectingInstancesMap = new Set();
 
 async function connectToWhatsApp(instanceId) {
+    if (connectingInstancesMap.has(instanceId)) {
+        console.log(`[Instance ${instanceId}] Connection already in progress, skipping duplicate attempt.`);
+        return;
+    }
+    connectingInstancesMap.add(instanceId);
+
     console.log(`[DEBUG] connectToWhatsApp called for ${instanceId}`);
     try {
         const sessionDir = path.join(__dirname, 'sessions', instanceId);
@@ -1203,7 +1211,7 @@ async function connectToWhatsApp(instanceId) {
             syncFullHistory: false,
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Desktop'),
-                        agent: process.env.PROXY_URL ? 
+            agent: process.env.PROXY_URL ? 
                 (process.env.PROXY_URL.startsWith('socks') ? 
                     new (require('socks-proxy-agent').SocksProxyAgent)(process.env.PROXY_URL) : 
                     new (require('https-proxy-agent').HttpsProxyAgent)(process.env.PROXY_URL)
@@ -1243,9 +1251,9 @@ async function connectToWhatsApp(instanceId) {
             }
 
             if (connection === 'close') {
+                connectingInstancesMap.delete(instanceId);
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 // Only require re-scanning QR (by deleting session) if explicitly logged out (401).
-                // Do not delete session on badSession (500) or other errors, as they often reconnect successfully.
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 
                 const instanceData = instancesMap.get(instanceId);
@@ -1255,6 +1263,7 @@ async function connectToWhatsApp(instanceId) {
                 io.emit('instances_updated', { instanceId });
 
                 if (!shouldReconnect) {
+                    reconnectAttemptsMap.delete(instanceId);
                     instancesMap.delete(instanceId);
                     await pool.query('UPDATE instances SET status = $1, qr_code = NULL, phone_number = NULL WHERE id = $2 RETURNING user_id', ['closed', instanceId])
                         .then(res => {
@@ -1273,7 +1282,6 @@ async function connectToWhatsApp(instanceId) {
                 } else {
                     const now = Date.now();
                     const lastAlert = offlineAlerts.get(instanceId) || 0;
-                    // Only send offline alert once every 1 hour (3600000 ms) per instance
                     if (now - lastAlert > 3600000) {
                         offlineAlerts.set(instanceId, now);
                         pool.query('SELECT user_id FROM instances WHERE id = $1', [instanceId]).then(res => {
@@ -1283,10 +1291,16 @@ async function connectToWhatsApp(instanceId) {
                             }
                         }).catch(() => {});
                     }
-                    setTimeout(() => connectToWhatsApp(instanceId), 5000);
+                    // Exponential backoff reconnect delay (from 5s up to max 60s)
+                    const attempts = (reconnectAttemptsMap.get(instanceId) || 0) + 1;
+                    reconnectAttemptsMap.set(instanceId, attempts);
+                    const backoffMs = Math.min(5000 * Math.pow(1.5, Math.min(attempts, 6)), 60000);
+                    console.log(`[Instance ${instanceId}] Reconnecting in ${(backoffMs/1000).toFixed(1)}s (Attempt #${attempts})...`);
+                    setTimeout(() => connectToWhatsApp(instanceId), backoffMs);
                 }
             } else if (connection === 'open') {
-                // We intentionally do NOT delete offlineAlerts here to prevent spam if the connection is flapping
+                connectingInstancesMap.delete(instanceId);
+                reconnectAttemptsMap.delete(instanceId);
                 const phone = sock.user && sock.user.id ? sock.user.id.split(':')[0] : instanceId;
                 instancesMap.set(instanceId, { sock, status: 'open', qr: null, phone });
                 await pool.query('UPDATE instances SET status = $1, phone_number = $2, qr_code = NULL WHERE id = $3', ['open', phone, instanceId]).catch(e => console.error('Open State Update Error:', e.message));
@@ -7081,11 +7095,16 @@ async function startup() {
         console.log(`[iFastX] Restoring ${result.rows.length} active sessions...`);
 
 
+        // Instruction: Stagger WhatsApp instance session restorations
+        // Logic: Restores active sessions with incremental 1.5s delays to keep Node.js CPU usage low and stable
+        let staggerDelay = 0;
         for (const row of result.rows) {
             if (row.provider === 'meta') {
                 instancesMap.set(row.id, { status: 'open', phone: row.meta_phone_number_id, provider: 'meta', metaAccessToken: row.meta_access_token, metaPhoneNumberId: row.meta_phone_number_id });
             } else {
-                connectToWhatsApp(row.id);
+                const targetId = row.id;
+                setTimeout(() => connectToWhatsApp(targetId), staggerDelay);
+                staggerDelay += 1500;
             }
         }
 

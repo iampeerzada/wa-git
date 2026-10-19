@@ -22,5 +22,6 @@ export default defineConfig({
     port: 3000,
     strictPort: true,
     host: '0.0.0.0', // Instruction: Bind dev server to 0.0.0.0 for container & preview proxy compatibility
+    hmr: false, // Instruction: Disable Vite HMR WebSockets to prevent "WebSocket closed without opened" errors in iframe environments
   }
 });
