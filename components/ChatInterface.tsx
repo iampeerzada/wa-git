@@ -48,32 +48,6 @@ const getCleanPhone = (jid: string) => {
   return jid.split('@')[0].replace(/[^0-9]/g, '');
 };
 
-// Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
-// Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions or TDZ errors
-const safeParseDate = (raw: string | number | undefined | null): Date => {
-  if (!raw) return new Date();
-  if (typeof raw === 'number') {
-    return new Date(raw > 1e11 ? raw : raw * 1000);
-  }
-  const str = String(raw).trim();
-  if (/^\d+$/.test(str)) {
-    const num = Number(str);
-    return new Date(num > 1e11 ? num : num * 1000);
-  }
-  // Try direct parse first (handles ISO strings with timezone offset)
-  let d = new Date(str);
-  if (!isNaN(d.getTime())) return d;
-
-  // Handle SQL datetime format like "2026-10-19 16:20:00"
-  const formatted = str.replace(' ', 'T');
-  d = new Date(formatted);
-  if (!isNaN(d.getTime())) return d;
-
-  return new Date();
-};
-
-
-
 const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
   const cleanPhone = getCleanPhone(jid);
   if (!cleanPhone) return;
@@ -426,11 +400,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const targetJid = session.remoteJid;
     currentActiveJidRef.current = targetJid;
     setSelectedSession(session);
-    if (selectedInstanceId) {
-      try {
-        localStorage.setItem(`wa_last_active_${selectedInstanceId}`, session.remoteJid);
-      } catch(e) {}
-    }
 
     // Instant zero-delay cached messages display if available
     const cacheKey = `${selectedInstanceId}_${targetJid}`;
@@ -744,7 +713,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
 
   // Instruction: Synchronous instance shifting handler
-  // Logic: Instantly updates refs, loads instance session cache, and auto-restores last selected thread for this instance without wiping sessions
+  // Logic: Instantly updates activeInstanceRef, clears old session and message state to prevent cross-instance data bleeding, and checks local cache immediately
   const handleInstanceChange = (nextId: string) => {
     activeInstanceRef.current = nextId;
     selectedInstanceIdRef.current = nextId;
@@ -754,38 +723,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     currentActiveJidRef.current = null;
     localStorage.setItem('wa_chat_selected_instance', nextId);
 
-    const cachedMem = sessionsCacheRef.current[nextId];
-    if (cachedMem && cachedMem.length > 0) {
-      setSessions(cachedMem);
+    if (nextId && sessionsCacheRef.current[nextId]?.length) {
+      setSessions(sessionsCacheRef.current[nextId]);
       setIsLoadingSessions(false);
-      const lastActiveJid = localStorage.getItem(`wa_last_active_${nextId}`);
-      if (lastActiveJid) {
-        const found = cachedMem.find(s => s.remoteJid === lastActiveJid);
-        if (found) setSelectedSession(found);
-      }
     } else {
-      try {
-        const cachedStorage = sessionStorage.getItem(`wa_cached_sessions_${nextId}`);
-        if (cachedStorage) {
-          const parsed = JSON.parse(cachedStorage);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setSessions(parsed);
-            sessionsCacheRef.current[nextId] = parsed;
-            setIsLoadingSessions(false);
-            const lastActiveJid = localStorage.getItem(`wa_last_active_${nextId}`);
-            if (lastActiveJid) {
-              const found = parsed.find((s: any) => s.remoteJid === lastActiveJid);
-              if (found) setSelectedSession(found);
-            }
-          } else {
-            setIsLoadingSessions(true);
-          }
-        } else {
-          setIsLoadingSessions(true);
-        }
-      } catch(e) {
-        setIsLoadingSessions(true);
-      }
+      setSessions([]);
+      setIsLoadingSessions(true);
     }
   };
 
@@ -795,37 +738,33 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
     activeInstanceRef.current = selectedInstanceId;
     selectedInstanceIdRef.current = selectedInstanceId;
+    setSelectedSession(null);
+    setMessages([]);
+    currentActiveJidRef.current = null;
 
-    const cachedMem = sessionsCacheRef.current[selectedInstanceId];
-    if (cachedMem && cachedMem.length > 0) {
-      setSessions(cachedMem);
+    // Check in-memory cache first for 0ms load
+    if (sessionsCacheRef.current[selectedInstanceId]?.length) {
+      setSessions(sessionsCacheRef.current[selectedInstanceId]);
       setIsLoadingSessions(false);
-      const lastActiveJid = localStorage.getItem(`wa_last_active_${selectedInstanceId}`);
-      if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== selectedInstanceId)) {
-        const found = cachedMem.find(s => s.remoteJid === lastActiveJid);
-        if (found) setSelectedSession(found);
-      }
     } else {
       try {
-        const cachedStorage = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
-        if (cachedStorage) {
-          const parsed = JSON.parse(cachedStorage);
+        const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
           if (Array.isArray(parsed) && parsed.length > 0) {
             setSessions(parsed);
             sessionsCacheRef.current[selectedInstanceId] = parsed;
             setIsLoadingSessions(false);
-            const lastActiveJid = localStorage.getItem(`wa_last_active_${selectedInstanceId}`);
-            if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== selectedInstanceId)) {
-              const found = parsed.find((s: any) => s.remoteJid === lastActiveJid);
-              if (found) setSelectedSession(found);
-            }
           } else {
+            setSessions([]);
             setIsLoadingSessions(true);
           }
         } else {
+          setSessions([]);
           setIsLoadingSessions(true);
         }
       } catch(e) {
+        setSessions([]);
         setIsLoadingSessions(true);
       }
     }
@@ -836,7 +775,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
 
   // Instruction: Dynamic contact/group profile metadata fetcher
-  // Logic: Fetches verified group subjects or contact names on demand from active backend server
+  // Logic: Fetches verified group subjects or contact names on demand from the backend socket and caches them
   const fetchProfileInfo = async (jid: string, targetInstId?: string) => {
       const instId = targetInstId || activeInstanceRef.current || selectedInstanceId;
       if (!instId || !jid || profileCache[jid]?.name) return;
@@ -860,7 +799,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       }
   };
 
-  // Fetch sessions from active backend server with race-condition & stale-instance protection
+  // Fetch sessions from server with race-condition & stale-instance protection
   useEffect(() => {
     if (!selectedInstanceId) return;
 
@@ -876,7 +815,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             'X-API-Key': currentUser.apiKey
           }
         });
-
         if (res.ok) {
           const data = await res.json();
           // Ensure we only update state if the user is still on this instance
@@ -887,18 +825,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               sessionStorage.setItem(`wa_cached_sessions_${currentInstId}`, JSON.stringify(data));
             } catch(e) {}
 
-            // Auto-restore last selected active session for this instance
-            const lastActiveJid = localStorage.getItem(`wa_last_active_${currentInstId}`);
-            if (lastActiveJid && (!selectedSessionRef.current || (selectedSessionRef.current as any).instance_id !== currentInstId)) {
-              const found = data.find((s: any) => s.remoteJid === lastActiveJid);
-              if (found) setSelectedSession(found);
-            }
-
             const initialProfiles: Record<string, { name?: string, imgUrl?: string }> = {};
             data.forEach((session: any) => {
               if (session.contactName || session.pushName) {
                 initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
               } else if (session.remoteJid && session.remoteJid.endsWith('@g.us')) {
+                // Instruction: Proactively fetch group subject metadata for group sessions
+                // Logic: Resolves real group names from backend Baileys socket so groups never display raw numerical IDs
                 fetchProfileInfo(session.remoteJid, currentInstId);
               }
             });
@@ -908,8 +841,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
       } catch (err: any) {
-        if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
-          console.error('Failed to fetch sessions from backend server', err);
+        if (err.name !== 'AbortError') {
+          console.error('Failed to fetch sessions', err);
         }
       } finally {
         if (activeInstanceRef.current === currentInstId) {
@@ -969,7 +902,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             'X-API-Key': currentUser.apiKey
           }
         });
-
         if (res.ok) {
           const data = await res.json();
           messagesCacheRef.current[cacheKey] = data;
@@ -982,8 +914,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           }
         }
       } catch (err: any) {
-        if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
-          console.error('Failed to fetch messages from backend server', err);
+        if (err.name !== 'AbortError') {
+          console.error('Failed to fetch messages', err);
         }
       } finally {
         if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
@@ -1237,18 +1169,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const now = currentTimeTick;
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
-    const filtered = sessions.filter(s => {
+    return sessions.filter(s => {
       if (!s.remoteJid || s.remoteJid.includes('status@broadcast')) return false;
 
-      // 1. Search filter matching (Name, PushName, Message text, or Phone number digits)
+      // 1. Search filter matching (Name, Message text, or Phone number digits)
       if (searchLower) {
         const jidLower = s.remoteJid.toLowerCase();
         const nameLower = s.contactName ? s.contactName.toLowerCase() : '';
-        const pushLower = (s as any).pushName ? (s as any).pushName.toLowerCase() : '';
         const msgLower = s.lastMessage?.text ? s.lastMessage.text.toLowerCase() : '';
         const cleanPhone = getCleanPhone(s.remoteJid);
 
-        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || pushLower.includes(searchLower) || msgLower.includes(searchLower);
+        const matchesText = jidLower.includes(searchLower) || nameLower.includes(searchLower) || msgLower.includes(searchLower);
         const matchesDigits = Boolean(cleanSearchDigits && (
           cleanPhone.includes(cleanSearchDigits) ||
           (cleanSearchDigits.length >= 3 && cleanPhone.endsWith(cleanSearchDigits)) ||
@@ -1281,18 +1212,31 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
       return true;
     });
-
-    // Instruction: Priority sorting for chat sessions list (Unread & Newest chats first, past chats follow after)
-    // Logic: Unread chats stay at the top, followed by most recent activity timestamp, keeping all older history accessible and instantly searchable
-    return filtered.sort((a, b) => {
-      if (a.unreadCount > 0 && b.unreadCount <= 0) return -1;
-      if (b.unreadCount > 0 && a.unreadCount <= 0) return 1;
-
-      const tsA = a.lastMessage?.timestamp ? safeParseDate(a.lastMessage.timestamp).getTime() : 0;
-      const tsB = b.lastMessage?.timestamp ? safeParseDate(b.lastMessage.timestamp).getTime() : 0;
-      return tsB - tsA;
-    });
   }, [sessions, searchTerm, selectedLabelFilter, chatFilter, currentTimeTick]);
+
+  // Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
+  // Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions
+  const safeParseDate = (raw: string | number | undefined | null): Date => {
+    if (!raw) return new Date();
+    if (typeof raw === 'number') {
+      return new Date(raw > 1e11 ? raw : raw * 1000);
+    }
+    const str = String(raw).trim();
+    if (/^\d+$/.test(str)) {
+      const num = Number(str);
+      return new Date(num > 1e11 ? num : num * 1000);
+    }
+    // Try direct parse first (handles ISO strings with timezone offset, e.g. 2026-10-19T04:20:00.000Z)
+    let d = new Date(str);
+    if (!isNaN(d.getTime())) return d;
+
+    // Handle SQL datetime format like "2026-10-19 16:20:00"
+    const formatted = str.replace(' ', 'T');
+    d = new Date(formatted);
+    if (!isNaN(d.getTime())) return d;
+
+    return new Date();
+  };
 
   // Instruction: Format timestamp to localized 12-hour time (e.g., 04:20 PM)
   // Logic: Parses raw timestamp safely and returns formatted hour:minute

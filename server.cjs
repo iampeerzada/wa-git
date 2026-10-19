@@ -6191,26 +6191,44 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
     try {
         const { instanceId } = req.params;
 
-        // Instruction: Fetch sessions, unread counts, inbound activity, contacts, address book, and labels concurrently
-        // Logic: Replaces heavy SQL regex joins with parallel fast indexed queries mapped in memory (3ms response time)
-        const [sessionsRes, unreadRes, inboundRes, labelsRes, contactsRes, addressBookRes] = await Promise.all([
+        // Instruction: Fetch distinct sessions, unread counts, and labels concurrently with full name resolution
+        // Logic: Joins chat_contacts and address book contacts so names and groups display correctly instead of raw IDs
+        const [sessionsRes, unreadRes, inboundRes, labelsRes] = await Promise.all([
             pool.query(`
-                SELECT * FROM (
-                    SELECT DISTINCT ON (m.remote_jid)
-                        m.id,
-                        m.instance_id,
-                        m.remote_jid,
-                        m.from_me,
-                        m.text,
-                        m.media_url,
-                        m.media_type,
-                        m.status,
-                        m.timestamp
-                    FROM chat_messages m
-                    WHERE m.instance_id = $1
-                    ORDER BY m.remote_jid, m.timestamp DESC
-                ) sub
-                ORDER BY sub.timestamp DESC
+                SELECT DISTINCT ON (m.remote_jid)
+                    m.id,
+                    m.instance_id,
+                    m.remote_jid,
+                    m.from_me,
+                    m.text,
+                    m.media_url,
+                    m.media_type,
+                    m.status,
+                    m.timestamp,
+                    COALESCE(
+                        cc.group_name, 
+                        cc.push_name,
+                        (
+                            SELECT c.original 
+                            FROM contacts c 
+                            JOIN contact_groups cg ON c.group_id = cg.id 
+                            WHERE cg.user_id = (SELECT user_id FROM instances WHERE id = $1 LIMIT 1)
+                              AND (
+                                  c.number = regexp_replace(split_part(m.remote_jid, '@', 1), '\\D', '', 'g')
+                                  OR RIGHT(c.number, 10) = RIGHT(regexp_replace(split_part(m.remote_jid, '@', 1), '\\D', '', 'g'), 10)
+                              )
+                            LIMIT 1
+                        )
+                    ) AS contact_name,
+                    cc.push_name,
+                    cc.group_name
+                FROM chat_messages m
+                LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND (
+                    cc.jid = m.remote_jid 
+                    OR split_part(split_part(cc.jid, '@', 1), ':', 1) = split_part(split_part(m.remote_jid, '@', 1), ':', 1)
+                )
+                WHERE m.instance_id = $1
+                ORDER BY m.remote_jid, m.timestamp DESC
             `, [instanceId]),
             pool.query(`
                 SELECT remote_jid, COUNT(*) as count
@@ -6229,17 +6247,6 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
                 FROM chat_session_labels sl
                 JOIN chat_labels l ON l.id = sl.label_id
                 WHERE sl.instance_id = $1
-            `, [instanceId]),
-            pool.query(`
-                SELECT jid, push_name, group_name
-                FROM chat_contacts
-                WHERE instance_id = $1
-            `, [instanceId]),
-            pool.query(`
-                SELECT c.original, c.number
-                FROM contacts c
-                JOIN contact_groups cg ON c.group_id = cg.id
-                WHERE cg.user_id = (SELECT user_id FROM instances WHERE id = $1 LIMIT 1)
             `, [instanceId])
         ]);
 
@@ -6263,37 +6270,10 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
             labelsMap.get(l.remote_jid).push({ id: l.id, name: l.name, color: l.color });
         }
 
-        const contactsMap = new Map();
-        for (const c of contactsRes.rows) {
-            if (c.jid) {
-                const cleanNum = c.jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-                const info = { pushName: c.push_name, groupName: c.group_name, name: c.group_name || c.push_name };
-                contactsMap.set(c.jid, info);
-                if (cleanNum) contactsMap.set(cleanNum, info);
-            }
-        }
-
-        const addressBookMap = new Map();
-        for (const c of addressBookRes.rows) {
-            if (c.number) {
-                const digits = c.number.replace(/\D/g, '');
-                if (digits) {
-                    addressBookMap.set(digits, c.original);
-                    if (digits.length >= 10) addressBookMap.set(digits.slice(-10), c.original);
-                }
-            }
-        }
-
         const now = Date.now();
         const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
         const sessions = sessionsRes.rows.map(row => {
-            const rawJid = row.remote_jid || '';
-            const cleanNumber = rawJid.split('@')[0].split(':')[0].replace(/\D/g, '');
-            const contactInfo = contactsMap.get(rawJid) || contactsMap.get(cleanNumber);
-            const addressName = addressBookMap.get(cleanNumber) || addressBookMap.get(cleanNumber.slice(-10));
-            const contactName = contactInfo?.name || addressName || null;
-
             const lastInbound = inboundMap.get(row.remote_jid) || null;
             let isWindowActive = false;
             let remainingMs = 0;
@@ -6307,11 +6287,8 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
             }
 
             return {
-                instance_id: row.instance_id,
                 remoteJid: row.remote_jid,
-                contactName: contactName,
-                pushName: contactInfo?.pushName || null,
-                groupName: contactInfo?.groupName || null,
+                contactName: row.contact_name || row.group_name || row.push_name || null,
                 unreadCount: unreadMap.get(row.remote_jid) || 0,
                 lastInboundTimestamp: lastInbound ? new Date(lastInbound).toISOString() : null,
                 isWindowActive,
