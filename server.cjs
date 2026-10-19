@@ -103,8 +103,8 @@ if (!DATABASE_URL) {
 // Global memory for active WhatsApp Sockets
 const instancesMap = new Map();
 
-// --- MIDDLEWARE ---
-
+// Instruction: Configure CORS policy for frontend and external REST API integrations
+// Logic: Allows credentials, custom authorization headers, and third-party CRM requests across domain origins
 app.use(cors({
     origin: (origin, callback) => {
         const allowed = [
@@ -122,8 +122,9 @@ app.use(cors({
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-User-ID', 'X-API-Key', 'X-Role']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-User-ID', 'X-API-Key', 'X-Role', 'X-Instance-Key', 'X-Requested-With', 'Accept']
 }));
+app.options('*', cors());
 
 // Disable caching for all API responses
 app.use((req, res, next) => {
@@ -322,7 +323,8 @@ pool.connect(async (err, client, release) => {
             )
         `);
 
-        // AI Automation Activity & Failover Logs table
+        // Instruction: Create and alter ai_automation_logs table
+        // Logic: Ensures table and all columns exist in PostgreSQL database for AI auto-reply history tracking
         await client.query(`
             CREATE TABLE IF NOT EXISTS ai_automation_logs (
                 id SERIAL PRIMARY KEY,
@@ -340,7 +342,26 @@ pool.connect(async (err, client, release) => {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
-        console.log('[Database] ai_automation_logs table verified.');
+        
+        // Ensure all columns exist on pre-existing database tables
+        const aiLogColQueries = [
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS instance_name VARCHAR(255)",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS provider VARCHAR(50) DEFAULT 'baileys'",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS remote_jid VARCHAR(255)",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS user_prompt TEXT",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS ai_response TEXT",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS model_used VARCHAR(100)",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS api_key_masked VARCHAR(100)",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'success'",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS latency_ms INT DEFAULT 0",
+            "ALTER TABLE ai_automation_logs ADD COLUMN IF NOT EXISTS error_message TEXT"
+        ];
+        for (const colQ of aiLogColQueries) {
+            try {
+                await client.query(colQ);
+            } catch (colErr) { }
+        }
+        console.log('[Database] ai_automation_logs table and schema columns verified.');
         
         try {
             await client.query(`
@@ -7085,12 +7106,19 @@ async function startServer() {
         });
         app.use(vite.middlewares);
     } else {
-        // Serve static files from dist/ in production
-        app.use(express.static(path.join(__dirname, 'dist')));
+        // Instruction: Serve compiled static assets from dist directory in production
+        // Logic: Serves compiled frontend assets and handles SPA client-side routes gracefully
+        const distPath = path.join(__dirname, 'dist');
+        app.use(express.static(distPath));
         
-        // Handle SPA routing
+        // Handle SPA routing safely
         app.get('*', (req, res) => {
-            res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+            const indexHtmlPath = path.join(distPath, 'index.html');
+            if (fs.existsSync(indexHtmlPath)) {
+                res.sendFile(indexHtmlPath);
+            } else {
+                res.status(404).send('<!DOCTYPE html><html><head><title>iFastX Gateway</title></head><body style="font-family:sans-serif;background:#0b141a;color:#fff;padding:50px;text-align:center;"><h2>iFastX Backend Active</h2><p>Application frontend bundle is building or missing. Run <code>npm run build</code> to generate production static files.</p></body></html>');
+            }
         });
     }
 

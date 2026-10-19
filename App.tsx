@@ -317,11 +317,11 @@ const App: React.FC = () => {
       };
 
       // Instruction: Fetch active WhatsApp instances from backend
-      // Logic: Queries /api/instances endpoint with timeout controller and handles network errors gracefully
+      // Logic: Queries /api/instances endpoint with extended 25s timeout controller to prevent false network aborts on cold starts
       const fetchInstances = async () => {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 8000);
+          const timeoutId = setTimeout(() => controller.abort(), 25000);
           const instRes = await fetch(`${API_BASE}/api/instances?_t=${Date.now()}`, { headers, signal: controller.signal });
           clearTimeout(timeoutId);
           if (instRes.ok) {
