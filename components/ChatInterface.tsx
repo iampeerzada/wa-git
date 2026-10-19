@@ -66,6 +66,52 @@ const openInWhatsAppWeb = (jid: string, prefillMsg = '') => {
   }
 };
 
+// Instruction: Resolve relative media paths (/uploads/..., /api/...) with full backend URL
+// Logic: Prevents media from 404ing against frontend origin and getting corrupted with HTML error pages
+const resolveMediaUrlHelper = (url: string | undefined | null, apiBase: string): string => {
+  if (!url) return '';
+  if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  const base = apiBase.replace(/\/+$/, '');
+  const cleanPath = url.startsWith('/') ? url : `/${url}`;
+  return `${base}${cleanPath}`;
+};
+
+// Instruction: Safe media downloader via Blob
+// Logic: Downloads images, audio, video, documents directly into user's downloads folder without iframe sandbox blocking or corruption
+const downloadMediaBlob = async (url: string, filename: string, apiBase: string) => {
+  try {
+    const fullUrl = resolveMediaUrlHelper(url, apiBase);
+    const downloadUrl = fullUrl.includes('/api/meta/media') 
+      ? `${fullUrl}${fullUrl.includes('?') ? '&' : '?'}download=1` 
+      : fullUrl;
+
+    const res = await fetch(downloadUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objectUrl = window.URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename || url.split('/').pop()?.split('?')[0] || 'whatsapp_media';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => window.URL.revokeObjectURL(objectUrl), 2000);
+  } catch (err) {
+    console.error('[Media Download] Fallback trigger:', err);
+    const fullUrl = resolveMediaUrlHelper(url, apiBase);
+    const a = document.createElement('a');
+    a.href = fullUrl;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.download = filename || 'whatsapp_media';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+};
+
 interface ParsedFlowData {
   title: string;
   fields: Array<{ key: string; value: string }>;
@@ -277,6 +323,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   // In-memory instant caches for zero-delay UI
   const sessionsCacheRef = useRef<Record<string, ChatSession[]>>({});
   const messagesCacheRef = useRef<Record<string, ChatMessage[]>>({});
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const activeInstanceRef = useRef(selectedInstanceId);
   
   // Label State
   const [labels, setLabels] = useState<ChatLabel[]>([]);
@@ -323,7 +371,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   const soundEnabledRef = useRef(soundEnabled);
   const currentActiveJidRef = useRef<string | null>(null);
   
-  useEffect(() => { selectedInstanceIdRef.current = selectedInstanceId; }, [selectedInstanceId]);
+  // Instruction: Sync refs synchronously on instance change
+  // Logic: Prevents socket message events and fetch callbacks from reading stale instance data
+  useEffect(() => { 
+    selectedInstanceIdRef.current = selectedInstanceId; 
+    activeInstanceRef.current = selectedInstanceId;
+  }, [selectedInstanceId]);
   useEffect(() => { selectedSessionRef.current = selectedSession; }, [selectedSession]);
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
@@ -520,8 +573,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
               ...prev.filter(s => s.remoteJid !== existing.remoteJid)
             ];
           } else {
+            // Instruction: Initialize new incoming/outgoing conversation in session list
+            // Logic: Populates contactName from profile cache or pushName so real name displays immediately
+            const inferredName = profileCache[msg.remoteJid]?.name || (msg as any).pushName || null;
             return [{
               remoteJid: msg.remoteJid,
+              contactName: inferredName,
               lastMessage: msg,
               unreadCount: matchesCurrent ? 0 : 1,
               lastInboundTimestamp: !msg.fromMe ? msg.timestamp : null,
@@ -655,10 +712,32 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     fetchTemplatesForInstance();
   }, [selectedInstanceId, isMetaInstance, propTemplates, apiBase, currentUser.id, currentUser.apiKey]);
 
+  // Instruction: Synchronous instance shifting handler
+  // Logic: Instantly updates activeInstanceRef, clears old session and message state to prevent cross-instance data bleeding, and checks local cache immediately
+  const handleInstanceChange = (nextId: string) => {
+    activeInstanceRef.current = nextId;
+    selectedInstanceIdRef.current = nextId;
+    setSelectedInstanceId(nextId);
+    setSelectedSession(null);
+    setMessages([]);
+    currentActiveJidRef.current = null;
+    localStorage.setItem('wa_chat_selected_instance', nextId);
+
+    if (nextId && sessionsCacheRef.current[nextId]?.length) {
+      setSessions(sessionsCacheRef.current[nextId]);
+      setIsLoadingSessions(false);
+    } else {
+      setSessions([]);
+      setIsLoadingSessions(true);
+    }
+  };
+
   // Reset active session and messages immediately when instance changes to avoid showing previous instance data
   useEffect(() => {
     if (!selectedInstanceId) return;
 
+    activeInstanceRef.current = selectedInstanceId;
+    selectedInstanceIdRef.current = selectedInstanceId;
     setSelectedSession(null);
     setMessages([]);
     currentActiveJidRef.current = null;
@@ -666,8 +745,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     // Check in-memory cache first for 0ms load
     if (sessionsCacheRef.current[selectedInstanceId]?.length) {
       setSessions(sessionsCacheRef.current[selectedInstanceId]);
+      setIsLoadingSessions(false);
     } else {
-      // Check sessionStorage fallback
       try {
         const cached = sessionStorage.getItem(`wa_cached_sessions_${selectedInstanceId}`);
         if (cached) {
@@ -675,17 +754,50 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           if (Array.isArray(parsed) && parsed.length > 0) {
             setSessions(parsed);
             sessionsCacheRef.current[selectedInstanceId] = parsed;
+            setIsLoadingSessions(false);
           } else {
             setSessions([]);
+            setIsLoadingSessions(true);
           }
         } else {
           setSessions([]);
+          setIsLoadingSessions(true);
         }
       } catch(e) {
         setSessions([]);
+        setIsLoadingSessions(true);
       }
     }
   }, [selectedInstanceId]);
+
+  // Instruction: Contact profile and group metadata cache
+  // Logic: Stores contact names, avatars, and group subjects in React state for instant synchronous lookup
+  const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
+
+  // Instruction: Dynamic contact/group profile metadata fetcher
+  // Logic: Fetches verified group subjects or contact names on demand from the backend socket and caches them
+  const fetchProfileInfo = async (jid: string, targetInstId?: string) => {
+      const instId = targetInstId || activeInstanceRef.current || selectedInstanceId;
+      if (!instId || !jid || profileCache[jid]?.name) return;
+      
+      try {
+          const res = await fetch(`${apiBase}/api/chat/profile/${instId}/${jid}`, {
+             headers: {
+                'X-User-ID': currentUser.id,
+                'X-API-Key': currentUser.apiKey
+             }
+          });
+          if (res.ok) {
+              const data = await res.json();
+              if (data?.name || data?.imgUrl) {
+                setProfileCache(prev => ({ ...prev, [jid]: data }));
+                setSessions(prev => prev.map(s => (s.remoteJid === jid && !s.contactName) ? { ...s, contactName: data.name } : s));
+              }
+          }
+      } catch (e) {
+          // Ignore network errors
+      }
+  };
 
   // Fetch sessions from server with race-condition & stale-instance protection
   useEffect(() => {
@@ -706,7 +818,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         if (res.ok) {
           const data = await res.json();
           // Ensure we only update state if the user is still on this instance
-          if (selectedInstanceIdRef.current === currentInstId) {
+          if (activeInstanceRef.current === currentInstId) {
             setSessions(data);
             sessionsCacheRef.current[currentInstId] = data;
             try {
@@ -717,6 +829,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             data.forEach((session: any) => {
               if (session.contactName || session.pushName) {
                 initialProfiles[session.remoteJid] = { name: session.contactName || session.pushName };
+              } else if (session.remoteJid && session.remoteJid.endsWith('@g.us')) {
+                // Instruction: Proactively fetch group subject metadata for group sessions
+                // Logic: Resolves real group names from backend Baileys socket so groups never display raw numerical IDs
+                fetchProfileInfo(session.remoteJid, currentInstId);
               }
             });
             if (Object.keys(initialProfiles).length > 0) {
@@ -728,6 +844,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         if (err.name !== 'AbortError') {
           console.error('Failed to fetch sessions', err);
         }
+      } finally {
+        if (activeInstanceRef.current === currentInstId) {
+          setIsLoadingSessions(false);
+        }
       }
     };
 
@@ -737,29 +857,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       controller.abort();
     };
   }, [selectedInstanceId, currentUser.id, currentUser.apiKey, apiBase]);
-
-  const [profileCache, setProfileCache] = useState<Record<string, { name?: string, imgUrl?: string }>>({});
-
-  const fetchProfileInfo = async (jid: string) => {
-      if (profileCache[jid]) return;
-      
-      try {
-          const res = await fetch(`${apiBase}/api/chat/profile/${selectedInstanceId}/${jid}`, {
-             headers: {
-                'X-User-ID': currentUser.id,
-                'X-API-Key': currentUser.apiKey
-             }
-          });
-          if (res.ok) {
-              const data = await res.json();
-              if (data?.name || data?.imgUrl) {
-                setProfileCache(prev => ({ ...prev, [jid]: data }));
-              }
-          }
-      } catch (e) {
-          // Ignore errors
-      }
-  };
 
   // Fetch messages for selected session with abort controller & cache-bleed protection
   useEffect(() => {
@@ -811,8 +908,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           try {
             sessionStorage.setItem(`wa_msgs_${cacheKey}`, JSON.stringify(data));
           } catch(e) {}
-          // Ensure we don't display stale response if user switched to another contact
-          if (currentActiveJidRef.current === targetJid) {
+          // Ensure we don't display stale response if user switched to another contact or instance
+          if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
             setMessages(data);
           }
         }
@@ -821,7 +918,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           console.error('Failed to fetch messages', err);
         }
       } finally {
-        if (currentActiveJidRef.current === targetJid) {
+        if (currentActiveJidRef.current === targetJid && activeInstanceRef.current === selectedInstanceId) {
           setIsLoading(false);
         }
       }
@@ -1117,20 +1214,46 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     });
   }, [sessions, searchTerm, selectedLabelFilter, chatFilter, currentTimeTick]);
 
-  const formatTime = (timestamp: string) => {
-    const dateStr = String(timestamp).trim();
-    const isoDate = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T');
-    const utcDateStr = isoDate.endsWith('Z') ? isoDate : isoDate + 'Z';
-    const date = new Date(utcDateStr);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Instruction: Robust date parser supporting numeric timestamps, ISO strings, and standard date strings
+  // Logic: Safely converts any valid timestamp format into a JavaScript Date object, avoiding timezone corruptions
+  const safeParseDate = (raw: string | number | undefined | null): Date => {
+    if (!raw) return new Date();
+    if (typeof raw === 'number') {
+      return new Date(raw > 1e11 ? raw : raw * 1000);
+    }
+    const str = String(raw).trim();
+    if (/^\d+$/.test(str)) {
+      const num = Number(str);
+      return new Date(num > 1e11 ? num : num * 1000);
+    }
+    // Try direct parse first (handles ISO strings with timezone offset, e.g. 2026-10-19T04:20:00.000Z)
+    let d = new Date(str);
+    if (!isNaN(d.getTime())) return d;
+
+    // Handle SQL datetime format like "2026-10-19 16:20:00"
+    const formatted = str.replace(' ', 'T');
+    d = new Date(formatted);
+    if (!isNaN(d.getTime())) return d;
+
+    return new Date();
   };
 
-  const formatDisplayJid = (jid: string) => {
+  // Instruction: Format timestamp to localized 12-hour time (e.g., 04:20 PM)
+  // Logic: Parses raw timestamp safely and returns formatted hour:minute
+  const formatTime = (timestamp: string | number) => {
+    const d = safeParseDate(timestamp);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  // Instruction: Format JID into friendly phone number, group name, or contact label
+  // Logic: Formats numbers as international phone numbers (+91 98765 43210) and handles group JIDs
+  const formatDisplayJid = (jid: string, fallbackName?: string | null) => {
+    if (fallbackName && fallbackName.trim()) return fallbackName;
     if (!jid) return 'Unknown';
     
     // Handle Groups
     if (jid.includes('@g.us')) {
-        return `Group: ${jid.split('@')[0]}`;
+        return fallbackName || `Group (${jid.split('@')[0].slice(-6)})`;
     }
     
     // Handle Broadcasts
@@ -1139,17 +1262,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     }
     
     // Handle Users (Standard JID or LID)
-    const id = jid.split('@')[0].split(':')[0];
+    const id = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
     
-    // Format standard phone numbers (7 to 13 digits) with +
-    if (/^\d+$/.test(id)) {
-        if (id.length >= 7 && id.length <= 13) {
+    if (id) {
+        if (id.length === 10) {
+            return `+91 ${id.slice(0, 5)} ${id.slice(5)}`;
+        } else if (id.length === 12 && id.startsWith('91')) {
+            return `+91 ${id.slice(2, 7)} ${id.slice(7)}`;
+        } else if (id.length >= 7 && id.length <= 15) {
             return `+${id}`;
         }
-        return `WhatsApp ID: ${id}`;
+        return `+${id}`;
     }
     
-    return id;
+    return jid.split('@')[0];
   };
 
   const handleExtract24hActiveNumbers = () => {
@@ -1185,28 +1311,46 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     }
   };
 
+  // Instruction: Group chat messages into ordered calendar day buckets
+  // Logic: Normalizes timestamp into a calendar date string (YYYY-MM-DD) so all messages on the same calendar day group together without leaking into separate buckets
   const groupMessagesByDate = (msgs: ChatMessage[]) => {
     const groups: { [key: string]: ChatMessage[] } = {};
     msgs.forEach(msg => {
-      const dateStr = String(msg.timestamp).trim();
-      const isoDate = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T');
-      const utcDateStr = isoDate.endsWith('Z') ? isoDate : isoDate + 'Z';
-      const date = new Date(utcDateStr).toDateString();
-      if (!groups[date]) groups[date] = [];
-      groups[date].push(msg);
+      const d = safeParseDate(msg.timestamp);
+      // Key by year, month, date so it's consistent across all messages
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(msg);
     });
     return groups;
   };
 
-  const getRelativeDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
+  // Instruction: Format calendar date bucket key to a human-readable label (e.g. "Today", "Yesterday", "Oct 19, 2026")
+  // Logic: Compares calendar year, month, and day against today and yesterday
+  const getRelativeDate = (dateKey: string) => {
+    const parts = dateKey.split('-');
+    if (parts.length === 3) {
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      const targetDate = new Date(year, month, day);
 
-    if (date.toDateString() === today.toDateString()) return 'Today';
-    if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
-    return date.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      if (targetDate.getTime() === today.getTime()) return 'Today';
+      if (targetDate.getTime() === yesterday.getTime()) return 'Yesterday';
+
+      return targetDate.toLocaleDateString(undefined, { 
+        day: 'numeric', 
+        month: 'short', 
+        year: 'numeric' 
+      });
+    }
+    const fallback = safeParseDate(dateKey);
+    return fallback.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
   };
 
   const groupedMessages = groupMessagesByDate(messages);
@@ -1222,101 +1366,125 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
   return (
     <div className="flex h-full bg-[#0b141a] overflow-hidden border-t border-gray-800">
-      {/* Sidebar */}
+      {/* Sidebar: Chat conversations list and control filters panel */}
       <div className={`w-full md:w-[380px] border-r border-gray-800 flex-col bg-[#111b21] ${selectedSession ? "hidden md:flex" : "flex"}`}>
-        {/* Instance Selector */}
-        <div className="p-4 border-b border-gray-800 space-y-3">
-          <select
-            value={selectedInstanceId}
-            onChange={(e) => setSelectedInstanceId(e.target.value)}
-            className="w-full bg-[#202c33] text-white border border-gray-700 rounded-lg px-3 py-2 min-h-[40px] text-sm outline-none focus:ring-1 ring-[#25D366] "
-          >
-            <option value="">Select Instance</option>
-            {instances.filter(i => i.status === 'open').map(i => (
-              <option key={i.id} value={i.id}>{i.name} ({i.phoneNumber})</option>
-            ))}
-          </select>
-
-          {/* Label Filter */}
+        
+        {/* Top Control Bar: Active WhatsApp instance selection and quick label manager toggle */}
+        <div className="p-3.5 border-b border-gray-800 space-y-2.5 bg-[#111b21]">
+          {/* Logic: Select active WhatsApp session instance or manage contact tags */}
           <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <Filter size={14} className="absolute left-3 top-2.5 text-gray-500" />
-              <select
-                value={selectedLabelFilter}
-                onChange={(e) => setSelectedLabelFilter(e.target.value)}
-                className="w-full bg-[#202c33] text-gray-300 pl-9 pr-2 py-2 min-h-[36px] rounded-lg text-xs outline-none border border-gray-700 "
-              >
-                <option value="">All Chats</option>
-                {labels.map(l => (
-                  <option key={l.id} value={l.id}>{l.name}</option>
-                ))}
-              </select>
-            </div>
-            <button 
-              onClick={() => setShowLabelManager(!showLabelManager)}
-              className="p-2 bg-[#202c33] hover:bg-[#2a3942] rounded-lg text-gray-400 hover:text-white transition-colors border border-gray-700"
-              title="Manage Labels"
+            {/* Logic: Choose which WhatsApp phone number instance to view messages for */}
+            <select
+              value={selectedInstanceId}
+              onChange={(e) => handleInstanceChange(e.target.value)}
+              className="flex-1 bg-[#202c33] text-white border border-gray-700/80 rounded-lg px-3 py-2 min-h-[40px] text-sm outline-none focus:ring-1 ring-[#25D366] transition-all"
             >
-              <Tag size={14} />
+              <option value="">Select WhatsApp Instance</option>
+              {instances.filter(i => i.status === 'open').map(i => (
+                <option key={i.id} value={i.id}>{i.name} ({i.phoneNumber})</option>
+              ))}
+            </select>
+
+            {/* Logic: Open popover to create, colorize, and delete custom chat tags/labels */}
+            <button 
+              type="button"
+              onClick={() => setShowLabelManager(!showLabelManager)}
+              className={`p-2.5 rounded-lg border transition-colors flex items-center justify-center shrink-0 ${
+                showLabelManager 
+                  ? 'bg-[#25D366]/20 border-[#25D366] text-[#25D366]' 
+                  : 'bg-[#202c33] border-gray-700 hover:bg-[#2a3942] text-gray-300 hover:text-white'
+              }`}
+              title="Manage Chat Labels & Categories"
+            >
+              <Tag size={16} />
             </button>
           </div>
 
-          {/* Label Manager Popover */}
+          {/* Logic: Label management popover panel for creating and removing category tags */}
           {showLabelManager && (
-            <div className="bg-[#202c33] p-3 rounded-lg border border-gray-700 space-y-3 animate-in fade-in zoom-in-95 duration-150">
-              <div className="flex gap-2">
+            <div className="bg-[#202c33] p-3 rounded-lg border border-gray-700 space-y-2.5 shadow-xl animate-in fade-in zoom-in-95 duration-150">
+              <div className="flex items-center justify-between text-xs text-gray-300 font-semibold">
+                <span className="flex items-center gap-1.5"><Tag size={13} className="text-[#25D366]" /> Manage Labels ({labels.length})</span>
+                <button onClick={() => setShowLabelManager(false)} className="text-gray-400 hover:text-white"><X size={14} /></button>
+              </div>
+
+              {/* Logic: Input fields to create a new colored label tag */}
+              <div className="flex gap-1.5">
                 <input 
                   value={newLabelName}
                   onChange={(e) => setNewLabelName(e.target.value)}
-                  placeholder="New Label Name"
-                  className="flex-1 bg-[#111b21] border border-gray-700 rounded px-2 py-1 text-xs text-white outline-none"
+                  placeholder="New label name (e.g. VIP, Follow-up)..."
+                  className="flex-1 bg-[#111b21] border border-gray-700 rounded-md px-2.5 py-1.5 text-xs text-white outline-none focus:border-[#25D366]"
                 />
                 <input 
                   type="color" 
                   value={newLabelColor}
                   onChange={(e) => setNewLabelColor(e.target.value)}
-                  className="w-8 h-full bg-transparent cursor-pointer rounded overflow-hidden"
+                  className="w-9 h-8 bg-transparent cursor-pointer rounded overflow-hidden shrink-0"
+                  title="Pick label badge color"
                 />
-                <button onClick={handleCreateLabel} className="bg-[#25D366] text-[#0b141a] p-1.5 rounded hover:bg-[#128c7e]">
-                  <Plus size={14} />
+                <button 
+                  onClick={handleCreateLabel} 
+                  className="bg-[#25D366] text-[#0b141a] px-2.5 py-1.5 rounded-md hover:bg-[#128c7e] font-bold text-xs shrink-0 flex items-center gap-1"
+                  title="Save new label"
+                >
+                  <Plus size={14} /> Add
                 </button>
               </div>
-              <div className="max-h-32 overflow-y-auto space-y-1">
-                {labels.map(l => (
-                  <div key={l.id} className="flex items-center justify-between text-xs text-gray-300 bg-[#111b21] p-1.5 rounded">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full" style={{ backgroundColor: l.color }} />
-                      {l.name}
+
+              {/* Logic: Display list of created tags with delete option */}
+              <div className="max-h-36 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+                {labels.length === 0 ? (
+                  <p className="text-[11px] text-gray-400 py-1 italic">No labels created yet. Add one above.</p>
+                ) : (
+                  labels.map(l => (
+                    <div key={l.id} className="flex items-center justify-between text-xs text-gray-300 bg-[#111b21] px-2.5 py-1.5 rounded border border-gray-800">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.color }} />
+                        <span className="truncate">{l.name}</span>
+                      </div>
+                      <button onClick={() => handleDeleteLabel(l.id)} className="text-red-400 hover:text-red-300 p-0.5 ml-2 shrink-0" title="Delete label">
+                        <Trash2 size={13} />
+                      </button>
                     </div>
-                    <button onClick={() => handleDeleteLabel(l.id)} className="text-red-400 hover:text-red-300">
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             </div>
           )}
         </div>
 
-        {/* Search & Notification Controls */}
-        <div className="px-3 pb-2 flex items-center gap-2">
+        {/* Search & Notification Bar: Quick keyword lookup and incoming sound chime */}
+        <div className="px-3.5 py-2.5 flex items-center gap-2 bg-[#111b21] border-b border-gray-800/40">
+          {/* Logic: Search by customer name, phone digits, or message text */}
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-2.5 text-gray-500" size={16} />
+            <Search className="absolute left-3 top-2.5 text-gray-400" size={15} />
             <input
               type="text"
-              placeholder="Search chats or phone..."
+              placeholder="Search chats, contacts, or phone numbers..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full bg-[#202c33] text-gray-200 pl-10 pr-4 py-2 rounded-lg text-sm outline-none placeholder-gray-500"
+              className="w-full bg-[#202c33] text-gray-200 pl-9 pr-8 py-2 rounded-lg text-xs md:text-sm outline-none placeholder-gray-400 border border-transparent focus:border-gray-600 transition-colors"
             />
+            {searchTerm && (
+              <button 
+                onClick={() => setSearchTerm('')} 
+                className="absolute right-2.5 top-2.5 text-gray-400 hover:text-white"
+                title="Clear search"
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
+
+          {/* Logic: Toggle incoming message alert chime sound */}
           <button
             type="button"
             onClick={() => {
               setSoundEnabled(!soundEnabled);
               if (!soundEnabled) playChimeSound();
             }}
-            className={`p-2 rounded-lg border transition-colors ${
+            className={`p-2 rounded-lg border transition-colors shrink-0 ${
               soundEnabled 
                 ? 'bg-[#202c33] border-emerald-500/40 text-emerald-400 hover:bg-[#2a3942]' 
                 : 'bg-[#202c33] border-gray-700 text-gray-500 hover:text-gray-300'
@@ -1327,99 +1495,103 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           </button>
         </div>
 
-        {/* Filter Tabs */}
-        <div className="flex items-center gap-1.5 px-3 pb-2 overflow-x-auto no-scrollbar">
+        {/* Quick Filter Pills: Organized chat categories for easy and instant navigation */}
+        <div className="px-3.5 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar bg-[#111b21] border-b border-gray-800/40">
+          {/* Logic: View all conversations without filters */}
           <button
             onClick={() => setChatFilter('all')}
-            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
               chatFilter === 'all'
-                ? 'bg-[#25D366] text-[#0b141a]'
-                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
+                ? 'bg-[#25D366] text-[#0b141a] shadow-sm'
+                : 'bg-[#202c33] text-gray-300 hover:bg-[#2a3942] hover:text-white'
             }`}
           >
-            All ({sessions.length})
+            All
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${chatFilter === 'all' ? 'bg-[#0b141a]/20 text-[#0b141a]' : 'bg-[#111b21] text-gray-400'}`}>
+              {sessions.length}
+            </span>
           </button>
+
+          {/* Logic: Filter only unread messages with pending responses */}
           <button
             onClick={() => setChatFilter('unread')}
-            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1 ${
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
               chatFilter === 'unread'
-                ? 'bg-[#25D366] text-[#0b141a]'
-                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
+                ? 'bg-[#25D366] text-[#0b141a] shadow-sm'
+                : 'bg-[#202c33] text-gray-300 hover:bg-[#2a3942] hover:text-white'
             }`}
           >
             Unread
-            {unreadCount > 0 && (
+            {unreadCount > 0 ? (
               <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${chatFilter === 'unread' ? 'bg-[#0b141a] text-[#25D366]' : 'bg-[#25D366] text-[#0b141a]'}`}>
                 {unreadCount}
               </span>
-            )}
+            ) : null}
           </button>
+
+          {/* Logic: Filter customer sessions within the free 24-hour response window */}
           <button
             onClick={() => setChatFilter('window_active')}
-            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1 ${
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
               chatFilter === 'window_active'
-                ? 'bg-emerald-500 text-[#0b141a]'
+                ? 'bg-emerald-500 text-[#0b141a] shadow-sm'
                 : 'bg-[#202c33] text-emerald-400 hover:bg-[#2a3942]'
             }`}
-            title="Customer replied in last 24h - Free messaging open"
+            title="Customer replied in last 24h - Free 24h messaging active"
           >
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
             24h Active ({activeWindowCount})
           </button>
-          <button
-            type="button"
-            onClick={handleExtract24hActiveNumbers}
-            className="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30 transition-colors flex items-center gap-1 cursor-pointer"
-            title="Extract all recipient phone numbers with active 24-hour windows for Bulk Sender"
-          >
-            <Download size={11} className="shrink-0 text-purple-400" />
-            Extract 24h Active ({activeWindowCount})
-          </button>
+
+          {/* Logic: Filter customer sessions whose 24-hour response window has expired */}
           <button
             onClick={() => setChatFilter('window_expired')}
-            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1 ${
+            className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
               chatFilter === 'window_expired'
-                ? 'bg-amber-500 text-[#0b141a]'
-                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942]'
+                ? 'bg-amber-500 text-[#0b141a] shadow-sm'
+                : 'bg-[#202c33] text-amber-400/80 hover:bg-[#2a3942]'
             }`}
-            title="24h Window expired - Requires Meta Template to re-open"
+            title="24h Window expired - Requires Meta Approved Template message to re-open"
           >
             ⏳ Expired ({expiredWindowCount})
           </button>
+
+          {/* Logic: One-click export of active 24h recipient numbers to clipboard or Bulk Sender */}
           <button
-            onClick={() => setChatFilter('direct')}
-            className={`px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
-              chatFilter === 'direct'
-                ? 'bg-[#25D366] text-[#0b141a]'
-                : 'bg-[#202c33] text-gray-400 hover:bg-[#2a3942] hover:text-gray-200'
-            }`}
+            type="button"
+            onClick={handleExtract24hActiveNumbers}
+            className="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap bg-purple-500/15 text-purple-300 border border-purple-500/30 hover:bg-purple-500/25 transition-all flex items-center gap-1 shrink-0 ml-auto cursor-pointer"
+            title="Export all phone numbers with active 24-hour windows for Bulk Sender"
           >
-            Direct
+            <Download size={12} className="shrink-0 text-purple-400" />
+            Export Active ({activeWindowCount})
           </button>
         </div>
 
-        {/* Interactive Label Chips Bar */}
+        {/* Interactive Tag Chips Row: Display label categories and filter by clicking tags */}
         {labels.length > 0 && (
-          <div className="flex items-center gap-1.5 px-3 pb-3 overflow-x-auto no-scrollbar border-b border-gray-800/40">
+          <div className="flex items-center gap-1.5 px-3.5 py-2 overflow-x-auto no-scrollbar border-b border-gray-800/40 bg-[#111b21]">
             <span className="text-[10px] uppercase font-bold text-gray-400 shrink-0 flex items-center gap-1">
-              <Tag size={10} /> Labels:
+              <Tag size={10} /> Tags:
             </span>
             {selectedLabelFilter && (
               <button
                 onClick={() => setSelectedLabelFilter('')}
                 className="px-2 py-0.5 rounded text-[10px] font-medium bg-[#2a3942] text-gray-300 hover:text-white flex items-center gap-1 shrink-0"
+                title="Reset label filter"
               >
                 Clear <X size={10} />
               </button>
             )}
+            {/* Logic: Render each label as an interactive filter pill */}
             {labels.map(l => {
               const isSelected = selectedLabelFilter === l.id;
               return (
                 <button
                   key={l.id}
                   onClick={() => setSelectedLabelFilter(isSelected ? '' : l.id)}
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap flex items-center gap-1 transition-all shrink-0 ${
-                    isSelected ? 'ring-2 ring-white scale-105 shadow-md' : 'opacity-80 hover:opacity-100'
+                  className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap flex items-center gap-1 transition-all shrink-0 ${
+                    isSelected ? 'ring-2 ring-white scale-105 shadow-md' : 'opacity-85 hover:opacity-100'
                   }`}
                   style={{ backgroundColor: l.color, color: '#0b141a' }}
                 >
@@ -1432,36 +1604,45 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         )}
 
         {/* Sessions List with Infinite Virtual Windowing for High Performance */}
+        {/* Instruction: Render loading state or session items with verified contact/group names */}
+        {/* Logic: Prevents stale conversation list showing during instance switch and displays real contact names */}
         <div className="flex-1 overflow-y-auto overscroll-y-contain" onScroll={handleSessionsScroll}>
-          {filteredSessions.length === 0 ? (
+          {isLoadingSessions ? (
+            <div className="p-8 text-center text-gray-400 text-sm flex flex-col items-center justify-center gap-2">
+              <div className="w-5 h-5 border-2 border-[#25D366] border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-gray-400">Loading conversations...</span>
+            </div>
+          ) : filteredSessions.length === 0 ? (
             <div className="p-8 text-center text-gray-500 text-sm">
               No conversations found in this view
             </div>
           ) : (
             filteredSessions.slice(0, visibleCount).map((session) => {
               const win = getWindowCountdown(session.lastInboundTimestamp);
+              const isSelected = selectedSession?.remoteJid === session.remoteJid;
+              const displayName = session.contactName || profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid, session.contactName);
               return (
                 <div
                   key={session.remoteJid}
                   onClick={() => handleSelectSession(session)}
-                  className={`w-full flex items-center gap-3 p-3 hover:bg-[#202c33] cursor-pointer transition-colors border-b border-gray-800/50 group/item ${
-                    selectedSession?.remoteJid === session.remoteJid ? 'bg-[#2a3942]' : ''
+                  className={`w-full flex items-center gap-3 p-3 cursor-pointer transition-colors border-b border-gray-800/50 group/item ${
+                    isSelected ? 'bg-[#2a3942] border-l-2 border-[#25D366]' : 'bg-[#111b21] hover:bg-[#202c33]'
                   }`}
                 >
-                  <div className="w-12 h-12 bg-gray-700 rounded-full flex items-center justify-center text-gray-300 shrink-0 overflow-hidden relative">
+                  <div style={{ width: '35px', height: '35px' }} className="w-[35px] h-[35px] bg-gray-700 rounded-full flex items-center justify-center text-gray-300 shrink-0 overflow-hidden relative">
                     {profileCache[session.remoteJid]?.imgUrl ? (
                       <img src={profileCache[session.remoteJid].imgUrl} alt="" className="w-full h-full object-cover" />
                     ) : (
-                      <User size={24} />
+                      <User size={15} style={{ width: '15px', height: '15px' }} />
                     )}
                     {win.isActive && (
-                      <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-[#111b21]" title="24h Service Window Active" />
+                      <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#111b21]" title="24h Service Window Active" />
                     )}
                   </div>
                   <div className="flex-1 min-w-0 text-left">
                     <div className="flex justify-between items-baseline gap-2 min-w-0">
                       <h3 className="text-sm font-medium text-gray-100 truncate">
-                        {profileCache[session.remoteJid]?.name || formatDisplayJid(session.remoteJid)}
+                        {displayName}
                       </h3>
                       {session.lastMessage && (
                         <span className="text-[10px] text-gray-500 shrink-0">
@@ -1565,9 +1746,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-[#202c33]" />
                   )}
                 </div>
+                {/* Instruction: Render active contact/group name and phone number subtitle */}
+                {/* Logic: Accurately displays the saved contact name or group subject on top, and phone number or group ID on bottom */}
                 <div className="min-w-0">
                   <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2 truncate">
-                    <span className="truncate">{profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid)}</span>
+                    <span style={{ fontWeight: 'bold', color: '#ffffff' }} className="truncate font-bold text-white">
+                      {selectedSession.contactName || profileCache[selectedSession.remoteJid]?.name || formatDisplayJid(selectedSession.remoteJid, selectedSession.contactName)}
+                    </span>
                     {selectedSession.labels && selectedSession.labels.length > 0 && (
                         <div className="flex -space-x-1 shrink-0">
                             {selectedSession.labels.map(l => (
@@ -1577,7 +1762,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     )}
                   </h3>
                   <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                    <span className="font-mono text-gray-500">{formatDisplayJid(selectedSession.remoteJid)}</span>
+                    <span style={{ fontWeight: 'normal', color: '#9ca3af' }} className="font-mono text-gray-400">
+                      {formatDisplayJid(selectedSession.remoteJid)}
+                    </span>
                     {typingStatus[selectedSession.remoteJid] ? (
                       <span className="text-emerald-400 font-medium">typing...</span>
                     ) : presenceStatus[selectedSession.remoteJid] === 'online' ? (
@@ -1689,18 +1876,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
             {/* Messages */}
             <div 
-              className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70fcded21.png')] bg-repeat opacity-90"
               style={{ backgroundSize: '400px' }}
+              className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 bg-[#0b141a] bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70fcded21.png')] bg-repeat"
             >
-              <div className="flex flex-col space-y-2">
-                {Object.keys(groupedMessages).map(date => (
-                  <React.Fragment key={date}>
-                    <div className="flex justify-center my-4 sticky top-2 z-10">
-                      <span className="bg-[#111b21] text-gray-400 text-[10px] px-3 py-1 rounded-lg shadow-sm font-medium uppercase tracking-wide border border-gray-800">
-                        {getRelativeDate(date)}
+              <div className="flex flex-col space-y-3">
+                {Object.entries(groupedMessages).map(([dateKey, msgsForDate]) => (
+                  <div key={dateKey} className="space-y-2 pb-1">
+                    {/* Instruction: Clean inline date separator badge between daily message groups */}
+                    {/* Logic: Eliminates overlapping and sticky collisions where previous date popups mix together when scrolling through history */}
+                    <div className="flex justify-center my-3 select-none">
+                      <span className="bg-[#182229]/90 text-gray-300 text-[11px] font-semibold px-3 py-1 rounded-md shadow-sm uppercase tracking-wider border border-gray-700/60 backdrop-blur-xs">
+                        {getRelativeDate(dateKey)}
                       </span>
                     </div>
-                    {groupedMessages[date].map((msg, idx) => (
+                    {msgsForDate.map((msg, idx) => (
                       <div
                         key={msg.id || idx}
                         className={`flex ${msg.fromMe ? 'justify-end' : 'justify-start'} group/msg relative`}
@@ -1749,32 +1938,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                             </div>
                           )}
 
+                          {/* Instruction: Render chat media (images, videos, audio/voice notes, documents) */}
+                          {/* Logic: Uses resolveMediaUrlHelper to connect to backend apiBase so media files never 404 or corrupt with HTML responses, and attaches safe blob downloads */}
                           {msg.mediaUrl && (
                               <div className="mb-1">
                                   {(msg.mediaType === 'image' || (!msg.mediaType && (msg.mediaUrl.match(/\.(jpg|jpeg|png|webp|gif)/i) || msg.mediaUrl.includes('image') || msg.mediaUrl.includes('/media/')))) ? (
                                       <div className="relative group/media my-0.5">
                                         <img 
-                                          src={msg.mediaUrl} 
+                                          src={resolveMediaUrlHelper(msg.mediaUrl, apiBase)} 
                                           alt="Media" 
                                           className="rounded-lg max-w-full max-h-[320px] object-cover cursor-pointer hover:opacity-95 transition-opacity" 
-                                          onClick={() => setLightboxMedia({ url: msg.mediaUrl!, type: 'image' })}
+                                          onClick={() => setLightboxMedia({ url: resolveMediaUrlHelper(msg.mediaUrl, apiBase), type: 'image' })}
                                         />
                                         <button
                                           type="button"
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            window.open(msg.mediaUrl, '_blank');
+                                            downloadMediaBlob(msg.mediaUrl!, (msg.fileName || 'image.jpg'), apiBase);
                                           }}
-                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow"
-                                          title="Open Fullscreen"
+                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/media:opacity-100 transition-opacity shadow cursor-pointer"
+                                          title="Download Image"
                                         >
                                           <Download size={13} />
                                         </button>
                                       </div>
                                   ) : (msg.mediaType === 'video' || msg.mediaType === 'gif') ? (
-                                      <div className="my-0.5 rounded-lg overflow-hidden bg-black/30">
+                                      <div className="my-0.5 rounded-lg overflow-hidden bg-black/30 relative group/video">
                                         <video 
-                                            src={msg.mediaUrl} 
+                                            src={resolveMediaUrlHelper(msg.mediaUrl, apiBase)} 
                                             controls={msg.mediaType !== 'gif'} 
                                             autoPlay={msg.mediaType === 'gif'} 
                                             loop={msg.mediaType === 'gif'} 
@@ -1782,6 +1973,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                             playsInline 
                                             className="rounded-lg max-w-full max-h-[320px]" 
                                         />
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadMediaBlob(msg.mediaUrl!, (msg.fileName || 'video.mp4'), apiBase);
+                                          }}
+                                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover/video:opacity-100 transition-opacity shadow cursor-pointer"
+                                          title="Download Video"
+                                        >
+                                          <Download size={13} />
+                                        </button>
                                       </div>
                                   ) : (msg.mediaType === 'audio' || msg.mediaType === 'voice') ? (
                                       <div className="flex items-center gap-2.5 bg-black/30 p-2.5 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1">
@@ -1792,8 +1994,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                           <span className="text-[10px] text-gray-300 font-medium uppercase tracking-wide block mb-1">
                                             {msg.mediaType === 'voice' ? 'Voice Message' : 'Audio Note'}
                                           </span>
-                                          <audio src={msg.mediaUrl} controls className="w-full h-8" />
+                                          <audio src={resolveMediaUrlHelper(msg.mediaUrl, apiBase)} controls className="w-full h-8" preload="metadata" />
                                         </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => downloadMediaBlob(msg.mediaUrl!, (msg.fileName || (msg.mediaType === 'voice' ? 'voice_note.ogg' : 'audio.mp3')), apiBase)}
+                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0 cursor-pointer"
+                                          title="Download Audio"
+                                        >
+                                          <Download size={14} />
+                                        </button>
                                       </div>
                                   ) : (
                                       <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-white/10 min-w-[240px] max-w-[320px] my-1 hover:bg-black/40 transition-colors">
@@ -1808,16 +2018,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                                             <span className="text-[10px] text-gray-400 uppercase font-mono">Document File</span>
                                           </div>
                                         </div>
-                                        <a 
-                                          href={msg.mediaUrl.startsWith('/api/meta/media') ? `${msg.mediaUrl}?download=1` : msg.mediaUrl} 
-                                          download={msg.fileName || `attachment_${msg.id}`} 
-                                          target="_blank" 
-                                          rel="noopener noreferrer" 
-                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0"
+                                        <button 
+                                          type="button"
+                                          onClick={() => downloadMediaBlob(msg.mediaUrl!, (msg.fileName || 'document.pdf'), apiBase)}
+                                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 transition-colors shrink-0 cursor-pointer"
                                           title="Download document"
                                         >
                                           <Download size={15} />
-                                        </a>
+                                        </button>
                                       </div>
                                   )}
                               </div>
@@ -2060,7 +2268,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         </div>
                       </div>
                     ))}
-                  </React.Fragment>
+                  </div>
                 ))}
                 <div ref={messagesEndRef} />
               </div>
@@ -2579,7 +2787,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         }
                       }}
                       rows={Math.min(5, Math.max(1, (newMessage.match(/\n/g) || []).length + 1))}
-                      className="w-full bg-[#2a3942] text-gray-200 px-4 py-2 rounded-xl text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366] resize-none whitespace-pre-wrap leading-normal transition-all max-h-36 overflow-y-auto"
+                      style={{ backgroundColor: '#fbf4f4', color: '#000000' }}
+                      className="w-full bg-[#fbf4f4] text-gray-900 px-4 py-2 rounded-xl text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366] resize-none whitespace-pre-wrap leading-normal transition-all max-h-36 overflow-y-auto"
                     />
                   </form>
                   
@@ -2725,34 +2934,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           onClick={() => setLightboxMedia(null)}
         >
           <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+            {/* Instruction: Lightbox Action Bar with secure Blob download */}
+            {/* Logic: Uses downloadMediaBlob to fetch binary file directly, preventing browser popup blocking or file corruption */}
             <div className="absolute -top-12 right-0 flex items-center gap-3">
-              <a
-                href={lightboxMedia.url.startsWith('/api/meta/media') ? `${lightboxMedia.url}?download=1` : lightboxMedia.url}
-                download={lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg'}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3"
+              <button
+                type="button"
+                onClick={() => downloadMediaBlob(lightboxMedia.url, (lightboxMedia.type === 'video' ? 'video.mp4' : 'image.jpg'), apiBase)}
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors flex items-center gap-1.5 text-xs px-3 cursor-pointer"
+                title="Download media file"
               >
                 <Download size={14} />
                 <span>Download</span>
-              </a>
+              </button>
               <button
                 type="button"
                 onClick={() => setLightboxMedia(null)}
-                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors"
+                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors cursor-pointer"
               >
                 <X size={18} />
               </button>
             </div>
             {lightboxMedia.type === 'image' ? (
               <img 
-                src={lightboxMedia.url} 
+                src={resolveMediaUrlHelper(lightboxMedia.url, apiBase)} 
                 alt="Full preview" 
                 className="max-w-full max-h-[82vh] rounded-xl object-contain shadow-2xl" 
               />
             ) : (
               <video 
-                src={lightboxMedia.url} 
+                src={resolveMediaUrlHelper(lightboxMedia.url, apiBase)} 
                 controls 
                 autoPlay 
                 className="max-w-full max-h-[82vh] rounded-xl shadow-2xl" 

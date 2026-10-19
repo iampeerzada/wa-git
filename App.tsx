@@ -858,6 +858,7 @@ const App: React.FC = () => {
       </div>
       
       <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        {/* Logic: App Top Navigation Bar matching WhatsApp dark theme (#111b21) */}
         <header className="h-14 sm:h-16 shrink-0 border-b border-gray-800 flex items-center justify-between px-2.5 sm:px-4 lg:px-8 bg-[#111b21] gap-1.5 sm:gap-4">
           <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
             <button 
@@ -957,7 +958,7 @@ const App: React.FC = () => {
           </div>
         </header>
 
-        <div className={`flex-1 min-h-0 ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain'}`}>
+        <div style={{ backgroundColor: '#ffffff' }} className={`flex-1 min-h-0 bg-white ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain'}`}>
           {activeTab === 'profile' && (
             <ProfileView 
               currentUser={currentUser} 

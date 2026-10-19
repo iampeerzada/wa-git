@@ -795,7 +795,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
 
   return (
     <div className="max-w-6xl mx-auto space-y-4 pb-8">
-      <div className="flex bg-[#111b21] p-1 rounded-xl border border-gray-800 w-full sm:w-fit mb-4 overflow-x-auto gap-1">
+      <div style={{ backgroundColor: '#000000' }} className="flex bg-black p-1 rounded-xl border border-gray-800 w-full sm:w-fit mb-4 overflow-x-auto gap-1">
         <button
           onClick={() => setViewMode('sender')}
           className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
@@ -877,9 +877,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
             </div>
           )}
 
+      {/* Layout Logic: Responsive grid - Left 2/3 for campaign builder and Right 1/3 for schedule & audience controls */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <div className="xl:col-span-2 space-y-4">
-          <div className="bg-[#111b21] rounded-xl border border-gray-800/80 p-3.5 sm:p-5 shadow-lg">
+        {/* Logic: Campaign message composer column */}
+        <div style={{ backgroundColor: '#ffffff' }} className="xl:col-span-2 space-y-4 bg-white rounded-xl">
+          {/* Logic: Campaign Configuration card container */}
+          <div style={{ backgroundColor: '#000000' }} className="bg-black rounded-xl border border-gray-800/80 p-3.5 sm:p-5 shadow-lg">
             <h2 className="text-xs sm:text-sm font-bold text-white mb-4 flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
                 <Send size={16} className="text-[#25D366]" />
@@ -1391,8 +1394,8 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
           </div>
         </div>
 
-        <div className="space-y-4">
-          <div className="bg-[#111b21] rounded-xl border border-gray-800/80 p-3.5 sm:p-4 shadow-md flex flex-col h-full">
+        <div style={{ backgroundColor: '#ffffff' }} className="space-y-4 bg-white">
+          <div style={{ backgroundColor: '#000000' }} className="bg-black rounded-xl border border-gray-800/80 p-3.5 sm:p-4 shadow-md flex flex-col h-full">
             <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
               <Eye className="text-blue-400" size={14} />
               Live Campaign Preview
@@ -1401,21 +1404,21 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
             <div className="flex-1 bg-[#0b141a] rounded-xl border border-gray-800 p-3 relative overflow-hidden flex flex-col min-h-[350px]">
               <div className="absolute inset-0 opacity-[0.03] pointer-events-none bg-[url('https://i.pinimg.com/originals/ab/ab/60/abab600fbc0650f166e70e97b4a1e483.png')] bg-repeat" />
               
-              <div className="relative z-10 flex flex-col h-full">
-                <div className="flex items-center justify-between flex-wrap gap-2 mb-3 pb-2 border-b border-gray-800/50">
+              <div style={{ backgroundColor: '#ffffff' }} className="relative z-10 flex flex-col h-full bg-white">
+                <div style={{ backgroundColor: '#ffffff' }} className="flex items-center justify-between flex-wrap gap-2 mb-3 pb-2 border-b border-gray-800/50 bg-white">
                   <div className="flex items-center gap-2">
                     <div className="w-7 h-7 bg-gray-700 rounded-full flex items-center justify-center">
                        <Smartphone size={14} className="text-gray-400" />
                     </div>
                     <div>
-                       <p className="text-[10px] font-bold text-white">Recipient</p>
+                       <p style={{ color: '#000000' }} className="text-[10px] font-bold text-black">Recipient</p>
                        <p className="text-[8px] text-[#25D366]">online</p>
                     </div>
                   </div>
                   <MoreVertical size={14} className="text-gray-600" />
                 </div>
 
-                <div className="flex-1 flex flex-col justify-start">
+                <div style={{ backgroundColor: '#ffffff' }} className="flex-1 flex flex-col justify-start bg-white">
                   <div className="max-w-[85%] self-end relative mb-3">
                     <div className="bg-[#d9fdd3] text-[#111b21] rounded-xl rounded-tr-none p-2 shadow-sm relative animate-in fade-in slide-in-from-right-2 duration-300">
                       <div className="absolute top-0 right-[-6px] w-0 h-0 border-l-[10px] border-l-[#d9fdd3] border-b-[10px] border-b-transparent" />
@@ -1459,7 +1462,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 </div>
 
                 <div className="mt-auto flex items-center gap-2 pt-2">
-                  <div className="flex-1 bg-[#202c33] rounded-full px-3 py-1.5 flex items-center gap-2">
+                  <div style={{ backgroundColor: '#000000' }} className="flex-1 bg-black rounded-full px-3 py-1.5 flex items-center gap-2">
                     <Smile size={13} className="text-gray-500" />
                     <span className="text-[10px] text-gray-500">Message</span>
                     <Paperclip size={13} className="text-gray-500 ml-auto" />
@@ -1483,144 +1486,12 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-[#111b21] rounded-xl border border-gray-800/80 p-3.5 sm:p-4 shadow-md">
-            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-              <ShieldCheck className="text-[#25D366]" size={14} />
-              Plan Constraints
-            </h3>
-            <div className="space-y-3">
-              <div className="p-3 bg-[#202c33] rounded-xl border border-gray-800 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs text-gray-400 font-bold">Daily Used</span>
-                  <span className="text-[#25D366] text-xs font-mono">{currentUser.subscription.messagesSentToday} / {currentPlan?.dailyLimit || '∞'}</span>
-                </div>
-                <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-500" style={{ width: `${(currentUser.subscription.messagesSentToday / (currentPlan?.dailyLimit || 1)) * 100}%` }} />
-                </div>
-              </div>
-            </div>
-          </div>
 
-          <div className="bg-[#111b21] rounded-xl border border-gray-800/80 p-3.5 sm:p-4 shadow-md">
-            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center justify-between flex-wrap gap-2">
-              <span className="flex items-center gap-1.5">
-                <Layers size={14} className="text-[#25D366]" />
-                Campaign Staggering
-              </span>
-              <div className="flex items-center gap-2">
-                {progress.total > 0 && <span className="text-[10px] font-mono text-gray-400">{progress.current}/{progress.total} Pushed</span>}
-                {(isSending || progress.queued > 0) && (
-                  <button
-                    type="button"
-                    onClick={() => handleStopActiveCampaign()}
-                    disabled={isStoppingQueue}
-                    className="px-2.5 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer shadow-sm shadow-red-500/20"
-                    title="Stop active campaign"
-                  >
-                    <Square size={10} fill="currentColor" />
-                    <span>{isStoppingQueue ? 'Stopping...' : 'Stop Campaign'}</span>
-                  </button>
-                )}
-              </div>
-            </h3>
-            <div className="space-y-3">
-              <div className="relative h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                <div className="absolute left-0 top-0 h-full bg-[#25D366] transition-all duration-500" style={{ width: `${(progress.current / progress.total) * 100 || 0}%` }} />
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="bg-[#202c33] p-2.5 rounded-xl text-center border border-transparent hover:border-blue-500/20 transition-all">
-                  <p className="text-[9px] text-gray-400 font-bold uppercase">Staggered</p>
-                  <p className="text-base sm:text-lg font-bold text-blue-400">{progress.success}</p>
-                </div>
-                <div className="bg-[#202c33] p-2.5 rounded-xl text-center border border-transparent hover:border-yellow-500/20 transition-all">
-                  <p className="text-[9px] text-gray-400 font-bold uppercase">Drip-Feed</p>
-                  <p className="text-base sm:text-lg font-bold text-yellow-500">{progress.queued}</p>
-                </div>
-                <div className="bg-[#202c33] p-2.5 rounded-xl text-center border border-transparent hover:border-red-500/20 transition-all">
-                  <p className="text-[9px] text-gray-400 font-bold uppercase">Rejected</p>
-                  <p className="text-base sm:text-lg font-bold text-red-500">{progress.failed}</p>
-                </div>
-              </div>
-
-              {chartData.length > 0 && (
-                <div className="h-40 w-full mt-2">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={chartData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={35}
-                        outerRadius={55}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {chartData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} stroke="none" />
-                        ))}
-                      </Pie>
-                      <RechartsTooltip 
-                        contentStyle={{ backgroundColor: '#111b21', borderColor: '#374151', borderRadius: '8px', fontSize: '11px' }}
-                        itemStyle={{ color: '#fff' }}
-                      />
-                      <Legend 
-                        verticalAlign="bottom" 
-                        height={30} 
-                        iconType="circle"
-                        formatter={(value) => <span className="text-[11px] text-gray-400 ml-1">{value}</span>}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-
-              {(isSending || progress.queued > 0) && (
-                <div className="flex items-center justify-between p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl">
-                  <div className="flex items-center gap-2">
-                    <Activity size={13} className="text-blue-400 animate-pulse shrink-0" />
-                    <span className="text-[9px] text-blue-400 font-bold uppercase">Compliance Layer is feeding the queue...</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleStopActiveCampaign()}
-                    disabled={isStoppingQueue}
-                    className="px-2 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded text-[9px] font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer"
-                  >
-                    <Square size={9} fill="currentColor" />
-                    <span>Stop</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-      </div>
-
-      <div className="bg-[#111b21] rounded-xl border border-gray-800/80 overflow-hidden shadow-md">
-        <div className="px-3.5 py-2.5 border-b border-gray-800 flex justify-between items-center bg-[#202c33]/30">
-          <h3 className="text-xs font-bold text-gray-300 uppercase tracking-wider">Compliance Logs</h3>
-          <span className="text-[10px] font-mono text-gray-400 uppercase">{progress.current} / {progress.total}</span>
-        </div>
-        <div className="h-48 overflow-y-auto p-3.5 font-mono text-[11px] space-y-1.5 bg-black/20">
-          {logs.length === 0 && <p className="text-gray-600 italic text-center py-8">Waiting for launch...</p>}
-          {logs.map((log, i) => (
-            <div key={i} className={`flex gap-2 ${
-              log.type === 'success' ? 'text-[#25D366]' : 
-              log.type === 'error' ? 'text-red-400' : 
-              log.type === 'warning' ? 'text-yellow-400' : 
-              'text-gray-400'
-            }`}>
-              <span className="text-gray-600">[{new Date().toLocaleTimeString()}]</span>
-              <span>{log.msg}</span>
-            </div>
-          ))}
-        </div>
-      </div>
         </>
       ) : viewMode === 'scheduled' ? (
         <div className="space-y-4">
           {/* Active & Running Campaigns Section */}
-          <div className="bg-[#111b21] rounded-xl border border-gray-800 p-4 shadow-xl mb-4 space-y-3">
+          <div style={{ backgroundColor: '#000000' }} className="bg-black rounded-xl border border-gray-800 p-4 shadow-xl mb-4 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-gray-800">
               <div className="flex items-center gap-2">
                 <Activity className="w-4 h-4 text-[#25D366] animate-pulse" />
@@ -1744,11 +1615,11 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
 
           {/* Top Metrics Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-            <div className="bg-[#111b21] border border-gray-800/80 p-3.5 sm:p-4 rounded-xl shadow-xs">
+            <div style={{ backgroundColor: '#000000' }} className="bg-black border border-gray-800/80 p-3.5 sm:p-4 rounded-xl shadow-xs">
               <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Total Scheduled</span>
               <p className="text-xl sm:text-2xl font-black text-white mt-1">{scheduledCampaigns.length}</p>
             </div>
-            <div className="bg-[#111b21] border border-amber-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs bg-amber-500/5">
+            <div style={{ backgroundColor: '#000000' }} className="bg-black border border-amber-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs">
               <span className="text-[10px] uppercase font-bold text-amber-400 tracking-wider flex items-center gap-1.5">
                 <Clock size={12} /> Pending Queue
               </span>
@@ -1756,7 +1627,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 {scheduledCampaigns.filter(c => c.status === 'scheduled').length}
               </p>
             </div>
-            <div className="bg-[#111b21] border border-green-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs bg-green-500/5">
+            <div style={{ backgroundColor: '#000000' }} className="bg-black border border-green-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs">
               <span className="text-[10px] uppercase font-bold text-[#25D366] tracking-wider flex items-center gap-1.5">
                 <CheckCircle2 size={12} /> Executed / Done
               </span>
@@ -1764,7 +1635,7 @@ const BulkSender: React.FC<BulkSenderProps> = ({ instances, apiBase, templates, 
                 {scheduledCampaigns.filter(c => c.status === 'completed').length}
               </p>
             </div>
-            <div className="bg-[#111b21] border border-blue-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs bg-blue-500/5">
+            <div style={{ backgroundColor: '#000000' }} className="bg-black border border-blue-500/20 p-3.5 sm:p-4 rounded-xl shadow-xs">
               <span className="text-[10px] uppercase font-bold text-blue-400 tracking-wider flex items-center gap-1.5">
                 <Users size={12} /> Queued Recipients
               </span>

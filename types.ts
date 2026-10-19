@@ -204,6 +204,8 @@ export interface ChatLabel {
 export interface ChatSession {
   remoteJid: string;
   contactName?: string | null;
+  groupName?: string | null;
+  pushName?: string | null;
   lastMessage?: ChatMessage;
   unreadCount: number;
   labels?: ChatLabel[];

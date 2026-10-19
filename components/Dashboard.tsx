@@ -322,22 +322,40 @@ const Dashboard: React.FC<DashboardProps> = ({
   );
 };
 
-const StatusBadge: React.FC<{ status: InstanceStatus }> = ({ status }) => {
-  const configs = {
+// Component Logic: StatusBadge displays the real-time connectivity status (Live, Pairing, Offline, etc.) of a WhatsApp instance
+const StatusBadge: React.FC<{ status: InstanceStatus | string }> = ({ status }) => {
+  // Logic: Map status enums and lowercase strings to corresponding Tailwind badges, icons, and text labels
+  const configs: Record<string, { color: string; icon: any; label: string }> = {
     [InstanceStatus.OPEN]: { color: 'bg-green-500/10 text-green-500 border-green-500/20', icon: CheckCircle2, label: 'Live' },
+    'open': { color: 'bg-green-500/10 text-green-500 border-green-500/20', icon: CheckCircle2, label: 'Live' },
+    'active': { color: 'bg-green-500/10 text-green-500 border-green-500/20', icon: CheckCircle2, label: 'Live' },
     [InstanceStatus.QR_REQUIRED]: { color: 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20', icon: QrCode, label: 'Pairing' },
+    'qr_required': { color: 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20', icon: QrCode, label: 'Pairing' },
     [InstanceStatus.CONNECTING]: { color: 'bg-blue-500/10 text-blue-500 border-blue-500/20', icon: RefreshCw, label: 'Init' },
+    'connecting': { color: 'bg-blue-500/10 text-blue-500 border-blue-500/20', icon: RefreshCw, label: 'Init' },
     [InstanceStatus.CLOSED]: { color: 'bg-red-500/10 text-red-500 border-red-500/20', icon: AlertCircle, label: 'Offline' },
+    'closed': { color: 'bg-red-500/10 text-red-500 border-red-500/20', icon: AlertCircle, label: 'Offline' },
     [InstanceStatus.ERROR]: { color: 'bg-red-500/10 text-red-500 border-red-500/20', icon: AlertCircle, label: 'Error' },
+    'error': { color: 'bg-red-500/10 text-red-500 border-red-500/20', icon: AlertCircle, label: 'Error' },
     [InstanceStatus.SUSPENDED]: { color: 'bg-red-500/10 text-red-500 border-red-500/20', icon: Lock, label: 'Suspended' },
+    'suspended': { color: 'bg-red-500/10 text-red-500 border-red-500/20', icon: Lock, label: 'Suspended' },
   };
 
-  const config = configs[status];
-  const Icon = config.icon;
+  // Logic: Normalize status string to lowercase for resilient lookups
+  const rawKey = String(status || '').toLowerCase().trim();
+  // Logic: Fallback to default badge config if status is unknown or undefined, preventing runtime errors
+  const config = configs[status as any] || configs[rawKey] || {
+    color: 'bg-gray-500/10 text-gray-400 border-gray-500/20',
+    icon: AlertCircle,
+    label: String(status || 'Offline').toUpperCase()
+  };
 
+  const Icon = config.icon || AlertCircle;
+
+  // UI Render: Render colored pill with pulsing/spinning icon depending on connection state
   return (
     <div className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg border text-[9px] font-black uppercase tracking-widest ${config.color}`}>
-      <Icon size={10} className={status === InstanceStatus.CONNECTING ? 'animate-spin' : ''} />
+      <Icon size={10} className={rawKey === 'connecting' ? 'animate-spin' : ''} />
       {config.label}
     </div>
   );
