@@ -31,6 +31,8 @@ const {
     prepareWAMessageMedia,
     generateWAMessageFromContent,
     downloadMediaMessage,
+    jidNormalizedUser,
+    normalizeMessageContent,
     Browsers,
     proto,
     makeCacheableSignalKeyStore
@@ -139,19 +141,14 @@ const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
-// Instruction: Serve /uploads with Cross-Origin headers, byte range, and direct download support
-// Logic: Prevents media blocking and corruption when downloading or streaming chat images, audios, and videos
+// Instruction: Serve static uploaded chat media with CORS and byte ranges for smooth video/audio playback and downloads
+// Work: Allows browser to stream, seek audio/video, and download media files without CORS issues
 app.use('/uploads', (req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.setHeader('Accept-Ranges', 'bytes');
-    if (req.query.download === '1') {
-        const fname = path.basename(req.path) || 'whatsapp_media';
-        res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
-    }
+    res.setHeader('Access-Control-Allow-Headers', '*');
     next();
-}, express.static(uploadsDir));
+}, express.static(uploadsDir, { acceptRanges: true, maxAge: '1d' }));
 
 // Database Pool
 const pool = new Pool({ 
@@ -198,7 +195,6 @@ pool.connect(async (err, client, release) => {
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_instance_remote_ts ON chat_messages(instance_id, remote_jid, timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_instance_unread ON chat_messages(instance_id, from_me, status);
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_instance_inbound ON chat_messages(instance_id, from_me, timestamp DESC);
-                CREATE INDEX IF NOT EXISTS idx_chat_contacts_inst_jid ON chat_contacts(instance_id, jid);
             `);
             console.log('[Database] chat_messages query acceleration indexes verified.');
         } catch (idxErr) {
@@ -1265,7 +1261,7 @@ async function connectToWhatsApp(instanceId) {
                     setTimeout(() => connectToWhatsApp(instanceId), 5000);
                 }
             } else if (connection === 'open') {
-                // We intentionally do NOT delete offlineAlerts here to prevent spam if the connection is flapping
+                // Logic: Maintain open instance map and save phone number
                 const phone = sock.user && sock.user.id ? sock.user.id.split(':')[0] : instanceId;
                 instancesMap.set(instanceId, { sock, status: 'open', qr: null, phone });
                 await pool.query('UPDATE instances SET status = $1, phone_number = $2, qr_code = NULL WHERE id = $3', ['open', phone, instanceId]).catch(e => console.error('Open State Update Error:', e.message));
@@ -1273,159 +1269,73 @@ async function connectToWhatsApp(instanceId) {
                 io.emit('status', { instanceId, status: 'open', phoneNumber: phone });
                 io.emit('instances_updated', { instanceId });
 
-                // Synchronize Group Names in Background for accurate group identification
-                if (sock.groupFetchAllParticipating) {
-                    sock.groupFetchAllParticipating().then(async (groups) => {
-                        if (groups && typeof groups === 'object') {
-                            for (const [gid, gdata] of Object.entries(groups)) {
-                                if (gdata && gdata.subject) {
-                                    await pool.query(
-                                        'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
-                                        [instanceId, gid, gdata.subject]
-                                    ).catch(() => {});
-                                }
-                            }
-                            console.log(`[Instance ${instanceId}] Synced ${Object.keys(groups).length} WhatsApp group names`);
+                // Logic: Auto-fetch all participating groups so group names and subjects are stored in chat_contacts
+                try {
+                    const groups = await sock.groupFetchAllParticipating();
+                    for (const gId in groups) {
+                        const grp = groups[gId];
+                        if (grp && (grp.subject || grp.name)) {
+                            const subject = grp.subject || grp.name;
+                            await pool.query(
+                                'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                                [instanceId, grp.id || gId, subject]
+                            ).catch(() => {});
                         }
-                    }).catch(() => {});
+                    }
+                } catch (gSyncErr) {
+                    console.log(`[Instance ${instanceId}] Group metadata sync notice:`, gSyncErr.message);
                 }
             }
         });
 
         sock.ev.on('creds.update', saveCreds);
 
-        // --- CONTACTS AND GROUPS METADATA SYNC ---
-        // Instruction: Synchronize address book contacts, group names, and chat metadata on connect & updates
-        // Logic: Stores contact push names, saved names, and group subjects into chat_contacts so chat displays real names instead of raw IDs
+        // Logic: Listen for group upserts and updates to capture real-time WhatsApp group subjects
+        sock.ev.on('groups.upsert', async (groups) => {
+            for (const grp of (groups || [])) {
+                if (grp && grp.id && (grp.subject || grp.name)) {
+                    await pool.query(
+                        'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                        [instanceId, grp.id, grp.subject || grp.name]
+                    ).catch(() => {});
+                }
+            }
+        });
+
+        sock.ev.on('groups.update', async (updates) => {
+            for (const upd of (updates || [])) {
+                if (upd && upd.id && (upd.subject || upd.name)) {
+                    await pool.query(
+                        'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                        [instanceId, upd.id, upd.subject || upd.name]
+                    ).catch(() => {});
+                }
+            }
+        });
+
+        // Logic: Listen for contact upserts and updates to capture phone book contact names
         sock.ev.on('contacts.upsert', async (contacts) => {
-            try {
-                for (const c of contacts) {
-                    const name = c.name || c.notify || c.verifiedName;
-                    if (name && c.id) {
-                        await pool.query(
-                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
-                            [instanceId, c.id, name]
-                        ).catch(() => {});
-                    }
+            for (const c of (contacts || [])) {
+                const cName = c.name || c.notify || c.verifiedName;
+                if (c && c.id && cName) {
+                    await pool.query(
+                        'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
+                        [instanceId, c.id, cName]
+                    ).catch(() => {});
                 }
-            } catch (e) {}
+            }
         });
 
-        // Instruction: Capture incremental contact name changes
-        // Logic: Updates chat_contacts when a user updates their WhatsApp profile name or phone contact syncs
         sock.ev.on('contacts.update', async (updates) => {
-            try {
-                for (const c of updates) {
-                    const name = c.name || c.notify || c.verifiedName;
-                    if (name && c.id) {
-                        await pool.query(
-                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
-                            [instanceId, c.id, name]
-                        ).catch(() => {});
-                    }
+            for (const c of (updates || [])) {
+                const cName = c.name || c.notify || c.verifiedName;
+                if (c && c.id && cName) {
+                    await pool.query(
+                        'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
+                        [instanceId, c.id, cName]
+                    ).catch(() => {});
                 }
-            } catch (e) {}
-        });
-
-        // Instruction: Capture group subjects on group settings or title update
-        // Logic: Updates group_name in chat_contacts so group chats display their subject title
-        sock.ev.on('groups.update', async (groupUpdates) => {
-            try {
-                for (const g of groupUpdates) {
-                    if (g.id && g.subject) {
-                        await pool.query(
-                            'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
-                            [instanceId, g.id, g.subject]
-                        ).catch(() => {});
-                    }
-                }
-            } catch (e) {}
-        });
-
-        // Instruction: Capture chats, contacts, and historical messages on initial connection history sync
-        // Logic: Baileys emits messaging-history.set on first connection; extracts all contact names, group subjects, and past message history immediately so sent & received chats appear right away
-        sock.ev.on('messaging-history.set', async ({ chats, contacts, messages, isLatest }) => {
-            try {
-                if (contacts && Array.isArray(contacts)) {
-                    for (const c of contacts) {
-                        const name = c.name || c.notify || c.verifiedName;
-                        if (name && c.id) {
-                            const cleanJid = (c.id.includes(':') && !c.id.endsWith('@g.us')) ? `${c.id.split('@')[0].split(':')[0]}@${c.id.split('@')[1] || 's.whatsapp.net'}` : c.id;
-                            await pool.query(
-                                'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
-                                [instanceId, cleanJid, name]
-                            ).catch(() => {});
-                        }
-                    }
-                }
-                if (chats && Array.isArray(chats)) {
-                    for (const ch of chats) {
-                        if (ch.id && ch.name) {
-                            const isGroup = ch.id.endsWith('@g.us');
-                            const col = isGroup ? 'group_name' : 'push_name';
-                            const cleanJid = (ch.id.includes(':') && !isGroup) ? `${ch.id.split('@')[0].split(':')[0]}@${ch.id.split('@')[1] || 's.whatsapp.net'}` : ch.id;
-                            await pool.query(
-                                `INSERT INTO chat_contacts (instance_id, jid, ${col}) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET ${col} = EXCLUDED.${col}`,
-                                [instanceId, cleanJid, ch.name]
-                            ).catch(() => {});
-                        }
-                    }
-                }
-                if (messages && Array.isArray(messages)) {
-                    for (const msg of messages) {
-                        if (!msg || !msg.message) continue;
-                        saveMessage(msg.key, msg.message);
-                        let from = msg.key.remoteJid;
-                        if (!from || from === 'status@broadcast') continue;
-                        if (from.includes(':') && !from.endsWith('@g.us')) {
-                            const userPart = from.split('@')[0].split(':')[0];
-                            const domain = from.split('@')[1] || 's.whatsapp.net';
-                            from = `${userPart}@${domain}`;
-                        }
-                        const fromMe = Boolean(msg.key.fromMe);
-                        const mContent = msg.message?.ephemeralMessage?.message || 
-                                         msg.message?.viewOnceMessage?.message || 
-                                         msg.message?.viewOnceMessageV2?.message || 
-                                         msg.message?.documentWithCaptionMessage?.message || 
-                                         msg.message;
-                        const text = mContent?.conversation || 
-                                     mContent?.extendedTextMessage?.text || 
-                                     mContent?.imageMessage?.caption || 
-                                     mContent?.videoMessage?.caption || 
-                                     mContent?.documentMessage?.caption || '';
-                        let rawTs = msg.messageTimestamp;
-                        let tsMillis = Date.now();
-                        if (typeof rawTs === 'object' && rawTs !== null) {
-                            const low = rawTs.low !== undefined ? rawTs.low : Number(rawTs.toString());
-                            tsMillis = (!isNaN(low) && low > 0) ? (low < 10000000000 ? low * 1000 : low) : Date.now();
-                        } else if (typeof rawTs === 'number') {
-                            tsMillis = rawTs < 10000000000 ? rawTs * 1000 : rawTs;
-                        }
-                        const parsedDate = new Date(tsMillis);
-                        await pool.query(
-                            'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
-                            [msg.key.id, instanceId, from, fromMe, text, parsedDate, fromMe ? 'sent' : 'delivered']
-                        ).catch(() => {});
-                    }
-                }
-            } catch (e) {}
-        });
-
-        // Instruction: Listen for new chat creation or subject assignment
-        // Logic: Ensures newly created groups or direct chats have their names recorded immediately
-        sock.ev.on('chats.upsert', async (newChats) => {
-            try {
-                for (const ch of newChats) {
-                    if (ch.id && ch.name) {
-                        const isGroup = ch.id.endsWith('@g.us');
-                        const col = isGroup ? 'group_name' : 'push_name';
-                        await pool.query(
-                            `INSERT INTO chat_contacts (instance_id, jid, ${col}) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET ${col} = EXCLUDED.${col}`,
-                            [instanceId, ch.id, ch.name]
-                        ).catch(() => {});
-                    }
-                }
-            } catch (e) {}
+            }
         });
 
         // --- MESSAGE STATUS UPDATES (Ticks) ---
@@ -1474,77 +1384,91 @@ async function connectToWhatsApp(instanceId) {
             }
         });
 
-        // --- AUTO RESPONDER & CHAT LISTENER ---
-        // Logic: Listen for incoming and outgoing messages (both notify and append from phone), saving binary media to uploads/
+        // --- INITIAL MESSAGING HISTORY SYNC (Contacts, Groups, Chats) ---
+        // Instruction: Listen for initial WhatsApp sync event so contacts and group subjects populate immediately
+        sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
+            try {
+                for (const c of (contacts || [])) {
+                    const cName = c.name || c.notify || c.verifiedName;
+                    if (c && c.id && cName) {
+                        const cleanJid = c.id.endsWith('@g.us') ? c.id : (jidNormalizedUser ? jidNormalizedUser(c.id) : c.id);
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
+                            [instanceId, cleanJid, cName]
+                        ).catch(() => {});
+                    }
+                }
+                for (const ch of (chats || [])) {
+                    if (ch && ch.id && (ch.name || ch.subject)) {
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                            [instanceId, ch.id, ch.name || ch.subject]
+                        ).catch(() => {});
+                    }
+                }
+            } catch (histErr) {
+                console.error('[Messaging History Sync Error]', histErr.message);
+            }
+        });
+
+        // --- AUTO RESPONDER, AI BOT & CHAT LISTENER ---
+        // Instruction: Handle both incoming messages and outgoing messages sent by user/phone/platform/bot
         sock.ev.on('messages.upsert', async (m) => {
-            if (m.type !== 'notify' && m.type !== 'append') return;
-            const msgsList = m.messages || [];
-            
-            for (const msg of msgsList) {
+            if (!m || !m.messages || !Array.isArray(m.messages)) return;
+
+            for (const msg of m.messages) {
                 if (!msg || !msg.message) continue;
+                if (msg.key && msg.key.remoteJid === 'status@broadcast') continue;
 
                 saveMessage(msg.key, msg.message);
 
-                let from = msg.key.remoteJid;
-                if (!from || from === 'status@broadcast') continue;
-
-                // Instruction: Normalize multi-device JID colon suffix (e.g. 919876543210:0@s.whatsapp.net -> 919876543210@s.whatsapp.net)
-                // Logic: Phone-sent messages in Baileys contain device suffixes; cleaning them ensures all sent and received messages attach to the same contact session
-                if (from.includes(':') && !from.endsWith('@g.us')) {
-                    const userPart = from.split('@')[0].split(':')[0];
-                    const domain = from.split('@')[1] || 's.whatsapp.net';
-                    from = `${userPart}@${domain}`;
-                }
-
+                // Instruction: Normalize user JID (strip device ID like :1 or :2) so messages sent from phone match contact chat
+                const rawFrom = msg.key.remoteJid;
+                const from = (rawFrom && rawFrom.endsWith('@g.us')) 
+                    ? rawFrom 
+                    : (jidNormalizedUser ? jidNormalizedUser(rawFrom) : (rawFrom ? rawFrom.split(':')[0] + '@s.whatsapp.net' : ''));
                 const fromMe = Boolean(msg.key.fromMe);
                 const pushName = msg.pushName;
                 
-                // Capture Metadata (PushName / Group Name)
+                // Instruction: Capture group subjects and user push names into chat_contacts table
                 try {
                     if (from.endsWith('@g.us')) {
-                        // Check if we need to fetch group name
                         const existing = await pool.query('SELECT group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2', [instanceId, from]);
                         if (existing.rows.length === 0 || !existing.rows[0].group_name) {
-                            const meta = await sock.groupMetadata(from);
-                            if (meta && meta.subject) {
+                            const meta = await sock.groupMetadata(from).catch(() => null);
+                            if (meta && (meta.subject || meta.name)) {
                                 await pool.query(
-                                    'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = $3',
-                                    [instanceId, from, meta.subject]
+                                    'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                                    [instanceId, from, meta.subject || meta.name]
                                 );
                             }
                         }
                     } else if (pushName && !fromMe) {
                         await pool.query(
-                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = $3',
+                            'INSERT INTO chat_contacts (instance_id, jid, push_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name',
                             [instanceId, from, pushName]
                         );
                     }
-                } catch (metaErr) {
-                    // Silent fail for metadata fetch to not block message processing
-                }
+                } catch (metaErr) {}
                 
-                // Instruction: Unwrap nested message structures (ephemeral, view-once, document-with-caption)
-                // Logic: WhatsApp wraps messages in ephemeral/viewOnce layers; unwrapping gets to the actual conversation or media payload
-                const mContent = msg.message?.ephemeralMessage?.message || 
-                                 msg.message?.viewOnceMessage?.message || 
-                                 msg.message?.viewOnceMessageV2?.message || 
-                                 msg.message?.documentWithCaptionMessage?.message || 
-                                 msg.message;
+                // Instruction: Unwrap view-once, ephemeral, or wrapped messages so all content and media are detected
+                const content = (normalizeMessageContent ? normalizeMessageContent(msg.message) : null) || msg.message;
 
-                // Extract Text Content from all standard and interactive fields
-                let text = mContent?.conversation || 
-                           mContent?.extendedTextMessage?.text || 
-                           mContent?.imageMessage?.caption || 
-                           mContent?.videoMessage?.caption || 
-                           mContent?.documentMessage?.caption || 
-                           mContent?.buttonsResponseMessage?.selectedDisplayText || 
-                           mContent?.listResponseMessage?.title || '';
+                // Instruction: Extract text message content from all message subtypes
+                let text = content.conversation || 
+                             content.extendedTextMessage?.text || 
+                             content.imageMessage?.caption || 
+                             content.videoMessage?.caption || 
+                             content.documentMessage?.caption || 
+                             content.documentWithCaptionMessage?.message?.documentMessage?.caption || 
+                             content.buttonsResponseMessage?.selectedDisplayText || 
+                             content.listResponseMessage?.title || '';
 
                 let mediaType = null;
 
-                if (mContent?.interactiveResponseMessage?.nativeFlowResponseMessage) {
+                if (content.interactiveResponseMessage?.nativeFlowResponseMessage) {
                     try {
-                        const rawParams = mContent.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson;
+                        const rawParams = content.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson;
                         const params = typeof rawParams === 'string' ? JSON.parse(rawParams) : rawParams;
                         let flowSummary = '📋 [Flow Response Received]\n';
                         if (typeof params === 'object' && params !== null) {
@@ -1564,55 +1488,55 @@ async function connectToWhatsApp(instanceId) {
                         }
                         mediaType = 'flow_response';
                     } catch (e) {
-                        text = mContent.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || text;
+                        text = content.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || text;
                         mediaType = 'flow_response';
                     }
                 }
                 
-                // Instruction: Extract binary media and save with correct extension to uploads/
-                // Logic: Accurately checks mimetype so voice notes are saved as .ogg (not .mp3) and images/videos/docs maintain their true format without corruption
+                // Instruction: Safely download media to physical files in uploadsDir with reuploadRequest to prevent corrupted files
                 let mediaUrl = null;
+                let originalFileName = null;
 
                 try {
-                    if (mContent?.imageMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
-                        const mime = mContent.imageMessage.mimetype || 'image/jpeg';
-                        let ext = mime.split('/')[1]?.split(';')[0] || 'jpg';
-                        if (ext === 'jpeg') ext = 'jpg';
-                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+                    const docMsg = content.documentMessage || content.documentWithCaptionMessage?.message?.documentMessage;
+                    const downloadOpts = { 
+                        logger: pino({ level: 'silent' }),
+                        reuploadRequest: sock.updateMediaMessage 
+                    };
+
+                    if (content.imageMessage) {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, downloadOpts);
+                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.jpg`;
                         fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
                         mediaUrl = `/uploads/${fileName}`;
                         mediaType = 'image';
-                    } else if (mContent?.videoMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
-                        const isGif = Boolean(mContent.videoMessage.gifPlayback);
-                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`;
+                    } else if (content.videoMessage) {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, downloadOpts);
+                        const isGif = Boolean(content.videoMessage.gifPlayback);
+                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.mp4`;
                         fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
                         mediaUrl = `/uploads/${fileName}`;
                         mediaType = isGif ? 'gif' : 'video';
-                    } else if (mContent?.audioMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
-                        const isPtt = Boolean(mContent.audioMessage.ptt);
-                        const mime = (mContent.audioMessage.mimetype || '').toLowerCase();
-                        let ext = 'ogg';
-                        if (mime.includes('mp4') || mime.includes('m4a')) ext = 'm4a';
-                        else if (mime.includes('opus') || mime.includes('ogg')) ext = 'ogg';
-                        else if (mime.includes('mpeg') || mime.includes('mp3')) ext = 'mp3';
-                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+                    } else if (content.audioMessage) {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, downloadOpts);
+                        const isPtt = Boolean(content.audioMessage.ptt);
+                        const isOgg = content.audioMessage.mimetype?.includes('ogg') || isPtt;
+                        const ext = isOgg ? 'ogg' : 'mp3';
+                        const fileName = `audio_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`;
                         fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
                         mediaUrl = `/uploads/${fileName}`;
                         mediaType = isPtt ? 'voice' : 'audio';
-                    } else if (mContent?.documentMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
-                        const origName = mContent.documentMessage.fileName || 'document.pdf';
-                        let ext = path.extname(origName) || '.pdf';
-                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`;
+                    } else if (docMsg) {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, downloadOpts);
+                        originalFileName = docMsg.fileName || `doc_${Date.now()}`;
+                        const ext = path.extname(originalFileName) || '.bin';
+                        const fileName = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
                         fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
                         mediaUrl = `/uploads/${fileName}`;
                         mediaType = 'document';
-                    } else if (mContent?.stickerMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
-                        const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(7)}.webp`;
+                    } else if (content.stickerMessage) {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {}, downloadOpts);
+                        const fileName = `sticker_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.webp`;
                         fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
                         mediaUrl = `/uploads/${fileName}`;
                         mediaType = 'image';
@@ -1621,68 +1545,51 @@ async function connectToWhatsApp(instanceId) {
                     console.error('[Media Download Error]', mediaErr.message);
                 }
 
-                // Extract Quoted Message context
-                let quotedMsgId = null;
-                let quotedMsgJson = null;
-                try {
-                    const contextInfo = mContent?.extendedTextMessage?.contextInfo || 
-                                        mContent?.imageMessage?.contextInfo || 
-                                        mContent?.videoMessage?.contextInfo;
-                    if (contextInfo && contextInfo.stanzaId) {
-                        quotedMsgId = contextInfo.stanzaId;
-                        const qMsg = contextInfo.quotedMessage;
-                        if (qMsg) {
-                            const qText = qMsg.conversation || qMsg.extendedTextMessage?.text || '';
-                            const qType = qMsg.imageMessage ? 'image' : qMsg.videoMessage ? 'video' : 'text';
-                            quotedMsgJson = JSON.stringify({ text: qText, mediaType: qType });
-                        }
-                    }
-                } catch (e) {}
-
-                // Instruction: Safe date timestamp parsing supporting protobuf Long objects
-                // Logic: Avoids Invalid Date / NaN syntax errors in PostgreSQL when WhatsApp syncs sent or history messages
-                let rawTs = msg.messageTimestamp;
-                let tsMillis = Date.now();
-                if (typeof rawTs === 'object' && rawTs !== null) {
-                    const low = rawTs.low !== undefined ? rawTs.low : Number(rawTs.toString());
-                    tsMillis = (!isNaN(low) && low > 0) ? (low < 10000000000 ? low * 1000 : low) : Date.now();
-                } else if (typeof rawTs === 'number') {
-                    tsMillis = rawTs < 10000000000 ? rawTs * 1000 : rawTs;
-                } else if (typeof rawTs === 'string') {
-                    const parsedNum = Number(rawTs);
-                    if (!isNaN(parsedNum) && parsedNum > 0) {
-                        tsMillis = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum;
+            // Extract Quoted Message
+            let quotedMsgId = null;
+            let quotedMsgJson = null;
+            try {
+                const contextInfo = msg.message.extendedTextMessage?.contextInfo || 
+                                    msg.message.imageMessage?.contextInfo || 
+                                    msg.message.videoMessage?.contextInfo;
+                if (contextInfo && contextInfo.stanzaId) {
+                    quotedMsgId = contextInfo.stanzaId;
+                    // Store minimal quoted content
+                    const qMsg = contextInfo.quotedMessage;
+                    if (qMsg) {
+                        const qText = qMsg.conversation || qMsg.extendedTextMessage?.text || '';
+                        const qType = qMsg.imageMessage ? 'image' : qMsg.videoMessage ? 'video' : 'text';
+                        quotedMsgJson = JSON.stringify({ text: qText, mediaType: qType });
                     }
                 }
-                const parsedDate = new Date(tsMillis);
+            } catch (e) {}
 
-                // Store message in DB (both incoming and owner sent messages from WhatsApp app)
-                try {
-                    const msgId = msg.key.id;
-                    await pool.query(
-                        'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id, quoted_msg_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, text = COALESCE(NULLIF(EXCLUDED.text, \'\'), chat_messages.text), media_url = COALESCE(EXCLUDED.media_url, chat_messages.media_url), media_type = COALESCE(EXCLUDED.media_type, chat_messages.media_type)',
-                        [msgId, instanceId, from, fromMe, text, mediaUrl, mediaType, parsedDate, fromMe ? 'sent' : 'delivered', quotedMsgId, quotedMsgJson]
-                    );
+            // Store message in DB
+            try {
+                const msgId = msg.key.id;
+                const msgStatus = fromMe ? 'sent' : 'delivered';
+                const msgTs = msg.messageTimestamp ? new Date(msg.messageTimestamp * 1000) : new Date();
 
-                    // Instruction: Broadcast message immediately over Socket.io
-                    // Logic: Live updates the chat interface for both received messages and messages sent by the owner from their phone
-                    io.emit('new_message', {
-                        id: msgId,
-                        instanceId,
-                        remoteJid: from,
-                        fromMe,
-                        pushName: pushName || null,
-                        text,
-                        mediaUrl,
-                        mediaType,
-                        timestamp: parsedDate.toISOString(),
-                        status: fromMe ? 'sent' : 'delivered',
-                        quotedMsgId,
-                        quotedMsg: quotedMsgJson ? JSON.parse(quotedMsgJson) : null
-                    });
-                } catch (dbErr) {
-                    console.error('[Chat Storage Error]', dbErr.message);
-                }
+                await pool.query(
+                    'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id, quoted_msg_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, media_url = COALESCE(EXCLUDED.media_url, chat_messages.media_url), media_type = COALESCE(EXCLUDED.media_type, chat_messages.media_type)',
+                    [msgId, instanceId, from, fromMe, text, mediaUrl, mediaType, msgTs, msgStatus, quotedMsgId, quotedMsgJson]
+                );
+
+                // Logic: Emit real-time message with correct status, media URL, and file name
+                io.emit('new_message', {
+                    id: msgId,
+                    instanceId,
+                    remoteJid: from,
+                    fromMe,
+                    text,
+                    mediaUrl,
+                    mediaType,
+                    fileName: originalFileName,
+                    timestamp: msgTs.toISOString(),
+                    status: msgStatus,
+                    quotedMsgId,
+                    quotedMsg: quotedMsgJson ? JSON.parse(quotedMsgJson) : null
+                });
 
                 // Send Webhook if configured
                 try {
@@ -1822,7 +1729,7 @@ async function connectToWhatsApp(instanceId) {
                                 }
                             }
 
-                            let autoMsgId = 'auto_' + Date.now();
+                            let sentReplyMsg = null;
                             if (useInteractive) {
                                 const msgGen = generateWAMessageFromContent(from, interactiveMessageContent, { 
                                   userJid: sock.user.id,
@@ -1831,32 +1738,26 @@ async function connectToWhatsApp(instanceId) {
                                 await sock.relayMessage(from, msgGen.message, { messageId: msgGen.key.id });
                                 if (msgGen && msgGen.key && msgGen.message) {
                                     saveMessage(msgGen.key, msgGen.message);
-                                    if (msgGen.key.id) autoMsgId = msgGen.key.id;
                                 }
+                                sentReplyMsg = msgGen;
                             } else {
                                 const sent = await sock.sendMessage(from, payload);
                                 if (sent && sent.key && sent.message) {
                                     saveMessage(sent.key, sent.message);
-                                    if (sent.key.id) autoMsgId = sent.key.id;
                                 }
+                                sentReplyMsg = sent;
                             }
                             
-                            // Log auto-response event in database
+                            // Logic: Store auto-response message in chat_messages & emit so it displays in ChatInterface
+                            const replyMsgId = sentReplyMsg?.key?.id || `auto_${Date.now()}`;
                             const responseText = rule.response_message || 'Media Auto-Response';
                             await pool.query(
-                                'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ((SELECT user_id FROM instances WHERE id = $1), $1, $2, $3, $4, $5)',
-                                [instanceId, from, 'auto_responded', autoMsgId, responseText]
-                            );
-
-                            // Instruction: Save auto-responder message to chat_messages and emit socket event
-                            // Logic: Makes keyword rule auto-responses immediately visible in the chat conversation history
-                            await pool.query(
                                 'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING',
-                                [autoMsgId, instanceId, from, true, responseText, rule.media_url || null, rule.media_type || null, new Date(), 'sent']
+                                [replyMsgId, instanceId, from, true, responseText, rule.media_url || null, rule.media_type || null, new Date(), 'sent']
                             ).catch(() => {});
 
                             io.emit('new_message', {
-                                id: autoMsgId,
+                                id: replyMsgId,
                                 instanceId,
                                 remoteJid: from,
                                 fromMe: true,
@@ -1866,6 +1767,12 @@ async function connectToWhatsApp(instanceId) {
                                 timestamp: new Date().toISOString(),
                                 status: 'sent'
                             });
+
+                            // Log auto-response event in database
+                            await pool.query(
+                                'INSERT INTO message_logs (user_id, instance_id, recipient, status, message_id, content) VALUES ((SELECT user_id FROM instances WHERE id = $1), $1, $2, $3, $4, $5)',
+                                [instanceId, from, 'auto_responded', replyMsgId, responseText]
+                            ).catch(() => {});
                         }
                     } catch (err) {
                         console.error('[AutoResponder Keyword Error]', err.message);
@@ -1880,13 +1787,12 @@ async function connectToWhatsApp(instanceId) {
                         if (aiReply) {
                             console.log(`[Baileys AI Auto-Reply] Successfully generated reply for ${from}: ${aiReply.substring(0, 50)}...`);
                             const sentMsg = await sock.sendMessage(from, { text: aiReply });
-                            const aiMsgId = sentMsg?.key?.id || ('ai_' + Date.now());
                             if (sentMsg && sentMsg.key && sentMsg.message) {
                                 saveMessage(sentMsg.key, sentMsg.message);
                             }
+                            const aiMsgId = sentMsg?.key?.id || `ai_${Date.now()}`;
 
-                            // Instruction: Save AI bot response to chat_messages and emit socket event
-                            // Logic: Ensures AI auto-replies are permanently logged in chat history and show live in ChatInterface
+                            // Logic: Store sent AI reply in chat_messages so it shows in ChatInterface
                             await pool.query(
                                 'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, timestamp, status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING',
                                 [aiMsgId, instanceId, from, true, aiReply, new Date(), 'sent']
@@ -1898,6 +1804,8 @@ async function connectToWhatsApp(instanceId) {
                                 remoteJid: from,
                                 fromMe: true,
                                 text: aiReply,
+                                mediaUrl: null,
+                                mediaType: null,
                                 timestamp: new Date().toISOString(),
                                 status: 'sent'
                             });
@@ -1908,7 +1816,10 @@ async function connectToWhatsApp(instanceId) {
                         try { sock.sendPresenceUpdate('paused', from).catch(() => {}); } catch (pe) {}
                     }
                 }
+            } catch (dbErr) {
+                console.error('[Chat Storage Error]', dbErr.message);
             }
+        } // End for (const msg of m.messages)
         });
 
     } catch (err) {
@@ -6125,54 +6036,25 @@ app.post('/api/chat/labels', authenticate, async (req, res) => {
 app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => {
     const { instanceId, jid } = req.params;
     try {
-        // Instruction: Check group metadata dynamically for WhatsApp groups
-        // Logic: If remoteJid is a group (@g.us), fetch real subject from Baileys socket if not yet in chat_contacts
-        if (jid.endsWith('@g.us')) {
-            const metaRes = await pool.query(
-                'SELECT group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
-                [instanceId, jid]
-            );
-            if (metaRes.rows.length > 0 && metaRes.rows[0].group_name) {
-                return res.json({ name: metaRes.rows[0].group_name });
-            }
+        const cleanNumber = jid.replace(/\D/g, '');
+        
+        // 1. Check User's Saved Contacts (Highest Priority CRM match)
+        const contactRes = await pool.query(`
+            SELECT c.original as name 
+            FROM contacts c
+            JOIN contact_groups cg ON c.group_id = cg.id
+            WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = $3)
+            LIMIT 1
+        `, [req.user.id, cleanNumber, jid.split('@')[0]]);
 
-            const inst = instancesMap.get(instanceId);
-            if (inst && inst.sock && inst.sock.groupMetadata) {
-                try {
-                    const gMeta = await inst.sock.groupMetadata(jid);
-                    if (gMeta && gMeta.subject) {
-                        await pool.query(
-                            'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
-                            [instanceId, jid, gMeta.subject]
-                        ).catch(() => {});
-                        return res.json({ name: gMeta.subject });
-                    }
-                } catch (gmErr) {}
-            }
+        if (contactRes.rows.length > 0 && contactRes.rows[0].name) {
+            return res.json({ name: contactRes.rows[0].name });
         }
 
-        // Instruction: Check user's saved contacts with country-code agnostic matching
-        // Logic: Matches both full number (919876543210) and last 10 digits (9876543210) so saved address book names always resolve
-        const cleanNumber = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-        if (cleanNumber) {
-            const contactRes = await pool.query(`
-                SELECT c.original as name 
-                FROM contacts c
-                JOIN contact_groups cg ON c.group_id = cg.id
-                WHERE cg.user_id = $1 AND (c.number = $2 OR c.number = RIGHT($2, 10) OR RIGHT(c.number, 10) = RIGHT($2, 10))
-                LIMIT 1
-            `, [req.user.id, cleanNumber]);
-
-            if (contactRes.rows.length > 0 && contactRes.rows[0].name) {
-                return res.json({ name: contactRes.rows[0].name });
-            }
-        }
-
-        // Instruction: Check captured metadata in chat_contacts
-        // Logic: Returns push name or group name stored from incoming/history sync
+        // 2. Check Captured Metadata (PushName or Group Subject)
         const metaRes = await pool.query(
-            'SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND jid = $2',
-            [instanceId, jid]
+            `SELECT push_name, group_name FROM chat_contacts WHERE instance_id = $1 AND (jid = $2 OR jid = $3 OR jid = $4)`,
+            [instanceId, jid, `${cleanNumber}@s.whatsapp.net`, cleanNumber]
         );
 
         if (metaRes.rows.length > 0) {
@@ -6181,6 +6063,25 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
             if (push_name) return res.json({ name: push_name });
         }
 
+        // 3. For Groups: Live query groupMetadata from active socket if available
+        if (jid.endsWith('@g.us')) {
+            const inst = instancesMap.get(instanceId);
+            if (inst && inst.sock && inst.status === 'open') {
+                try {
+                    const groupMeta = await inst.sock.groupMetadata(jid);
+                    if (groupMeta && (groupMeta.subject || groupMeta.name)) {
+                        const grpName = groupMeta.subject || groupMeta.name;
+                        await pool.query(
+                            'INSERT INTO chat_contacts (instance_id, jid, group_name) VALUES ($1, $2, $3) ON CONFLICT (instance_id, jid) DO UPDATE SET group_name = EXCLUDED.group_name',
+                            [instanceId, jid, grpName]
+                        ).catch(() => {});
+                        return res.json({ name: grpName });
+                    }
+                } catch (gErr) {}
+            }
+        }
+
+        // 4. Fallback (handled by frontend usually, but we can return null)
         res.json({ name: null });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -6191,35 +6092,31 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
     try {
         const { instanceId } = req.params;
 
-        // Instruction: Ultra-fast indexed session fetching without heavy unindexed SQL joins
-        // Logic: Queries latest message per remote_jid directly using index, then resolves contact names & labels in Node memory for <10ms execution speed
-        const [sessionsRes, contactsRes, addressBookRes, unreadRes, inboundRes, labelsRes] = await Promise.all([
+        // Instruction: Fetch user contacts, distinct latest messages, unread counts, inbound timestamps, and labels in parallel
+        const [sessionsRes, unreadRes, inboundRes, labelsRes, contactsRes] = await Promise.all([
             pool.query(`
-                SELECT DISTINCT ON (remote_jid)
-                    id,
-                    instance_id,
-                    remote_jid,
-                    from_me,
-                    text,
-                    media_url,
-                    media_type,
-                    status,
-                    timestamp
-                FROM chat_messages
-                WHERE instance_id = $1
-                ORDER BY remote_jid, timestamp DESC
+                SELECT DISTINCT ON (m.remote_jid)
+                    m.id,
+                    m.instance_id,
+                    m.remote_jid,
+                    m.from_me,
+                    m.text,
+                    m.media_url,
+                    m.media_type,
+                    m.status,
+                    m.timestamp,
+                    COALESCE(cc.group_name, cc.push_name) AS contact_name,
+                    cc.push_name,
+                    cc.group_name
+                FROM chat_messages m
+                LEFT JOIN chat_contacts cc ON cc.instance_id = m.instance_id AND (
+                    cc.jid = m.remote_jid 
+                    OR cc.jid = split_part(m.remote_jid, ':', 1) || '@s.whatsapp.net' 
+                    OR cc.jid = split_part(m.remote_jid, '@', 1)
+                )
+                WHERE m.instance_id = $1
+                ORDER BY m.remote_jid, m.timestamp DESC
             `, [instanceId]),
-            pool.query(`
-                SELECT jid, push_name, group_name
-                FROM chat_contacts
-                WHERE instance_id = $1
-            `, [instanceId]),
-            pool.query(`
-                SELECT c.original, c.number 
-                FROM contacts c 
-                JOIN contact_groups cg ON c.group_id = cg.id 
-                WHERE cg.user_id = (SELECT user_id FROM instances WHERE id = $1 LIMIT 1)
-            `, [instanceId]).catch(() => ({ rows: [] })),
             pool.query(`
                 SELECT remote_jid, COUNT(*) as count
                 FROM chat_messages
@@ -6237,36 +6134,24 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
                 FROM chat_session_labels sl
                 JOIN chat_labels l ON l.id = sl.label_id
                 WHERE sl.instance_id = $1
-            `, [instanceId])
+            `, [instanceId]),
+            pool.query(`
+                SELECT c.number, c.original 
+                FROM contacts c 
+                JOIN contact_groups cg ON c.group_id = cg.id 
+                WHERE cg.user_id = $1
+            `, [req.user.id]).catch(() => ({ rows: [] }))
         ]);
 
         if (sessionsRes.rows.length === 0) {
             return res.json([]);
         }
 
-        // Instruction: Build O(1) in-memory lookup maps for instant contact name resolution
-        // Logic: Resolves contact push names, group subjects, and address book names in memory without DB query penalties
-        const exactContactMap = new Map();
-        const cleanContactMap = new Map();
+        // Instruction: Map contacts by clean phone number for fast O(1) in-memory lookup
+        const contactMap = new Map();
         for (const c of contactsRes.rows) {
-            const name = c.group_name || c.push_name;
-            if (name) {
-                exactContactMap.set(c.jid, name);
-                const clean = c.jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-                if (clean) cleanContactMap.set(clean, name);
-            }
-        }
-
-        const addressBookMap = new Map();
-        for (const c of addressBookRes.rows) {
-            if (c.original && c.number) {
-                const clean = String(c.number).replace(/\D/g, '');
-                if (clean) {
-                    addressBookMap.set(clean, c.original);
-                    if (clean.length > 10) {
-                        addressBookMap.set(clean.slice(-10), c.original);
-                    }
-                }
+            if (c.number && c.original) {
+                contactMap.set(String(c.number).replace(/\D/g, ''), c.original);
             }
         }
 
@@ -6302,16 +6187,24 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
                 }
             }
 
-            const cleanNum = row.remote_jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-            const contactName = exactContactMap.get(row.remote_jid) || 
-                                cleanContactMap.get(cleanNum) || 
-                                addressBookMap.get(cleanNum) || 
-                                (cleanNum.length >= 10 ? addressBookMap.get(cleanNum.slice(-10)) : null) || 
-                                null;
+            // Instruction: Clean and format mediaUrl to prevent corruption
+            let cleanMediaUrl = row.media_url;
+            if (cleanMediaUrl && cleanMediaUrl.includes('/data:')) {
+                cleanMediaUrl = cleanMediaUrl.substring(cleanMediaUrl.indexOf('data:'));
+            } else if (cleanMediaUrl && cleanMediaUrl.startsWith('uploads/')) {
+                cleanMediaUrl = `/${cleanMediaUrl}`;
+            } else if (cleanMediaUrl && !cleanMediaUrl.startsWith('http') && !cleanMediaUrl.startsWith('/') && !cleanMediaUrl.startsWith('data:')) {
+                cleanMediaUrl = `/api/meta/media/${row.instance_id}/${cleanMediaUrl}`;
+            }
+
+            const cleanDigits = String(row.remote_jid).replace(/\D/g, '');
+            const resolvedName = row.group_name || row.push_name || row.contact_name || contactMap.get(cleanDigits) || null;
 
             return {
                 remoteJid: row.remote_jid,
-                contactName,
+                contactName: resolvedName,
+                groupName: row.group_name || null,
+                pushName: row.push_name || null,
                 unreadCount: unreadMap.get(row.remote_jid) || 0,
                 lastInboundTimestamp: lastInbound ? new Date(lastInbound).toISOString() : null,
                 isWindowActive,
@@ -6322,7 +6215,7 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
                     remoteJid: row.remote_jid,
                     fromMe: row.from_me,
                     text: row.text,
-                    mediaUrl: row.media_url,
+                    mediaUrl: cleanMediaUrl,
                     mediaType: row.media_type,
                     status: row.status || 'sent',
                     timestamp: row.timestamp
@@ -6335,31 +6228,43 @@ app.get('/api/chat/sessions/:instanceId', authenticate, async (req, res) => {
 
         res.json(sessions);
     } catch (err) {
-        console.error('[Sessions Query Error]', err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
-// Instruction: Permanent local disk caching for Meta Cloud API media
-// Logic: Downloads media once, stores in uploads/, serves with CORS & byte ranges so it never corrupts or fails
-app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
+// Instruction: Proxy and stream Meta Cloud API media or local uploads with byte-range and download support
+// Work: Retrieves WhatsApp media by ID or filename, verifies cache, and streams with range support or direct download
+app.get(['/api/meta/media/:instanceId/:mediaId', '/api/meta/media/:instanceId/:mediaId(*)'], async (req, res) => {
     try {
-        const { instanceId, mediaId } = req.params;
-        const cleanMediaId = String(mediaId).replace(/[^a-zA-Z0-9_\-]/g, '');
-        
-        // 1. Check if media file is already cached on local disk
-        if (fs.existsSync(uploadsDir)) {
-            const cachedFiles = fs.readdirSync(uploadsDir).filter(f => f.startsWith(`meta_${instanceId}_${cleanMediaId}`));
-            if (cachedFiles.length > 0) {
-                const cachedPath = path.join(uploadsDir, cachedFiles[0]);
-                res.setHeader('Access-Control-Allow-Origin', '*');
-                res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-                res.setHeader('Accept-Ranges', 'bytes');
-                if (req.query.download === '1') {
-                    res.setHeader('Content-Disposition', `attachment; filename="${cachedFiles[0]}"`);
-                }
-                return res.sendFile(cachedPath);
-            }
+        const { instanceId } = req.params;
+        let mediaId = req.params.mediaId || req.params[0] || '';
+        const isDownload = req.query.download === '1' || req.query.download === 'true';
+
+        // 1. If mediaId is an existing local file in uploadsDir, serve directly with byte ranges
+        const safeBase = path.basename(mediaId);
+        const directLocal = path.join(uploadsDir, safeBase);
+        if (fs.existsSync(directLocal)) {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            if (isDownload) return res.download(directLocal);
+            return res.sendFile(directLocal);
+        }
+
+        // Also check if safeBase without 'meta_' prefix exists
+        const unPrefixed = safeBase.replace(/^meta_/, '');
+        const unPrefixedPath = path.join(uploadsDir, unPrefixed);
+        if (fs.existsSync(unPrefixedPath)) {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            if (isDownload) return res.download(unPrefixedPath);
+            return res.sendFile(unPrefixedPath);
+        }
+
+        // 2. Check if this Meta media was already cached locally
+        const cachedFiles = fs.readdirSync(uploadsDir).filter(f => f.startsWith(`meta_${safeBase}`) || f.includes(safeBase.split('.')[0]));
+        if (cachedFiles.length > 0) {
+            const cachedPath = path.join(uploadsDir, cachedFiles[0]);
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            if (isDownload) return res.download(cachedPath);
+            return res.sendFile(cachedPath);
         }
 
         const instRes = await pool.query('SELECT meta_access_token FROM instances WHERE id = $1', [instanceId]);
@@ -6370,25 +6275,20 @@ app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
             const mediaRes = await fetch(mediaId, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
             });
             const cType = mediaRes.headers.get('content-type') || 'application/octet-stream';
-            let ext = cType.split('/')[1]?.split(';')[0] || 'bin';
-            if (ext === 'jpeg') ext = 'jpg';
-            const cacheName = `meta_${instanceId}_${cleanMediaId}.${ext}`;
+            let ext = cType.split('/')[1] || 'bin';
+            if (ext.includes(';')) ext = ext.split(';')[0];
+            const cachedName = `meta_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.${ext}`;
+            const cachedPath = path.join(uploadsDir, cachedName);
             const arrayBuf = await mediaRes.arrayBuffer();
-            const buffer = Buffer.from(arrayBuf);
-            fs.writeFileSync(path.join(uploadsDir, cacheName), buffer);
-
-            res.setHeader('Content-Type', cType);
+            fs.writeFileSync(cachedPath, Buffer.from(arrayBuf));
+            
             res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-            res.setHeader('Accept-Ranges', 'bytes');
-            if (req.query.download === '1') {
-                res.setHeader('Content-Disposition', `attachment; filename="${cacheName}"`);
-            }
-            return res.send(buffer);
+            if (isDownload) return res.download(cachedPath);
+            return res.sendFile(cachedPath);
         }
 
         const metadataRes = await fetch(`https://graph.facebook.com/v26.0/${mediaId}`, {
@@ -6404,64 +6304,57 @@ app.get('/api/meta/media/:instanceId/:mediaId', async (req, res) => {
         const mediaRes = await fetch(metadata.url, {
             headers: { 
                 'Authorization': `Bearer ${token}`,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
         
         const mimeType = metadata.mime_type || mediaRes.headers.get('content-type') || 'application/octet-stream';
-        let ext = mimeType.split('/')[1]?.split(';')[0] || 'bin';
-        if (ext === 'jpeg') ext = 'jpg';
-        const cacheName = `meta_${instanceId}_${cleanMediaId}.${ext}`;
+        let ext = mimeType.split('/')[1] || 'bin';
+        if (ext.includes(';')) ext = ext.split(';')[0];
+        if (mimeType.includes('ogg')) ext = 'ogg';
+        else if (mimeType.includes('webm')) ext = 'webm';
+        else if (mimeType.includes('mp4')) ext = 'mp4';
+
+        const cachedName = `meta_${safeBase}.${ext}`;
+        const cachedPath = path.join(uploadsDir, cachedName);
         const arrayBuf = await mediaRes.arrayBuffer();
-        const buffer = Buffer.from(arrayBuf);
-        fs.writeFileSync(path.join(uploadsDir, cacheName), buffer);
-        
-        res.setHeader('Content-Type', mimeType);
+        fs.writeFileSync(cachedPath, Buffer.from(arrayBuf));
+
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-        res.setHeader('Accept-Ranges', 'bytes');
-        if (req.query.download === '1') {
-            res.setHeader('Content-Disposition', `attachment; filename="${cacheName}"`);
+        if (isDownload) {
+            return res.download(cachedPath, `media_${safeBase}.${ext}`);
         }
-        res.send(buffer);
+        return res.sendFile(cachedPath);
     } catch (e) {
         console.error("[Meta Media Fetch Error]", e);
         res.status(500).send('Error fetching media');
     }
 });
 
+// Instruction: Fetch full chat messages for selected conversation, matching candidate JID variants
 app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, res) => {
     try {
         const { instanceId, remoteJid } = req.params;
         const cleanNumber = remoteJid.replace(/\D/g, '');
         const candidateJids = [remoteJid];
         if (cleanNumber) {
-            candidateJids.push(
-                cleanNumber, 
-                `${cleanNumber}@s.whatsapp.net`, 
-                `${cleanNumber}@c.us`,
-                `${cleanNumber}:0@s.whatsapp.net`,
-                `${cleanNumber}:1@s.whatsapp.net`,
-                `${cleanNumber}:2@s.whatsapp.net`
-            );
+            candidateJids.push(cleanNumber, `${cleanNumber}@s.whatsapp.net`, `${cleanNumber}@c.us`);
+        }
+        const strippedJid = remoteJid.split(':')[0];
+        if (strippedJid && strippedJid.includes('@')) {
+            candidateJids.push(strippedJid);
         }
 
-        // Instruction: Fetch all conversation messages including both sent by user and received from contact
-        // Logic: Matches both full JID and device-colon variants so messages sent from WhatsApp phone always show
         const result = await pool.query(`
             SELECT * FROM chat_messages
             WHERE instance_id = $1 AND (
                 remote_jid = ANY($2)
-                OR (
-                    $3 != '' AND (
-                        split_part(split_part(remote_jid, '@', 1), ':', 1) = $3
-                        OR regexp_replace(split_part(remote_jid, '@', 1), '\\D', '', 'g') = $3
-                    )
-                )
+                OR split_part(remote_jid, ':', 1) || '@s.whatsapp.net' = ANY($2)
+                OR split_part(remote_jid, '@', 1) = ANY($2)
             )
             ORDER BY timestamp ASC
-            LIMIT 500
-        `, [instanceId, candidateJids, cleanNumber || '']);
+            LIMIT 400
+        `, [instanceId, candidateJids]);
         
         // Fast cached template definitions for this instance to resolve template content without DB penalty
         if (!global._metaTplCache) global._metaTplCache = new Map();
@@ -6525,7 +6418,12 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
 
         const mapped = result.rows.map(row => {
             let mediaUrl = row.media_url;
-            if (mediaUrl && !mediaUrl.startsWith('http') && !mediaUrl.startsWith('/')) {
+            // Logic: Clean media URL to prevent corrupted Meta proxy URLs and preserve base64 and upload files
+            if (mediaUrl && mediaUrl.includes('/data:')) {
+                mediaUrl = mediaUrl.substring(mediaUrl.indexOf('data:'));
+            } else if (mediaUrl && mediaUrl.startsWith('uploads/')) {
+                mediaUrl = `/${mediaUrl}`;
+            } else if (mediaUrl && !mediaUrl.startsWith('http') && !mediaUrl.startsWith('/') && !mediaUrl.startsWith('data:')) {
                 mediaUrl = `/api/meta/media/${row.instance_id}/${mediaUrl}`;
             }
             let mediaType = row.media_type;
@@ -6719,45 +6617,27 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
                 console.error('[Meta Direct Chat Wallet Notice]', deductErr.message);
             }
         } else {
-            // Instruction: Send outgoing media or text via Baileys socket
-            // Logic: Extracts true buffer and MIME types so voice notes (ogg opus) and media files are never corrupted
             if (media) {
                 let mediaBuffer;
-                let mimeType = 'image/jpeg';
-                let ext = 'jpg';
-
                 if (media.startsWith('data:')) {
-                    const mimeMatch = media.match(/^data:(.*?);base64,/);
-                    if (mimeMatch) mimeType = mimeMatch[1];
-                    ext = mimeType.split('/')[1]?.split(';')[0] || 'jpg';
-                    const base64Data = media.split(',')[1];
-                    mediaBuffer = Buffer.from(base64Data, 'base64');
-                } else if (media.startsWith('/uploads/') || media.startsWith('uploads/')) {
-                    const cleanRel = media.substring(media.indexOf('uploads/'));
-                    const localPath = path.join(process.cwd(), cleanRel);
-                    if (fs.existsSync(localPath)) {
-                        mediaBuffer = fs.readFileSync(localPath);
-                        ext = path.extname(localPath).slice(1).toLowerCase() || 'jpg';
-                    } else {
-                        mediaBuffer = { url: media };
-                    }
+                    mediaBuffer = Buffer.from(media.split(',')[1], 'base64');
                 } else {
                     mediaBuffer = { url: media };
                 }
 
-                const bType = (type === 'audio' || type === 'voice') ? 'audio' : (type || 'image');
-                let audioMime = 'audio/ogg; codecs=opus';
-                if (type === 'voice') {
-                    audioMime = 'audio/ogg; codecs=opus';
-                } else if (type === 'audio') {
-                    audioMime = mimeType.startsWith('audio/') ? mimeType : 'audio/mp4';
+                // Instruction: Ensure proper voice note audio MIME type so WhatsApp renders as voice note
+                const isVoice = (type === 'voice');
+                const bType = (type === 'audio' || isVoice) ? 'audio' : (type || 'image');
+                let detectedMime = undefined;
+                if (media.startsWith('data:')) {
+                    const mimeMatch = media.match(/^data:(.*?);base64,/);
+                    detectedMime = mimeMatch ? mimeMatch[1] : undefined;
                 }
-
                 const bOptions = {
                     [bType]: mediaBuffer,
                     caption: (bType === 'audio' ? undefined : message),
-                    mimetype: (type === 'audio' || type === 'voice') ? audioMime : undefined,
-                    ptt: (type === 'voice'),
+                    mimetype: isVoice ? 'audio/ogg; codecs=opus' : (detectedMime || 'audio/mp4'),
+                    ptt: isVoice,
                     ...payload.contextInfo ? { contextInfo: payload.contextInfo } : {}
                 };
                 if (bType === 'document' && req.body.fileName) {
@@ -6774,38 +6654,48 @@ app.post('/api/chat/send', authenticate, async (req, res) => {
             msgId = sentMsg ? sentMsg.key.id : `msg_${Date.now()}`;
         }
         
-        // Instruction: Save base64 media payload to local disk in uploads/
-        // Logic: Ensures media is served with a clean URL and is accessible for preview and download
+        // Instruction: Normalize remoteJid so sent messages match the canonical conversation JID
+        const normalizedRemoteJid = (remoteJid && remoteJid.endsWith('@g.us')) 
+            ? remoteJid 
+            : (jidNormalizedUser ? jidNormalizedUser(remoteJid) : (remoteJid.includes('@') ? remoteJid : `${remoteJid.replace(/\D/g, '')}@s.whatsapp.net`));
+
+        // Instruction: Process and store sent media locally in uploads folder to guarantee instant accessibility
         let displayMediaUrl = media;
         if (media && media.startsWith('data:')) {
             const mimeMatch = media.match(/^data:(.*?);base64,/);
             const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
             let ext = mimeType.split('/')[1] || 'bin';
             if (ext.includes(';')) ext = ext.split(';')[0];
-            if (type === 'voice') ext = 'ogg';
+            if (type === 'voice' || type === 'audio') {
+                ext = mimeType.includes('ogg') ? 'ogg' : (mimeType.includes('webm') ? 'webm' : (mimeType.includes('mp4') || mimeType.includes('m4a') ? 'm4a' : 'mp3'));
+            } else if (type === 'document' && req.body.fileName) {
+                ext = path.extname(req.body.fileName).replace('.', '') || ext;
+            }
             const base64Data = media.split(',')[1];
             const buffer = Buffer.from(base64Data, 'base64');
-            const fileName = `chat_media_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+            const fileName = `chat_media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`;
             fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
             displayMediaUrl = `/uploads/${fileName}`;
+        } else if (displayMediaUrl && displayMediaUrl.startsWith('uploads/')) {
+            displayMediaUrl = `/${displayMediaUrl}`;
         }
 
+        // Instruction: Store sent message in database with normalized remoteJid
         await pool.query(
             'INSERT INTO chat_messages (id, instance_id, remote_jid, from_me, text, media_url, media_type, timestamp, status, quoted_msg_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING',
-            [msgId, instanceId, remoteJid, true, message, displayMediaUrl, type, new Date(), 'sent', quotedMsgId]
+            [msgId, instanceId, normalizedRemoteJid, true, message, displayMediaUrl, type, new Date(), 'sent', quotedMsgId]
         );
-        
-    
 
-        // Emit to Socket.io
+        // Instruction: Emit real-time sent message to Socket.io with normalized remoteJid and mediaUrl
         io.emit('new_message', {
             id: msgId,
             instanceId,
-            remoteJid,
+            remoteJid: normalizedRemoteJid,
             fromMe: true,
             text: message,
             mediaUrl: displayMediaUrl,
             mediaType: type,
+            fileName: req.body.fileName,
             timestamp: new Date().toISOString(),
             status: 'sent',
             quotedMsgId
@@ -7051,6 +6941,22 @@ async function startup() {
         await pool.query(`
             ALTER TABLE chat_messages ALTER COLUMN id DROP DEFAULT;
             ALTER TABLE chat_messages ALTER COLUMN id TYPE VARCHAR(100);
+            
+            -- Logic: Performance indexes for high-speed chat sessions and messages retrieval
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_inst_jid_time ON chat_messages(instance_id, remote_jid, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_inst_time ON chat_messages(instance_id, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_unread ON chat_messages(instance_id, from_me, status) WHERE from_me = false;
+            CREATE INDEX IF NOT EXISTS idx_chat_contacts_inst_jid ON chat_contacts(instance_id, jid);
+            CREATE INDEX IF NOT EXISTS idx_chat_session_labels_inst ON chat_session_labels(instance_id);
+
+            -- Logic: Repair legacy corrupted media URLs in database
+            UPDATE chat_messages 
+            SET media_url = substring(media_url from '/api/meta/media/[^/]+/(data:.*)$') 
+            WHERE media_url LIKE '/api/meta/media/%/data:%';
+
+            UPDATE chat_messages 
+            SET media_url = '/' || media_url 
+            WHERE media_url LIKE 'uploads/%';
         `);
     } catch (e) {
         console.warn("[iFastX] Startup Alter ID Notice:", e.message);
