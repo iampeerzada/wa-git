@@ -941,25 +941,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const currentInstId = selectedInstanceId;
     const controller = new AbortController();
 
-    // Show cached sessions instantly if available for zero-delay UI rendering
-    let cachedSessions = sessionsCacheRef.current[currentInstId];
-    if (!cachedSessions || cachedSessions.length === 0) {
-      try {
-        const stored = sessionStorage.getItem(`wa_cached_sessions_${currentInstId}`);
-        if (stored) {
-          cachedSessions = JSON.parse(stored);
-          sessionsCacheRef.current[currentInstId] = cachedSessions;
-        }
-      } catch(e) {}
-    }
-
-    if (cachedSessions && cachedSessions.length > 0) {
-      setSessions(cachedSessions);
-      setIsLoadingSessions(false);
-    } else {
-      setIsLoadingSessions(true);
-    }
-
     const fetchSessions = async () => {
       try {
         const res = await fetch(`${apiBase}/api/chat/sessions/${currentInstId}`, {

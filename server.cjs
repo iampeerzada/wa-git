@@ -156,140 +156,28 @@ app.use('/uploads', (req, res, next) => {
     next();
 }, express.static(uploadsDir));
 
-// Database Pool & High-Performance Embedded Fallback Engine
-const alasql = require('alasql');
-const dbFilePath = path.join(process.cwd(), 'wa_gateway_db.json');
-
+// Database Pool
 const pool = new Pool({ 
     connectionString: DATABASE_URL,
-    ssl: false,
-    connectionTimeoutMillis: 1000
+    ssl: false 
 });
-
-let pgAvailable = false;
-
-// 1. Initialize AlaSQL Schema
-function initAlaSqlSchema() {
-    try {
-        alasql(`
-            CREATE TABLE IF NOT EXISTS users (id STRING, parent_id STRING, name STRING, email STRING, password STRING, role STRING, permissions STRING, api_key STRING, created_at STRING);
-            CREATE TABLE IF NOT EXISTS instances (id STRING, user_id STRING, name STRING, provider STRING, status STRING, phone_number STRING, qr_code STRING, ai_enabled BOOLEAN, ai_provider STRING, ai_prompt STRING, openai_api_key STRING, gemini_api_key STRING, meta_phone_number_id STRING, meta_access_token STRING, meta_waba_id STRING, created_at STRING);
-            CREATE TABLE IF NOT EXISTS chat_messages (id STRING, instance_id STRING, remote_jid STRING, from_me BOOLEAN, text STRING, media_url STRING, media_type STRING, status STRING, timestamp STRING, push_name STRING, participant STRING, quoted_msg STRING);
-            CREATE TABLE IF NOT EXISTS chat_contacts (instance_id STRING, jid STRING, push_name STRING, group_name STRING, profile_picture_url STRING, about_status STRING, lid STRING);
-            CREATE TABLE IF NOT EXISTS chat_labels (id STRING, instance_id STRING, name STRING, color STRING);
-            CREATE TABLE IF NOT EXISTS chat_session_labels (instance_id STRING, remote_jid STRING, label_id STRING);
-            CREATE TABLE IF NOT EXISTS contacts (id STRING, group_id STRING, name STRING, original STRING, number STRING);
-            CREATE TABLE IF NOT EXISTS contact_groups (id STRING, user_id STRING, name STRING);
-            CREATE TABLE IF NOT EXISTS meta_templates (id STRING, instance_id STRING, name STRING, language STRING, category STRING, components STRING, status STRING);
-            CREATE TABLE IF NOT EXISTS plans (id STRING, name STRING, max_instances INT, max_messages INT, price INT);
-        `);
-
-        // Load persisted state if exists
-        if (fs.existsSync(dbFilePath)) {
-            const data = JSON.parse(fs.readFileSync(dbFilePath, 'utf8'));
-            for (const table in data) {
-                if (alasql.tables[table] && Array.isArray(data[table])) {
-                    alasql.tables[table].data = data[table];
-                }
-            }
-        } else {
-            // Seed default admin user and default instance
-            alasql(`INSERT INTO users VALUES ('1', null, 'Admin User', 'admin@ifastx.in', 'password123', 'admin', '[]', 'admin_api_key_2024', '${new Date().toISOString()}')`);
-            alasql(`INSERT INTO instances VALUES ('1', '1', 'Primary Instance', 'baileys', 'open', '+91 98765 43210', null, false, 'openai', null, null, null, null, null, null, '${new Date().toISOString()}')`);
-        }
-    } catch (e) {
-        console.error('[AlaSQL] Schema init error:', e.message);
-    }
-}
-
-function persistAlaSql() {
-    try {
-        const dump = {};
-        for (const table in alasql.tables) {
-            if (alasql.tables[table] && Array.isArray(alasql.tables[table].data)) {
-                dump[table] = alasql.tables[table].data;
-            }
-        }
-        fs.writeFileSync(dbFilePath, JSON.stringify(dump, null, 2), 'utf8');
-    } catch (e) {}
-}
-
-initAlaSqlSchema();
-setInterval(persistAlaSql, 5000);
-
-// Helper to execute AlaSQL queries with zero delay
-function runAlaSqlQuery(sqlText, params = []) {
-    if (!sqlText || typeof sqlText !== 'string') return { rows: [], rowCount: 0 };
-    
-    const trimmed = sqlText.trim().toUpperCase();
-    if (trimmed.startsWith('ALTER TABLE') || trimmed.startsWith('CREATE INDEX') || trimmed.startsWith('DROP INDEX') || trimmed.startsWith('ALTER COLUMN')) {
-        return { rows: [], rowCount: 0 };
-    }
-
-    let alaSql = sqlText
-        .replace(/\$([0-9]+)/g, '?')
-        .replace(/NOW\(\)/gi, 'CURRENT_TIMESTAMP')
-        .replace(/ILIKE/gi, 'LIKE')
-        .replace(/ON CONFLICT [^;]+/gi, '')
-        .replace(/RETURNING [^;]+/gi, '');
-
-    try {
-        const res = alasql(alaSql, params);
-        const rows = Array.isArray(res) ? res : [];
-        return { rows, rowCount: rows.length };
-    } catch (err) {
-        return { rows: [], rowCount: 0 };
-    }
-}
-
-// Intercept pool.query for instant zero-hang fallback
-const rawPoolQuery = pool.query.bind(pool);
-pool.query = async function (text, params, callback) {
-    if (typeof params === 'function') {
-        callback = params;
-        params = [];
-    }
-    params = params || [];
-
-    if (pgAvailable) {
-        try {
-            const res = await rawPoolQuery(text, params);
-            if (callback) callback(null, res);
-            return res;
-        } catch (err) {
-            if (err.code === 'ECONNREFUSED' || err.message.includes('ECONNREFUSED')) {
-                pgAvailable = false;
-                console.warn('[Database] PostgreSQL connection refused. Switched to instant 0ms local DB engine.');
-            } else if (callback) {
-                callback(err);
-                return;
-            } else {
-                throw err;
-            }
-        }
-    }
-
-    // High-performance 0.1ms AlaSQL response
-    const localRes = runAlaSqlQuery(text, params);
-    if (callback) callback(null, localRes);
-    return localRes;
-};
 
 pool.on('error', (err) => {
-    pgAvailable = false;
+    if (err.code !== 'ECONNREFUSED') {
+        console.error('[Database] Pool Error:', err.message);
+    }
 });
 
-// Immediate Connectivity Test
+// Immediate Connectivity & Permission Test
 pool.connect(async (err, client, release) => {
     if (err) {
-        pgAvailable = false;
-        console.log('[Database] Active Mode: High-Performance Zero-Latency Local Embedded Engine.');
+        if (err.code !== 'ECONNREFUSED') {
+            console.error('[Database] Connection Error:', err.message);
+        }
         return;
     }
     try {
-        pgAvailable = true;
         await client.query('SELECT 1 FROM instances LIMIT 1');
-        console.log('[Database] PostgreSQL Connection Verified.');
         console.log('[Database] Permission test passed: "instances" table is accessible.');
         
         // Create messages table if not exists
@@ -491,7 +379,6 @@ pool.connect(async (err, client, release) => {
         } catch(e) {}
 
     } catch (dbErr) {
-        pgAvailable = false;
         console.error('[Database] Permission test FAILED:', dbErr.message);
         console.error('[Database] ACTION REQUIRED: Run the GRANT commands in database.sql');
     } finally {
@@ -6479,30 +6366,25 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
             }
         }
 
-        const fastSocket = (promise, ms = 800) => Promise.race([
-            promise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Socket timeout')), ms))
-        ]);
-
         // Instruction: Step 4 - Profile Photo Resolution via Baileys Socket
-        // Logic: Queries WhatsApp servers for live HD contact profile photo URL with 800ms fast timeout
+        // Logic: Queries WhatsApp servers for live HD contact profile photo URL
         if (inst && inst.sock && inst.sock.profilePictureUrl) {
             try {
-                imgUrl = await fastSocket(inst.sock.profilePictureUrl(targetJid, 'image'), 800);
+                imgUrl = await inst.sock.profilePictureUrl(targetJid, 'image');
             } catch (ppErr) {
                 try {
-                    imgUrl = await fastSocket(inst.sock.profilePictureUrl(jid, 'image'), 800);
+                    imgUrl = await inst.sock.profilePictureUrl(jid, 'image');
                 } catch (e) {}
             }
         }
 
         // Instruction: Step 5 - WhatsApp User About / Status Resolution
-        // Logic: Fetches contact bio status text from WhatsApp socket with 800ms fast timeout and DB fallback
+        // Logic: Fetches contact bio status text from WhatsApp socket using phone JID (@s.whatsapp.net) and persists to DB
         if (!isGroup && inst && inst.sock && inst.sock.fetchStatus) {
             try {
                 const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
                 if (phoneJid) {
-                    const st = await fastSocket(inst.sock.fetchStatus(phoneJid), 800);
+                    const st = await inst.sock.fetchStatus(phoneJid);
                     if (st && st.status) {
                         aboutStatus = st.status;
                         await pool.query(
@@ -6525,12 +6407,12 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
         }
 
         // Instruction: Step 6 - WhatsApp Business Details Fetching
-        // Logic: Queries WhatsApp Business directory with 800ms fast timeout
+        // Logic: Queries WhatsApp Business directory for address, description, category, email, and websites
         if (!isGroup && inst && inst.sock && inst.sock.getBusinessProfile) {
             try {
                 const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
                 if (phoneJid) {
-                    const bProfile = await fastSocket(inst.sock.getBusinessProfile(phoneJid), 800);
+                    const bProfile = await inst.sock.getBusinessProfile(phoneJid);
                     if (bProfile && (bProfile.address || bProfile.description || bProfile.email || bProfile.website || bProfile.category)) {
                         businessProfile = {
                             address: bProfile.address || null,
@@ -6845,21 +6727,26 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
                 `${cleanNumber}@c.us`,
                 `${cleanNumber}:0@s.whatsapp.net`,
                 `${cleanNumber}:1@s.whatsapp.net`,
-                `${cleanNumber}:2@s.whatsapp.net`,
-                `${cleanNumber}:3@s.whatsapp.net`,
-                `${cleanNumber}@lid`,
-                `${cleanNumber}:0@lid`
+                `${cleanNumber}:2@s.whatsapp.net`
             );
         }
 
-        // Instruction: Fast Indexed B-Tree Messages Lookup
-        // Logic: Queries chat_messages using index idx_chat_messages_instance_remote_ts for sub-5ms instant response time on mobile and desktop
+        // Instruction: Fetch all conversation messages including both sent by user and received from contact
+        // Logic: Matches both full JID and device-colon variants so messages sent from WhatsApp phone always show
         const result = await pool.query(`
             SELECT * FROM chat_messages
-            WHERE instance_id = $1 AND remote_jid = ANY($2)
+            WHERE instance_id = $1 AND (
+                remote_jid = ANY($2)
+                OR (
+                    $3 != '' AND (
+                        split_part(split_part(remote_jid, '@', 1), ':', 1) = $3
+                        OR regexp_replace(split_part(remote_jid, '@', 1), '\\D', '', 'g') = $3
+                    )
+                )
+            )
             ORDER BY timestamp ASC
             LIMIT 500
-        `, [instanceId, candidateJids]);
+        `, [instanceId, candidateJids, cleanNumber || '']);
         
         // Fast cached template definitions for this instance to resolve template content without DB penalty
         if (!global._metaTplCache) global._metaTplCache = new Map();
