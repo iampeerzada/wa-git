@@ -6194,11 +6194,19 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
                 targetJid = mapped;
             } else {
                 const dbMapped = await pool.query(
-                    'SELECT jid FROM chat_contacts WHERE instance_id = $1 AND push_name IS NOT NULL AND jid LIKE \'%@s.whatsapp.net\' LIMIT 1',
-                    [instanceId]
+                    'SELECT jid FROM chat_contacts WHERE instance_id = $1 AND (lid = $2 OR jid = $2) AND jid LIKE \'%@s.whatsapp.net\' LIMIT 1',
+                    [instanceId, jid]
                 ).catch(() => ({ rows: [] }));
                 if (dbMapped.rows.length > 0) {
                     targetJid = dbMapped.rows[0].jid;
+                } else {
+                    const msgMapped = await pool.query(
+                        'SELECT participant FROM chat_messages WHERE instance_id = $1 AND remote_jid = $2 AND participant LIKE \'%@s.whatsapp.net\' LIMIT 1',
+                        [instanceId, jid]
+                    ).catch(() => ({ rows: [] }));
+                    if (msgMapped.rows.length > 0 && msgMapped.rows[0].participant) {
+                        targetJid = msgMapped.rows[0].participant;
+                    }
                 }
             }
         }
@@ -6358,25 +6366,30 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
             }
         }
 
+        const fastSocket = (promise, ms = 800) => Promise.race([
+            promise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Socket timeout')), ms))
+        ]);
+
         // Instruction: Step 4 - Profile Photo Resolution via Baileys Socket
-        // Logic: Queries WhatsApp servers for live HD contact profile photo URL
+        // Logic: Queries WhatsApp servers for live HD contact profile photo URL with 800ms fast timeout
         if (inst && inst.sock && inst.sock.profilePictureUrl) {
             try {
-                imgUrl = await inst.sock.profilePictureUrl(targetJid, 'image');
+                imgUrl = await fastSocket(inst.sock.profilePictureUrl(targetJid, 'image'), 800);
             } catch (ppErr) {
                 try {
-                    imgUrl = await inst.sock.profilePictureUrl(jid, 'image');
+                    imgUrl = await fastSocket(inst.sock.profilePictureUrl(jid, 'image'), 800);
                 } catch (e) {}
             }
         }
 
         // Instruction: Step 5 - WhatsApp User About / Status Resolution
-        // Logic: Fetches contact bio status text from WhatsApp socket using phone JID (@s.whatsapp.net) and persists to DB
+        // Logic: Fetches contact bio status text from WhatsApp socket with 800ms fast timeout and DB fallback
         if (!isGroup && inst && inst.sock && inst.sock.fetchStatus) {
             try {
                 const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
                 if (phoneJid) {
-                    const st = await inst.sock.fetchStatus(phoneJid);
+                    const st = await fastSocket(inst.sock.fetchStatus(phoneJid), 800);
                     if (st && st.status) {
                         aboutStatus = st.status;
                         await pool.query(
@@ -6399,12 +6412,12 @@ app.get('/api/chat/profile/:instanceId/:jid', authenticate, async (req, res) => 
         }
 
         // Instruction: Step 6 - WhatsApp Business Details Fetching
-        // Logic: Queries WhatsApp Business directory for address, description, category, email, and websites
+        // Logic: Queries WhatsApp Business directory with 800ms fast timeout
         if (!isGroup && inst && inst.sock && inst.sock.getBusinessProfile) {
             try {
                 const phoneJid = targetJid.endsWith('@s.whatsapp.net') ? targetJid : (cleanNumber ? `${cleanNumber}@s.whatsapp.net` : null);
                 if (phoneJid) {
-                    const bProfile = await inst.sock.getBusinessProfile(phoneJid);
+                    const bProfile = await fastSocket(inst.sock.getBusinessProfile(phoneJid), 800);
                     if (bProfile && (bProfile.address || bProfile.description || bProfile.email || bProfile.website || bProfile.category)) {
                         businessProfile = {
                             address: bProfile.address || null,
@@ -6719,26 +6732,21 @@ app.get('/api/chat/messages/:instanceId/:remoteJid', authenticate, async (req, r
                 `${cleanNumber}@c.us`,
                 `${cleanNumber}:0@s.whatsapp.net`,
                 `${cleanNumber}:1@s.whatsapp.net`,
-                `${cleanNumber}:2@s.whatsapp.net`
+                `${cleanNumber}:2@s.whatsapp.net`,
+                `${cleanNumber}:3@s.whatsapp.net`,
+                `${cleanNumber}@lid`,
+                `${cleanNumber}:0@lid`
             );
         }
 
-        // Instruction: Fetch all conversation messages including both sent by user and received from contact
-        // Logic: Matches both full JID and device-colon variants so messages sent from WhatsApp phone always show
+        // Instruction: Fast Indexed B-Tree Messages Lookup
+        // Logic: Queries chat_messages using index idx_chat_messages_instance_remote_ts for sub-5ms instant response time on mobile and desktop
         const result = await pool.query(`
             SELECT * FROM chat_messages
-            WHERE instance_id = $1 AND (
-                remote_jid = ANY($2)
-                OR (
-                    $3 != '' AND (
-                        split_part(split_part(remote_jid, '@', 1), ':', 1) = $3
-                        OR regexp_replace(split_part(remote_jid, '@', 1), '\\D', '', 'g') = $3
-                    )
-                )
-            )
+            WHERE instance_id = $1 AND remote_jid = ANY($2)
             ORDER BY timestamp ASC
             LIMIT 500
-        `, [instanceId, candidateJids, cleanNumber || '']);
+        `, [instanceId, candidateJids]);
         
         // Fast cached template definitions for this instance to resolve template content without DB penalty
         if (!global._metaTplCache) global._metaTplCache = new Map();

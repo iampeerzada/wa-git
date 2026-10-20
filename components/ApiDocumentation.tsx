@@ -132,7 +132,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
             Welcome to the <span className="text-white font-bold">iFastX WA Gateway</span> API reference. 
             Our REST API allows you to programmatically manage WhatsApp instances, send messages, and monitor delivery status.
           </p>
-          <div className="bg-[#202c33] border-l-4 border-[#25D366] p-4 rounded-r-xl">
+          <div className="bg-[#000000] border-l-4 border-[#25D366] p-4 rounded-r-xl" style={{ backgroundColor: '#000000' }}>
             <h4 className="text-xs font-black text-[#25D366] uppercase mb-1">Production Base URL</h4>
             <code className="text-sm font-mono text-white select-all">{apiBase}</code>
           </div>
@@ -149,7 +149,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
             All API requests must include your private API Key. You can use either the <span className="text-white font-bold">Headers</span> method (recommended) or <span className="text-white font-bold">Query Parameters</span>.
           </p>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            <div className="p-5 bg-[#202c33] rounded-2xl border border-gray-700 relative group transition-all hover:border-[#25D366]/30">
+            <div className="p-5 bg-[#000000] rounded-2xl border border-gray-700 relative group transition-all hover:border-[#25D366]/30" style={{ backgroundColor: '#000000' }}>
               <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-3">Header Authentication</h4>
               <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-gray-800">
                 <code className="text-[#25D366] text-[11px] font-mono truncate">X-API-Key: {currentUser.apiKey}</code>
@@ -158,7 +158,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
                 </button>
               </div>
             </div>
-            <div className="p-5 bg-[#202c33] rounded-2xl border border-gray-700 relative group transition-all hover:border-blue-400/30">
+            <div className="p-5 bg-[#000000] rounded-2xl border border-gray-700 relative group transition-all hover:border-blue-400/30" style={{ backgroundColor: '#000000' }}>
               <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-3">Query Param Authentication</h4>
               <div className="flex items-center justify-between gap-3 bg-black/30 p-3 rounded-xl border border-gray-800">
                 <code className="text-blue-400 text-[11px] font-mono truncate">?access_token={currentUser.apiKey}</code>
@@ -297,7 +297,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
             Configure your callback URL to receive real-time updates for incoming messages, delivery reports, and instance status changes.
           </p>
           <div className="space-y-4">
-            <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl">
+            <div className="p-5 bg-[#000000] border border-gray-700 rounded-2xl" style={{ backgroundColor: '#000000' }}>
               <h4 className="text-xs font-black text-white uppercase mb-4 flex items-center gap-2">
                 <Smartphone size={14} className="text-[#25D366]" />
                 Inbound Message Payload
@@ -338,7 +338,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
           </div>
 
           {/* Parameter Mapping Guide */}
-          <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl space-y-3">
+          <div className="p-5 bg-[#000000] border border-gray-700 rounded-2xl space-y-3" style={{ backgroundColor: '#000000' }}>
             <h4 className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-2">
               <Zap size={14} className="text-pink-400" />
               CRM & Third-Party Parameter Compatibility Matrix
@@ -397,7 +397,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
           />
 
           {/* Webhook */}
-          <div className="p-5 bg-[#202c33] border border-gray-700 rounded-2xl">
+          <div className="p-5 bg-[#000000] border border-gray-700 rounded-2xl" style={{ backgroundColor: '#000000' }}>
             <h4 className="text-xs font-black text-white uppercase mb-4 flex items-center gap-2">
               <Globe size={14} className="text-pink-400" />
               Meta App Webhook Callback URL
@@ -423,7 +423,7 @@ Verify Token: \`ifastx_meta_verify_2024\`
   return (
     <div className="max-w-7xl mx-auto pb-20 animate-in fade-in duration-500">
       {/* Dynamic Context Header */}
-      <div className="relative lg:sticky lg:top-0 z-40 lg:z-50 bg-[#0b141a]/95 backdrop-blur-xl border-b border-gray-800 pb-6 mb-10 pt-4 -mx-4 px-4 rounded-b-3xl lg:rounded-none shadow-2xl lg:shadow-none">
+      <div className="relative lg:sticky lg:top-0 z-40 lg:z-50 bg-[#000000] backdrop-blur-xl border-b border-gray-800 pb-6 mb-10 pt-4 -mx-4 px-4 pl-4 rounded-b-3xl lg:rounded-none shadow-2xl lg:shadow-none" style={{ backgroundColor: '#000000', paddingLeft: '16px' }}>
         <div className="flex flex-col lg:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 bg-[#25D366]/10 rounded-2xl flex items-center justify-center text-[#25D366] border border-[#25D366]/20">
@@ -488,10 +488,11 @@ Verify Token: \`ifastx_meta_verify_2024\`
             <a 
               key={s.id} 
               href={`#${s.id}`}
-              className="flex items-center justify-between px-4 py-3.5 rounded-2xl text-sm font-bold text-gray-400 hover:text-white hover:bg-[#111b21] hover:border hover:border-gray-800 transition-all group"
+              className="flex items-center justify-between px-4 py-3.5 rounded-2xl text-sm font-bold text-white bg-[#000000] border border-gray-800 transition-all group"
+              style={{ backgroundColor: '#000000' }}
             >
-              <div className="flex items-center gap-4">
-                <span className="opacity-60 group-hover:opacity-100 group-hover:scale-110 transition-transform">{s.icon}</span>
+              <div className="flex items-center gap-4 text-white" style={{ color: '#ffffff' }}>
+                <span className="opacity-80 group-hover:opacity-100 group-hover:scale-110 transition-transform">{s.icon}</span>
                 {s.title}
               </div>
               <ChevronRight size={14} className="opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 transition-all text-[#25D366]" />
@@ -510,13 +511,13 @@ Verify Token: \`ifastx_meta_verify_2024\`
           {filteredSections.map(section => (
             <div key={section.id} id={section.id} className="scroll-mt-40 space-y-8">
               <div className="flex items-center gap-4">
-                <div className="p-3 bg-[#111b21] rounded-2xl border border-gray-800 text-white shadow-lg">
+                <div className="p-3 bg-[#000000] rounded-2xl border border-gray-800 text-white shadow-lg" style={{ backgroundColor: '#000000' }}>
                   {section.icon}
                 </div>
-                <h2 className="text-3xl font-black text-white tracking-tight">{section.title}</h2>
+                <h2 className="text-3xl font-black tracking-tight" style={{ color: '#000000' }}>{section.title}</h2>
               </div>
               
-              <div className="bg-[#111b21]/50 backdrop-blur-sm rounded-3xl border border-gray-800 p-8 shadow-2xl relative overflow-hidden group">
+              <div className="bg-[#000000] backdrop-blur-sm rounded-3xl border border-gray-800 p-8 shadow-2xl relative overflow-hidden group" style={{ backgroundColor: '#000000' }}>
                 <div className="absolute top-0 right-0 p-12 opacity-[0.02] pointer-events-none group-hover:opacity-[0.04] transition-opacity">
                   {section.icon}
                 </div>

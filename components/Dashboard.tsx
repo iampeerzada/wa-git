@@ -87,7 +87,8 @@ const Dashboard: React.FC<DashboardProps> = ({
   return (
     <div className="space-y-4 sm:space-y-6">
       {canManage && onCreateInstance && (
-        <div className="flex items-center justify-between bg-[#111b21] p-3 sm:p-4 rounded-xl border border-gray-800 shadow-md">
+        /* Instruction: Dashboard Top Instance Header with custom #040404 background styling */
+        <div style={{ backgroundColor: '#040404' }} className="flex items-center justify-between bg-[#111b21] p-3 sm:p-4 rounded-xl border border-gray-800 shadow-md">
           <div className="min-w-0 pr-2">
             <h3 className="text-xs sm:text-sm md:text-base font-bold text-white flex items-center gap-2 truncate">
               <Smartphone size={16} className="text-[#25D366] shrink-0" />
@@ -105,7 +106,8 @@ const Dashboard: React.FC<DashboardProps> = ({
       )}
 
       {isMockMode && (
-        <div className="bg-blue-500/5 border border-blue-500/20 p-5 rounded-2xl flex gap-5 items-center">
+        /* Instruction: Gateway Simulation Banner with custom #000000 background styling */
+        <div style={{ backgroundColor: '#000000' }} className="bg-blue-500/5 border border-blue-500/20 p-5 rounded-2xl flex gap-5 items-center">
           <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center text-blue-400 shrink-0">
             <Zap size={24} />
           </div>
@@ -119,12 +121,12 @@ const Dashboard: React.FC<DashboardProps> = ({
         </div>
       )}
 
-      
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      {/* Instruction: Instances Grid with custom #000000 background styling */}
+      <div style={{ backgroundColor: '#000000' }} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-2 rounded-xl">
         {instances.map((instance) => (
           <div 
             key={instance.id} 
+            style={{ backgroundColor: '#000000' }}
             className={`bg-[#111b21] rounded-2xl border ${instance.status === InstanceStatus.SUSPENDED ? 'border-red-500/30 grayscale opacity-60' : 'border-gray-800'} overflow-hidden flex flex-col shadow-2xl transition-all hover:border-gray-600 group relative ${instance.isVisible === false && isSuper ? 'opacity-50' : ''}`}
           >
             {instance.status === InstanceStatus.SUSPENDED && (

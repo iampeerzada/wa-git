@@ -101,13 +101,15 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <aside className="w-64 h-full bg-[#111b21] border-r border-[#202c33] flex flex-col font-sans select-none">
-      {/* Logic: Top Header Brand Section displaying theme-harmonized iFastX logo and partner badge */}
-      <div className="p-4 pb-3.5 flex items-center pr-2 border-b border-[#202c33] bg-[#111b21]">
+      {/* Instruction: Top Header Brand Section with custom #010101 background styling */}
+      {/* Logic: Renders brand logo with custom background color specified in Focus Mode CSS */}
+      <div style={{ backgroundColor: '#010101' }} className="p-4 pb-3.5 flex items-center pr-2 border-b border-[#202c33] bg-[#111b21]">
         <BrandLogo size="sm" className="origin-left" isMeta={isMeta} />
       </div>
 
-      {/* Logic: Scrollable navigation container styled with dark WhatsApp palette */}
-      <nav className="flex-1 px-3 py-3 space-y-4 overflow-y-auto bg-[#111b21] custom-scrollbar">
+      {/* Instruction: Scrollable navigation container with custom #000000 background styling */}
+      {/* Logic: Navigational drawer with custom background styling specified in Focus Mode CSS */}
+      <nav style={{ backgroundColor: '#000000' }} className="flex-1 px-3 py-3 space-y-4 overflow-y-auto bg-[#111b21] custom-scrollbar">
         {menuCategories.map((category, idx) => {
           const visibleItems = category.items.filter(filterItem);
           if (visibleItems.length === 0) return null;
@@ -161,14 +163,16 @@ const Sidebar: React.FC<SidebarProps> = ({
         })}
       </nav>
 
-      {/* Logic: Bottom Footer Section containing Logout action button */}
-      <div className="p-3 border-t border-[#202c33] bg-[#111b21]">
+      {/* Instruction: Bottom Footer Section with custom #000000 background and #540101 logout button styling */}
+      {/* Logic: Custom logout button background (#540101) and text color (#fcfcfc) specified in Focus Mode CSS */}
+      <div style={{ backgroundColor: '#000000' }} className="p-3 border-t border-[#202c33] bg-[#111b21]">
         <button 
           onClick={onLogout}
+          style={{ backgroundColor: '#540101' }}
           className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium text-red-400/90 hover:text-red-300 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 transition-all cursor-pointer"
         >
           <LogOut size={16} className="shrink-0" />
-          <span>Logout</span>
+          <span style={{ color: '#fcfcfc' }}>Logout</span>
         </button>
       </div>
     </aside>

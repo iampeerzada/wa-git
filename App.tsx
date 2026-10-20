@@ -858,8 +858,9 @@ const App: React.FC = () => {
       </div>
       
       <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
-        {/* Logic: App Top Navigation Bar matching WhatsApp dark theme (#111b21) */}
-        <header className="h-14 sm:h-16 shrink-0 border-b border-gray-800 flex items-center justify-between px-2.5 sm:px-4 lg:px-8 bg-[#111b21] gap-1.5 sm:gap-4">
+        {/* Instruction: App Top Navigation Bar with custom #000000 background styling */}
+        {/* Logic: Applies background color specified in Focus Mode CSS metadata */}
+        <header style={{ backgroundColor: '#000000' }} className={`h-14 sm:h-16 shrink-0 border-b border-gray-800 flex items-center justify-between px-2.5 sm:px-4 lg:px-8 bg-[#111b21] gap-1.5 sm:gap-4 ${activeTab === 'chat' ? '[.mobile-chat-active_&]:hidden md:[.mobile-chat-active_&]:flex' : ''}`}>
           <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
             <button 
               className="lg:hidden p-1 text-gray-400 hover:text-white shrink-0"
@@ -958,7 +959,9 @@ const App: React.FC = () => {
           </div>
         </header>
 
-        <div style={{ backgroundColor: '#ffffff' }} className={`flex-1 min-h-0 bg-white ${activeTab === 'chat' ? 'p-0 overflow-hidden' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain'}`}>
+        {/* Instruction: Main Content Container - Dark background for chat tab to eliminate white side gap borders */}
+        {/* Logic: Uses dark #0b141a background when chat tab is active so chatbox fits 100% horizontally without white gaps */}
+        <div style={{ backgroundColor: activeTab === 'chat' ? '#0b141a' : '#ffffff' }} className={`flex-1 min-h-0 w-full ${activeTab === 'chat' ? 'p-0 overflow-hidden bg-[#0b141a]' : 'p-4 md:p-8 overflow-y-auto overscroll-y-contain bg-white'}`}>
           {activeTab === 'profile' && (
             <ProfileView 
               currentUser={currentUser} 

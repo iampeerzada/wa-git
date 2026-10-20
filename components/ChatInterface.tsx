@@ -617,18 +617,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             }
             
             const isOnline = data.status === 'available' || data.status === 'composing' || data.status === 'recording';
-            setPresenceStatus(prev => ({ ...prev, [data.remoteJid]: isOnline ? 'online' : 'offline' }));
+            setPresenceStatus(prev => ({ 
+              ...prev, 
+              [data.remoteJid]: isOnline ? 'online' : 'offline',
+              ...(data.userJid ? { [data.userJid]: isOnline ? 'online' : 'offline' } : {})
+            }));
             
-            setProfileCache(prev => ({
+            setProfileCache(prev => {
+              const updated = {
                 ...prev,
                 [data.remoteJid]: {
-                    ...prev[data.remoteJid],
-                    presence: {
-                        status: isOnline ? 'online' : 'offline',
-                        lastSeen: data.lastSeen || Date.now()
-                    }
+                  ...prev[data.remoteJid],
+                  presence: {
+                    status: isOnline ? 'online' : 'offline',
+                    lastSeen: data.lastSeen || Date.now()
+                  }
                 }
-            }));
+              };
+              if (data.userJid) {
+                updated[data.userJid] = {
+                  ...updated[data.userJid],
+                  presence: {
+                    status: isOnline ? 'online' : 'offline',
+                    lastSeen: data.lastSeen || Date.now()
+                  }
+                };
+              }
+              return updated;
+            });
         }
     });
 
@@ -780,6 +796,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     }
   }, [selectedInstanceId]);
 
+  // Instruction: Mobile View Fullscreen Chat Toggle
+  // Logic: Adds 'mobile-chat-active' class to document.body when an active chat is open on mobile to auto-hide top app header and expand chat area to full screen
+  useEffect(() => {
+    if (selectedSession) {
+      document.body.classList.add('mobile-chat-active');
+    } else {
+      document.body.classList.remove('mobile-chat-active');
+    }
+    return () => {
+      document.body.classList.remove('mobile-chat-active');
+    };
+  }, [selectedSession]);
+
   // Instruction: Profile Drawer State for WhatsApp contact / group profile inspector
   const [showProfileDrawer, setShowProfileDrawer] = useState<boolean>(false);
   const [copiedDetailText, setCopiedDetailText] = useState<string | null>(null);
@@ -797,7 +826,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   }>>({});
 
   // Instruction: Dynamic contact/group profile metadata fetcher
-  // Logic: Fetches verified group subjects, contact names, profile photos, and status on demand and caches them
+  // Logic: Fetches verified group subjects, contact names, profile photos, and status on demand and caches them across jid, realJid, and phone number JIDs
   const fetchProfileInfo = async (jid: string, targetInstId?: string, forceRefresh = false) => {
       const instId = targetInstId || activeInstanceRef.current || selectedInstanceId;
       if (!instId || !jid) return;
@@ -813,9 +842,21 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
           if (res.ok) {
               const data = await res.json();
               if (data) {
-                setProfileCache(prev => ({ ...prev, [jid]: { ...prev[jid], ...data } }));
+                setProfileCache(prev => {
+                  const updated = { ...prev, [jid]: { ...prev[jid], ...data } };
+                  if (data.realJid && data.realJid !== jid) {
+                    updated[data.realJid] = { ...updated[data.realJid], ...data };
+                  }
+                  if (data.phoneNumber) {
+                    const clean = data.phoneNumber.replace(/\D/g, '');
+                    if (clean) {
+                      updated[`${clean}@s.whatsapp.net`] = { ...updated[`${clean}@s.whatsapp.net`], ...data };
+                    }
+                  }
+                  return updated;
+                });
                 if (data.name) {
-                  setSessions(prev => prev.map(s => (s.remoteJid === jid && !s.contactName) ? { ...s, contactName: data.name } : s));
+                  setSessions(prev => prev.map(s => (s.remoteJid === jid || s.remoteJid === data.realJid) ? { ...s, contactName: data.name } : s));
                 }
               }
           }
@@ -832,36 +873,36 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
     const isGroup = remoteJid.endsWith('@g.us');
     const isBroadcast = remoteJid.includes('@broadcast');
 
-    let cleanDigits = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+    let rawDigits = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
     let realJid = cachedItem?.realJid || remoteJid;
 
     if (cachedItem?.phoneNumber) {
       const pDigits = cachedItem.phoneNumber.replace(/\D/g, '');
-      if (pDigits && pDigits.length <= 13) cleanDigits = pDigits;
+      if (pDigits && pDigits.length <= 13 && pDigits.length >= 7) rawDigits = pDigits;
     } else if (realJid && !realJid.endsWith('@lid')) {
       const rDigits = realJid.split('@')[0].split(':')[0].replace(/\D/g, '');
-      if (rDigits && rDigits.length <= 13) cleanDigits = rDigits;
+      if (rDigits && rDigits.length <= 13 && rDigits.length >= 7) rawDigits = rDigits;
     }
 
-    const isLid = remoteJid.endsWith('@lid') || (cleanDigits.length > 13 && cleanDigits.startsWith('173'));
+    const isLid = remoteJid.endsWith('@lid') || (rawDigits.length > 13 && rawDigits.startsWith('173'));
 
     let formattedNumber = '';
     if (cachedItem?.phoneNumber) {
       formattedNumber = cachedItem.phoneNumber;
-    } else if (!isLid && cleanDigits) {
-      if (cleanDigits.length === 10) {
-        formattedNumber = `+91 ${cleanDigits.slice(0, 5)} ${cleanDigits.slice(5)}`;
-      } else if (cleanDigits.length === 12 && cleanDigits.startsWith('91')) {
-        formattedNumber = `+91 ${cleanDigits.slice(2, 7)} ${cleanDigits.slice(7)}`;
-      } else if (cleanDigits.length >= 7 && cleanDigits.length <= 13) {
-        formattedNumber = `+${cleanDigits}`;
+    } else if (!isLid && rawDigits) {
+      if (rawDigits.length === 12 && rawDigits.startsWith('91')) {
+        formattedNumber = `+91 ${rawDigits.slice(2, 7)} ${rawDigits.slice(7)}`;
+      } else if (rawDigits.length === 10 && rawDigits.startsWith('9')) {
+        formattedNumber = `+91 ${rawDigits.slice(0, 5)} ${rawDigits.slice(5)}`;
+      } else if (rawDigits.length >= 7 && rawDigits.length <= 13) {
+        formattedNumber = `+${rawDigits}`;
       }
     }
 
     const resolvedName = (contactName || cachedItem?.name || cachedItem?.groupName || cachedItem?.pushName || '').trim();
 
     if (isGroup) {
-      const groupTitle = resolvedName || `Group (${cleanDigits.slice(-6) || 'Chat'})`;
+      const groupTitle = resolvedName || `Group (${rawDigits.slice(-6) || 'Chat'})`;
       return {
         name: groupTitle,
         number: cachedItem?.participantsCount ? `${cachedItem.participantsCount} Members` : 'Group Chat',
@@ -879,7 +920,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
       };
     }
 
-    const displayJid = realJid && realJid.endsWith('@s.whatsapp.net') ? realJid : (remoteJid.includes('@') ? remoteJid : `${remoteJid}@s.whatsapp.net`);
+    const displayJid = realJid && realJid.endsWith('@s.whatsapp.net') 
+      ? realJid 
+      : (!isLid && rawDigits ? `${rawDigits}@s.whatsapp.net` : (remoteJid.includes('@') ? remoteJid : `${remoteJid}@s.whatsapp.net`));
+
     const finalName = resolvedName ? resolvedName : (formattedNumber || (isLid ? 'WhatsApp Contact' : displayJid.split('@')[0]));
 
     return {
@@ -1456,12 +1500,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
   };
 
   return (
-    <div className="flex h-full bg-[#0b141a] overflow-hidden border-t border-gray-800">
+    <div className="flex h-full w-full bg-[#0b141a] overflow-hidden border-t border-gray-800/80 m-0 p-0">
       {/* Sidebar: Chat conversations list and control filters panel */}
-      <div className={`w-full md:w-[380px] border-r border-gray-800 flex-col bg-[#111b21] ${selectedSession ? "hidden md:flex" : "flex"}`}>
+      <div className={`w-full md:w-[380px] shrink-0 border-r border-gray-800/80 flex-col bg-[#111b21] m-0 p-0 ${selectedSession ? "hidden md:flex" : "flex"}`}>
         
         {/* Top Control Bar: Active WhatsApp instance selection and quick label manager toggle */}
-        <div className="p-3.5 border-b border-gray-800 space-y-2.5 bg-[#111b21]">
+        <div className="p-3.5 border-b border-gray-800 space-y-2.5 bg-[#000000]">
           {/* Logic: Select active WhatsApp session instance or manage contact tags */}
           <div className="flex items-center gap-2">
             {/* Logic: Choose which WhatsApp phone number instance to view messages for */}
@@ -1546,7 +1590,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         </div>
 
         {/* Search & Notification Bar: Quick keyword lookup and incoming sound chime */}
-        <div className="px-3.5 py-2.5 flex items-center gap-2 bg-[#111b21] border-b border-gray-800/40">
+        <div className="px-3.5 py-2.5 flex items-center gap-2 bg-[#000000] border-b border-gray-800/40">
           {/* Logic: Search by customer name, phone digits, or message text */}
           <div className="relative flex-1">
             <Search className="absolute left-3 top-2.5 text-gray-400" size={15} />
@@ -1587,7 +1631,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         </div>
 
         {/* Quick Filter Pills: Organized chat categories for easy and instant navigation */}
-        <div className="px-3.5 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar bg-[#111b21] border-b border-gray-800/40">
+        <div className="px-3.5 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar bg-[#000000] border-b border-gray-800/40">
           {/* Logic: View all conversations without filters */}
           <button
             onClick={() => setChatFilter('all')}
@@ -1661,7 +1705,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
         {/* Interactive Tag Chips Row: Display label categories and filter by clicking tags */}
         {labels.length > 0 && (
-          <div className="flex items-center gap-1.5 px-3.5 py-2 overflow-x-auto no-scrollbar border-b border-gray-800/40 bg-[#111b21]">
+          <div className="flex items-center gap-1.5 px-3.5 py-2 overflow-x-auto no-scrollbar border-b border-gray-800/40 bg-[#000000]">
             <span className="text-[10px] uppercase font-bold text-gray-400 shrink-0 flex items-center gap-1">
               <Tag size={10} /> Tags:
             </span>
@@ -1717,7 +1761,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                   key={session.remoteJid}
                   onClick={() => handleSelectSession(session)}
                   className={`w-full flex items-center gap-3 p-3 cursor-pointer transition-colors border-b border-gray-800/50 group/item ${
-                    isSelected ? 'bg-[#2a3942] border-l-2 border-[#25D366]' : 'bg-[#111b21] hover:bg-[#202c33]'
+                    isSelected ? 'bg-[#2a3942] border-l-2 border-[#25D366]' : 'bg-[#000000] hover:bg-[#202c33]'
                   }`}
                 >
                   <div style={{ width: '38px', height: '38px' }} className="w-[38px] h-[38px] bg-gray-700 rounded-full flex items-center justify-center text-gray-300 shrink-0 overflow-hidden relative shadow-sm">
@@ -1827,13 +1871,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
         </div>
       </div>
 
-      {/* Chat Area */}
-      <div className={`flex-1 min-w-0 flex flex-col h-full max-h-full overflow-hidden bg-[#0b141a] relative ${!selectedSession ? "hidden md:flex" : "flex"}`}>
+      {/* Instruction: Chat Area Container - Fits screen 100% horizontally and vertically with zero unwanted side gaps */}
+      {/* Logic: Expands to full available width and height in both mobile and desktop viewports, removing horizontal margins/gaps */}
+      <div className={`flex-1 min-w-0 w-full flex flex-col h-full max-h-full overflow-hidden bg-[#0b141a] relative m-0 p-0 ${!selectedSession ? "hidden md:flex" : "fixed inset-0 z-40 md:relative md:inset-auto md:z-auto flex h-full max-h-full w-full"}`}>
 
         {selectedSession ? (
           <>
-            {/* Header */}
-            <div className="h-16 min-h-[64px] shrink-0 bg-[#202c33] flex items-center justify-between px-3 md:px-4 border-b border-gray-800 gap-2 z-10">
+            {/* Instruction: Active Chat Header - Spans 100% width with flush borders */}
+            {/* Logic: Renders header with full width and matching #000000 background */}
+            <div className="h-16 min-h-[64px] w-full shrink-0 bg-[#000000] flex items-center justify-between px-3.5 md:px-5 border-b border-gray-800/80 gap-2 z-10 m-0">
               <div 
                 onClick={() => {
                   fetchProfileInfo(selectedSession.remoteJid, selectedInstanceId, true);
@@ -1856,32 +1902,50 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                 {/* Instruction: Render active contact/group name, phone number, and JID ID */}
                 {/* Logic: Accurately displays contact name, formatted phone number (+91 98765 43210), and raw JID ID */}
                 <div className="min-w-0 text-left">
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2 truncate group-hover/header:text-[#25D366] transition-colors">
-                    <span className="truncate font-bold text-white">
-                      {getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]).name}
-                    </span>
-                    {selectedSession.labels && selectedSession.labels.length > 0 && (
-                        <div className="flex -space-x-1 shrink-0">
-                            {selectedSession.labels.map(l => (
-                                <div key={l.id} className="w-2 h-2 rounded-full ring-1 ring-[#202c33]" style={{ backgroundColor: l.color }} title={l.name} />
-                            ))}
+                  {(() => {
+                    const headerDetails = getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]);
+                    const headerCached = profileCache[selectedSession.remoteJid] || (headerDetails.id ? profileCache[headerDetails.id] : null);
+                    const headerOnline = presenceStatus[selectedSession.remoteJid] === 'online' || (headerDetails.id && presenceStatus[headerDetails.id] === 'online') || headerCached?.presence?.status === 'online';
+                    return (
+                      <>
+                        <h3 className="text-sm font-bold text-white flex items-center gap-2 truncate group-hover/header:text-[#25D366] transition-colors">
+                          <span className="truncate font-bold text-white">
+                            {headerDetails.name}
+                          </span>
+                          {selectedSession.labels && selectedSession.labels.length > 0 && (
+                              <div className="flex -space-x-1 shrink-0">
+                                  {selectedSession.labels.map(l => (
+                                      <div key={l.id} className="w-2 h-2 rounded-full ring-1 ring-[#202c33]" style={{ backgroundColor: l.color }} title={l.name} />
+                                  ))}
+                              </div>
+                          )}
+                        </h3>
+                        <div className="flex items-center gap-2 text-[11px] text-gray-300">
+                          {headerDetails.number && (
+                            <>
+                              <span className="font-semibold text-emerald-400">
+                                {headerDetails.number}
+                              </span>
+                              <span className="text-gray-500">•</span>
+                            </>
+                          )}
+                          <span className="font-mono text-gray-400 text-[10px] bg-gray-800/80 px-1 py-0.2 rounded truncate max-w-[140px]" title={headerDetails.id}>
+                            {headerDetails.id}
+                          </span>
+                          {typingStatus[selectedSession.remoteJid] || (headerDetails.id && typingStatus[headerDetails.id]) ? (
+                            <span className="text-emerald-400 font-medium">typing...</span>
+                          ) : headerOnline ? (
+                            <span className="text-emerald-400 flex items-center gap-1 font-bold">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                              online
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">offline</span>
+                          )}
                         </div>
-                    )}
-                  </h3>
-                  <div className="flex items-center gap-2 text-[11px] text-gray-300">
-                    <span className="font-semibold text-emerald-400">
-                      {getContactDisplayDetails(selectedSession.remoteJid, selectedSession.contactName, profileCache[selectedSession.remoteJid]).number}
-                    </span>
-                    <span className="text-gray-500">•</span>
-                    <span className="font-mono text-gray-400 text-[10px] bg-gray-800/80 px-1 py-0.2 rounded truncate max-w-[140px]" title={selectedSession.remoteJid}>
-                      {selectedSession.remoteJid}
-                    </span>
-                    {typingStatus[selectedSession.remoteJid] ? (
-                      <span className="text-emerald-400 font-medium">typing...</span>
-                    ) : presenceStatus[selectedSession.remoteJid] === 'online' ? (
-                      <span className="text-emerald-400">online</span>
-                    ) : null}
-                  </div>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -1890,16 +1954,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
 
               {/* Quick Action Buttons */}
               <div className="flex items-center gap-1.5 md:gap-2 text-gray-400 shrink-0">
-                {/* AI Auto-Reply Bot Indicator & Config */}
+                {/* Instruction: Hide header action buttons in active user chat */}
+                {/* Logic: Hides AI Bot and Template header buttons as requested for a cleaner native WhatsApp Web header layout */}
                 {instances.find(i => i.id === selectedInstanceId) && (
                   <button
                     type="button"
                     onClick={() => setShowChatAiModal(true)}
-                    className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                      instances.find(i => i.id === selectedInstanceId)?.aiEnabled
-                        ? 'bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 shadow-sm'
-                        : 'bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-purple-300'
-                    }`}
+                    className="hidden"
                     title={instances.find(i => i.id === selectedInstanceId)?.aiEnabled ? `AI Auto-Reply Bot is Active (${instances.find(i => i.id === selectedInstanceId)?.aiProvider === 'openai' ? 'ChatGPT' : 'Gemini'}) - Click to configure` : "Configure AI Auto-Reply Bot"}
                   >
                     {instances.find(i => i.id === selectedInstanceId)?.aiEnabled ? (
@@ -1918,7 +1979,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     fetchTemplatesForInstance();
                     setShowTemplates(prev => !prev);
                   }}
-                  className="hidden sm:flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
+                  className="hidden"
                   title={isMetaInstance ? "Send official Meta Template" : "Send Baileys Quick Template"}
                 >
                   <LayoutTemplate size={13} className={isMetaInstance ? "text-[#25D366]" : "text-amber-400"} />
@@ -1988,7 +2049,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             {/* Messages */}
             <div 
               style={{ backgroundSize: '400px' }}
-              className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 bg-[#0b141a] bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70fcded21.png')] bg-repeat"
+              className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 bg-[#ffffff]"
             >
               <div className="flex flex-col space-y-3">
                 {Object.entries(groupedMessages).map(([dateKey, msgsForDate]) => (
@@ -2433,7 +2494,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
             )}
 
             {/* Input Container */}
-            <div className="bg-[#202c33] border-t border-gray-800 p-3 flex items-center gap-2 md:gap-3 relative shrink-0 z-20">
+            <div className="bg-[#000000] border-t border-gray-800 p-3 flex items-center gap-2 md:gap-3 relative shrink-0 z-20">
               {/* Templates Modal - Renders as per active instance type */}
               {showTemplates && (
                   <div className="absolute bottom-16 left-12 z-50 bg-[#2a3942] rounded-xl shadow-2xl border border-gray-700 w-80 max-h-80 overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
@@ -2887,8 +2948,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                   />
                   
                   <form onSubmit={handleSendMessage} className="flex-1 flex items-center">
+                    {/* Instruction: Clean WhatsApp Web Style Message Input Textarea */}
+                    {/* Logic: Uses dark #2a3942 background with light #e9edef text matching native WhatsApp Web theme */}
                     <textarea
-                      placeholder="Type a message... (Shift+Enter for line breaks)"
+                      placeholder="Type a message..."
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
                       onKeyDown={(e) => {
@@ -2898,8 +2961,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                         }
                       }}
                       rows={Math.min(5, Math.max(1, (newMessage.match(/\n/g) || []).length + 1))}
-                      style={{ backgroundColor: '#fbf4f4', color: '#000000' }}
-                      className="w-full bg-[#fbf4f4] text-gray-900 px-4 py-2 rounded-xl text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366] resize-none whitespace-pre-wrap leading-normal transition-all max-h-36 overflow-y-auto"
+                      className="w-full bg-[#ffffff] text-[#000000] px-4 py-2.5 rounded-xl text-sm outline-none placeholder-gray-500 focus:ring-1 focus:ring-[#25D366]/60 border border-gray-300 resize-none whitespace-pre-wrap leading-relaxed transition-all max-h-36 overflow-y-auto custom-scrollbar"
                     />
                   </form>
                   
@@ -2907,19 +2969,21 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ instances, currentUser, a
                     <button 
                       type="button"
                       onClick={startVoiceRecording}
-                      className="p-2 rounded-full text-gray-400 hover:text-[#25D366] hover:bg-gray-700/50 transition-colors"
+                      className="p-2 rounded-full bg-[#005db0] text-[#ffffff] hover:bg-[#004888] transition-colors"
+                      style={{ backgroundColor: '#005db0', color: '#ffffff' }}
                       title="Record Voice Message"
                     >
-                      <Mic size={20} />
+                      <Mic size={20} style={{ color: '#ffffff' }} />
                     </button>
                   ) : (
                     <button 
                       type="button"
                       onClick={handleSendMessage}
-                      className="p-2 rounded-full bg-[#25D366] text-[#0b141a] hover:bg-[#128c7e] transition-colors"
+                      className="p-2 rounded-full bg-[#005db0] text-[#ffffff] hover:bg-[#004888] transition-colors"
+                      style={{ backgroundColor: '#005db0', color: '#ffffff' }}
                       title="Send Message"
                     >
-                      <Send size={20} />
+                      <Send size={20} style={{ color: '#ffffff' }} />
                     </button>
                   )}
                 </>
